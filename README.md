@@ -2,7 +2,7 @@
 
 Status: current  
 Owner: Black 4 platform  
-Updated: 2026-11-10
+Updated: 2026-11-11
 
 Black 4 builds an outcome-getting machine. This repository is how that machine
 shows up in [Buzz](https://github.com/block/buzz-app). Buzz itself stays stock,
@@ -56,9 +56,12 @@ buzz://plugin-install?repository=joeyblack4%2Fblack4-buzz&ref=stable&path=plugin
 
 ## Updates
 
-Buzz checks installed Git plugins against the branch they were installed from
-and offers the update itself. `stable` is what people run; `main` is where work
-lands. Releasing is moving `stable` to a tested commit on `main`.
+Each plugin's manifest declares `"updates": { "defaultEnabled": true }`, so Buzz
+checks a plugin installed from this repository against the branch it was
+installed from (at startup, then hourly) and offers **Update and reload**. An
+update that asks for more computer access needs a review first. A plugin loaded
+from a folder gets no such check. `stable` is what people run; `main` is where
+work lands. Releasing is moving `stable` to a tested commit on `main`.
 
 A Mac managed for Black 4 can list the plugin in Buzz's
 `managed-plugins.json` so Settings shows it as recommended, pinned to an exact

@@ -29,24 +29,20 @@ decision. No customer data is stored here or in the plugin.
 
 ## Install
 
-Node 22.12 or newer and the Buzz desktop app are required.
+Node 22.12 or newer and the Buzz desktop app are required. On a Mac:
 
 ```sh
-git clone git@github.com:joeyblack4/black4-buzz.git
-cd black4-buzz
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/joeyblack4/black4-buzz/stable/install.sh | sh
 ```
 
 The script installs the sign-in bridge, then opens Buzz's own install review.
 Choose **Install plugin**, turn the plugin on, and finish the Black 4 sign-in
-in your browser. Each person signs in as themselves.
+in your browser. Each person signs in as themselves, and sees and does only
+what their Black 4 account allows.
 
-While this repository is private, run `./install.sh --private` instead. Buzz
-reads plugin repositories without your Git sign-in, so a private one needs
-read access on GitHub, a key for it in your SSH agent, and a Buzz access rule;
-the flag writes the rule and checks the key.
-
-To install by link only, once the bridge is in place:
+If you would rather read the script first, clone the repository and run
+`./install.sh`. Once the bridge is in place, this link alone opens the install
+review:
 
 ```
 buzz://plugin-install?repository=joeyblack4%2Fblack4-buzz&ref=stable&path=plugins%2Fblack4

@@ -7,7 +7,7 @@
 # Run it again any time; it only repairs the bridge.
 set -eu
 
-HERE="$(cd "$(dirname "$0")" && pwd)"
+HERE="$(cd "$(dirname "$0")" 2>/dev/null && pwd || pwd)"
 BRIDGE_HOME="${BLACK4_MCP_BRIDGE_HOME:-$HOME/.black4/mcp-bridge}"
 BIN="$HOME/.local/bin"
 REPOSITORY="${BLACK4_BUZZ_REPOSITORY:-joeyblack4/black4-buzz}"
@@ -25,37 +25,21 @@ fi
 mkdir -p "$BRIDGE_HOME" "$BIN"
 npm install --prefix "$BRIDGE_HOME" --save-exact --no-fund --no-audit mcp-remote@0.15.2 >/dev/null
 command -v node > "$BRIDGE_HOME/node-path"
-install -m 755 "$HERE/bridge/black4-mcp-bridge" "$BIN/black4-mcp-bridge"
+if [ -f "$HERE/bridge/black4-mcp-bridge" ]; then
+  install -m 755 "$HERE/bridge/black4-mcp-bridge" "$BIN/black4-mcp-bridge"
+else
+  # Run straight from the web, without a checkout: fetch the bridge it needs.
+  curl -fsSL "https://raw.githubusercontent.com/$REPOSITORY/$REF/bridge/black4-mcp-bridge" -o "$BIN/black4-mcp-bridge.tmp"
+  chmod 755 "$BIN/black4-mcp-bridge.tmp"
+  mv "$BIN/black4-mcp-bridge.tmp" "$BIN/black4-mcp-bridge"
+fi
 echo "Sign-in bridge installed at $BIN/black4-mcp-bridge"
 
-PRIVATE=0
 for arg in "$@"; do
   case "$arg" in
     --bridge-only) exit 0 ;;
-    --private) PRIVATE=1 ;;
   esac
 done
-
-# While the repository is private, Buzz reads it over SSH with a key from your
-# SSH agent: it never uses your Git sign-in, credential helpers or prompts.
-# --private writes the Buzz rule that says so, unless you already have rules.
-if [ "$PRIVATE" = 1 ]; then
-  OWNER="${REPOSITORY%%/*}"
-  DATA="${BUZZODZ_HOME:-$HOME/Library/Application Support/xyz.block.buzz.desktop}"
-  ACCESS="$DATA/repository-access.json"
-  if [ -e "$ACCESS" ]; then
-    echo "Kept your existing $ACCESS. It needs a github.com rule for /$OWNER/ with sshUser git."
-  else
-    mkdir -p "$DATA"
-    printf '{\n  "version": 1,\n  "rules": [\n    { "host": "github.com", "pathPrefix": "/%s/", "sshUser": "git" }\n  ]\n}\n' "$OWNER" > "$ACCESS.tmp"
-    mv "$ACCESS.tmp" "$ACCESS"
-    echo "Wrote $ACCESS so Buzz reads github.com/$OWNER over SSH."
-  fi
-  if ! ssh-add -l >/dev/null 2>&1; then
-    echo "Your SSH agent holds no key. Add the key GitHub knows (ssh-add --apple-use-keychain ~/.ssh/id_ed25519), then run this again." >&2
-    exit 1
-  fi
-fi
 
 LINK="buzz://plugin-install?repository=$(printf %s "$REPOSITORY" | sed 's|/|%2F|g')&ref=$REF&path=plugins%2Fblack4"
 echo "Opening Buzz to review and install the plugin:"

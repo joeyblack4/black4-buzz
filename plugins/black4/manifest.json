@@ -1,0 +1,15 @@
+{
+  "id": "ai.black4",
+  "name": "Black 4",
+  "apiVersion": 1,
+  "description": "Connects every Buzz agent to the Black 4 MCP (api.black4.ai/mcp): goals, context, metrics, skills and Reviews, signed in as you.",
+  "discovery": {
+    "category": "productivity",
+    "tags": ["black4", "mcp", "reviews", "business"]
+  },
+  "host": {
+    "processes": [
+      { "id": "bridge", "program": "black4-mcp-bridge" }
+    ]
+  }
+}

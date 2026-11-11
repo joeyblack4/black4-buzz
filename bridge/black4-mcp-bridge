@@ -1,0 +1,29 @@
+#!/bin/sh
+# Black 4 MCP bridge for the Buzz plugin.
+#
+# Buzz starts this as the plugin's declared process. It speaks MCP over
+# stdin/stdout and forwards to https://api.black4.ai/mcp through mcp-remote,
+# which owns the person's WorkOS sign-in (browser, loopback redirect) and
+# token refresh. Tokens stay in ~/.mcp-auth; nothing reaches the plugin.
+#
+# Install: ./install.sh in joeyblack4/black4-buzz. Arguments pass through to
+# mcp-remote after the URL, so the plugin can add flags.
+set -eu
+
+BRIDGE_HOME="${BLACK4_MCP_BRIDGE_HOME:-$HOME/.black4/mcp-bridge}"
+URL="${BLACK4_MCP_URL:-https://api.black4.ai/mcp?tools=core}"
+REMOTE="$BRIDGE_HOME/node_modules/mcp-remote/dist/proxy.js"
+
+# Buzz is a GUI app, so PATH may lack the node a shell has (nvm, Homebrew).
+# The installer records the absolute node it used.
+NODE="$(cat "$BRIDGE_HOME/node-path" 2>/dev/null || true)"
+if [ -z "$NODE" ] || [ ! -x "$NODE" ]; then
+  echo "black4-mcp-bridge: node not recorded; rerun install.sh from joeyblack4/black4-buzz" >&2
+  exit 127
+fi
+if [ ! -f "$REMOTE" ]; then
+  echo "black4-mcp-bridge: mcp-remote missing at $REMOTE; rerun the install" >&2
+  exit 127
+fi
+
+exec "$NODE" "$REMOTE" "$URL" "$@"

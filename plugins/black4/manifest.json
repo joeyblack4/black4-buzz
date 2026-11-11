@@ -7,6 +7,7 @@
     "category": "productivity",
     "tags": ["black4", "mcp", "reviews", "business"]
   },
+  "updates": { "defaultEnabled": true },
   "host": {
     "processes": [
       { "id": "bridge", "program": "black4-mcp-bridge" }

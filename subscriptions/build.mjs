@@ -22,6 +22,7 @@ for (const { provider, title, defaultModel, cli } of PROVIDERS) {
     name: title,
     apiVersion: 1,
     description: `${name} subscription agents with personal sign-in, models, reasoning effort, coding and Buzz tools. Runs on your computer.`,
+    updates: { defaultEnabled: true },
     host: {
       processes: [
         { id: provider, program: provider },

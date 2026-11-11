@@ -3,6 +3,9 @@
   "name": "Grok Sub Plugin",
   "apiVersion": 1,
   "description": "Grok subscription agents with personal sign-in, models, reasoning effort, coding and Buzz tools. Runs on your computer.",
+  "updates": {
+    "defaultEnabled": true
+  },
   "host": {
     "processes": [
       {

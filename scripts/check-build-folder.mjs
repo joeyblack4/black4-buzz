@@ -18,5 +18,9 @@ for (const plugin of readdirSync("plugins", { withFileTypes: true })) {
   if (manifest.apiVersion !== 1 || !/^[a-z][a-z0-9.-]*$/.test(manifest.id ?? "")) {
     console.error(`${dir}: manifest needs apiVersion 1 and a valid id`); failed = true;
   }
+  // Without this declaration Buzz never checks a Git-installed plugin for updates.
+  if (manifest.updates?.defaultEnabled !== true) {
+    console.error(`${dir}: manifest needs "updates": { "defaultEnabled": true }`); failed = true;
+  }
 }
 process.exit(failed ? 1 : 0);

@@ -114,8 +114,9 @@ for both. Reconnect and disable invalidate an older attempt and kill a process
 that finishes spawning after it was superseded. Completed and cancelled calls
 remove their abort listeners; write failures reject immediately.
 
-`resolve_channel_business` defaults to the calling agent's exact channel and
-community. A channel name never selects a business. The MCP enforces authority
+When the MCP lists `resolve_channel_business`, the plugin fills in the calling
+agent's exact channel and community. A channel name never selects a business,
+and nothing here prescribes how agents use channels. The MCP enforces authority
 under the signed-in person's account, as it does in every other harness.
 
 Agent results contain textual MCP content only. Private `_meta`, including

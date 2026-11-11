@@ -1,0 +1,25 @@
+{
+  "id": "black4.grok-subscription",
+  "name": "Grok Sub Plugin",
+  "apiVersion": 1,
+  "description": "Grok subscription agents with personal sign-in, models, reasoning effort, coding and Buzz tools. Runs on your computer.",
+  "host": {
+    "processes": [
+      {
+        "id": "grok",
+        "program": "grok"
+      },
+      {
+        "id": "install",
+        "program": "npm",
+        "args": [
+          "install",
+          "-g",
+          "@xai-official/grok"
+        ]
+      }
+    ],
+    "mcp": true,
+    "files": true
+  }
+}

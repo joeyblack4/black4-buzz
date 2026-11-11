@@ -5,11 +5,17 @@ Owner: Black 4 platform
 Updated: 2026-11-10
 
 Black 4 builds an outcome-getting machine. This repository is how that machine
-shows up in [Buzz](https://github.com/block/buzz-app): one plugin, `ai.black4`,
-that a person installs once. Buzz itself stays stock, so it can be updated at
-any time.
+shows up in [Buzz](https://github.com/block/buzz-app). Buzz itself stays stock,
+so it can be updated at any time. Every Black 4 plugin lives here, each in its
+own folder under `plugins/`:
 
-The plugin does three things:
+| Plugin | Folder | Who needs it |
+| --- | --- | --- |
+| **Black 4** (`ai.black4`) | `plugins/black4` | Everyone. |
+| **Claude Sub Plugin** (`black4.claude-subscription`) | `plugins/claude-subscription` | A person who wants agents on their own Claude subscription. |
+| **Grok Sub Plugin** (`black4.grok-subscription`) | `plugins/grok-subscription` | A person who wants agents on their own Grok subscription. |
+
+The Black 4 plugin does three things:
 
 1. **Connects every Buzz agent to the Black 4 MCP** (`https://api.black4.ai/mcp`).
    The MCP's core tools appear to each agent as `black4_<tool>`, and each call
@@ -62,7 +68,8 @@ commit. Buzz never installs it without the person's click.
 
 | Path | What it is |
 | --- | --- |
-| `plugins/black4/` | The plugin exactly as Buzz installs it: `manifest.json` and `plugin.js`. Buzz never runs a build, so nothing else belongs in this folder. |
+| `plugins/<name>/` | Each plugin exactly as Buzz installs it: `manifest.json` and `plugin.js`. Buzz never runs a build, so nothing else belongs in these folders. |
+| `subscriptions/` | Source, build and tests for the two subscription plugins. `npm run build --prefix subscriptions` writes their folders under `plugins/`; the check refuses a stale copy. |
 | `bridge/black4-mcp-bridge` | The process the plugin starts: `mcp-remote` in front of the Black 4 MCP. It owns the browser sign-in and token refresh; the plugin never reads credentials. |
 | `install.sh` | The one-command install above. |
 | `tests/` | Unit tests against the plugin file, with a process double and fictional data. No sign-in or network. |
@@ -103,6 +110,29 @@ Installing the plugin is the owner's choice to let every channel member direct
 their agents, which run commands and Black 4 calls with the owner's authority.
 A setting to limit this to chosen channels is not built yet.
 
+## Agents on your own Claude or Grok subscription
+
+The two subscription plugins add agent types that run the provider's official
+command-line tool on your computer, signed in as you: Claude Code for Claude,
+Grok Build for Grok. Install either from its folder:
+
+```
+buzz://plugin-install?repository=joeyblack4%2Fblack4-buzz&ref=stable&path=plugins%2Fclaude-subscription
+buzz://plugin-install?repository=joeyblack4%2Fblack4-buzz&ref=stable&path=plugins%2Fgrok-subscription
+```
+
+Then open **Agents → New agent**, choose the type, and use **Install CLI** and
+**Sign in** if the tool is not set up yet. Each person uses their own
+subscription on their own computer. Credentials stay in the provider's own
+storage; the plugin copies none into Buzz. It removes API-key overrides from
+the processes it starts, so work runs on the subscription sign-in, and it never
+changes a plan or buys credits. Your use of a subscription this way is subject
+to that provider's terms.
+
+Limits today: macOS is the tested platform; a session restarts from Buzz's
+history when the plugin reloads; detailed activity transcripts and protected
+execution are not built.
+
 ## Lifecycle and authority
 
 Buzz's `host.spawn` and process `write` are asynchronous. Initialization waits
@@ -125,7 +155,8 @@ npm run check
 ```
 
 That checks the plugin parses, each plugin folder holds only what Buzz reads,
-and the tests pass. To try a change in your own Buzz, copy
+the subscription plugins match their source, and the tests pass.
+`npm run test:subscriptions` runs the subscription plugins' own tests. To try a change in your own Buzz, copy
 `plugins/black4/plugin.js` over the installed folder plugin, or install from
 your branch, then use Buzz's `plugin_reload` tool and confirm with
 `plugin_status` that it is active and its tools are registered. Unit tests do

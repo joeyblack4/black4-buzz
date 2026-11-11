@@ -1,0 +1,25 @@
+{
+  "id": "black4.claude-subscription",
+  "name": "Claude Sub Plugin",
+  "apiVersion": 1,
+  "description": "Claude subscription agents with personal sign-in, models, reasoning effort, coding and Buzz tools. Runs on your computer.",
+  "host": {
+    "processes": [
+      {
+        "id": "claude",
+        "program": "claude"
+      },
+      {
+        "id": "install",
+        "program": "npm",
+        "args": [
+          "install",
+          "-g",
+          "@anthropic-ai/claude-code"
+        ]
+      }
+    ],
+    "mcp": true,
+    "files": true
+  }
+}

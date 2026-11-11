@@ -1,0 +1,11 @@
+{
+  "name": "black4-buzz-subscriptions",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "test:live": "node tests/live-grok.mjs"
+  },
+  "devDependencies": { "react": "^19.0.0", "react-test-renderer": "^19.0.0" }
+}

@@ -35,6 +35,14 @@ else
 fi
 echo "Sign-in bridge installed at $BIN/black4-mcp-bridge"
 
+# Buzz starts the bridge by name, so your login shell must find it.
+SHELL_BIN="${SHELL:-/bin/zsh}"
+if ! "$SHELL_BIN" -lic 'command -v black4-mcp-bridge' >/dev/null 2>&1; then
+  echo "Your shell does not have $BIN on its PATH yet, so Buzz will not find the bridge." >&2
+  echo "Add this line to ~/.zprofile, then quit and reopen Buzz:" >&2
+  echo "  export PATH=\"\$HOME/.local/bin:\$PATH\"" >&2
+fi
+
 for arg in "$@"; do
   case "$arg" in
     --bridge-only) exit 0 ;;

@@ -5,7 +5,7 @@ Each test gets a temporary home with fake `claude`, `claude-agent-acp`,
 network or the crontab. The fake `claude setup-token` behaves like the real one
 over a pty: banner, link, "Paste code" prompt, then a token or an OAuth error.
 """
-import importlib.machinery, importlib.util, json, os, signal, stat, subprocess, sys, tempfile, textwrap, time, unittest
+import re, importlib.machinery, importlib.util, json, os, signal, stat, subprocess, sys, tempfile, textwrap, time, unittest
 from pathlib import Path
 
 AGENTCTL = Path(__file__).resolve().parent.parent / "agentctl"
@@ -357,6 +357,35 @@ class Login(Base):
         login_id, d = self.start_login()
         self.a.cleanup_logins(now=time.time() + self.a.LOGIN_TTL + 5)
         self.assertFalse(d.exists())
+
+
+class SetupPins(unittest.TestCase):
+    """machine/setup.sh must install adapters whose ACP SDK accepts the initialize
+    that the vendored buzz-acp (Buzz 0.5.30) sends: protocolVersion 2 with
+    `clientInfo`. @agentclientprotocol/sdk 2.0.1+ rejects it with -32602, and
+    every agent then fails to start. SDK 2.0.0 and 1.x negotiate down to v1."""
+
+    def setUp(self):
+        text = (AGENTCTL.parent / "setup.sh").read_text()
+        self.pins = dict(re.findall(r"^([A-Z_]+)=(\S+)", text, re.M))
+        self.text = text
+
+    @staticmethod
+    def version(v):
+        return tuple(int(x) for x in v.split("."))
+
+    def test_sdk_pins_speak_buzz_acp_protocol(self):
+        for key in ("CLAUDE_ACP_SDK", "CODEX_ACP_SDK"):
+            self.assertLessEqual(self.version(self.pins[key]), (2, 0, 0), key)
+
+    def test_adapters_are_the_known_good_versions(self):
+        self.assertEqual(self.pins["CLAUDE_ACP_VERSION"], "0.94.0")
+        self.assertEqual(self.pins["CODEX_ACP_VERSION"], "2.2.2")
+
+    def test_sdk_is_forced_with_overrides(self):
+        self.assertIn('"overrides"', self.text)
+        self.assertIn('"@agentclientprotocol/sdk": "$CLAUDE_ACP_SDK"', self.text)
+        self.assertIn('"@agentclientprotocol/sdk": "$CODEX_ACP_SDK"', self.text)
 
 
 if __name__ == "__main__":

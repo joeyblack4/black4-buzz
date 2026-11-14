@@ -8,8 +8,17 @@ set -eu
 
 NODE_VERSION=24.22.3
 NODE_SHA256=ff6e17d4874b76d272212b908cc020d6e815fba5a6c7eaaa06add725840307fd  # node-v24.22.3-darwin-arm64.tar.gz
-CLAUDE_ACP_VERSION=0.100.0  # @agentclientprotocol/claude-agent-acp
-CODEX_ACP_VERSION=2.5.0     # @agentclientprotocol/codex-acp
+# The ACP adapters must speak the protocol of the buzz-acp harness, which is
+# Buzz 0.5.30's (vendor/buzz-0.5.30). Its initialize offers protocolVersion 2
+# with a `clientInfo` field. @agentclientprotocol/sdk 2.0.1 and later reject
+# that shape with -32602 (they want `info`), so agents never start. SDK 2.0.0
+# and 1.x answer with protocolVersion 1, which buzz-acp accepts. These are the
+# newest adapters on such an SDK; each SDK is pinned exactly below. Move these
+# only together with the vendored Buzz, and check the initialize handshake.
+CLAUDE_ACP_VERSION=0.94.0   # @agentclientprotocol/claude-agent-acp (SDK 2.0.0)
+CLAUDE_ACP_SDK=2.0.0
+CODEX_ACP_VERSION=2.2.2     # @agentclientprotocol/codex-acp (SDK ^1.5.0)
+CODEX_ACP_SDK=1.9.0
 
 ROOT="$HOME/workforce"
 VENDOR="$ROOT/vendor"
@@ -37,14 +46,27 @@ fi
 for tool in node npm npx; do ln -sfn "$NODE_DIR/bin/$tool" "$BIN/$tool"; done
 export PATH="$NODE_DIR/bin:/usr/bin:/bin"
 
-want="@agentclientprotocol/claude-agent-acp@$CLAUDE_ACP_VERSION @agentclientprotocol/codex-acp@$CODEX_ACP_VERSION"
+want="@agentclientprotocol/claude-agent-acp@$CLAUDE_ACP_VERSION (sdk $CLAUDE_ACP_SDK) @agentclientprotocol/codex-acp@$CODEX_ACP_VERSION (sdk $CODEX_ACP_SDK)"
 have=$(cat "$ACP_DIR/.installed" 2>/dev/null || true)
 if [ "$have" != "$want" ]; then
   echo "installing $want"
+  rm -rf "$ACP_DIR"
   mkdir -p "$ACP_DIR"
-  [ -f "$ACP_DIR/package.json" ] || echo '{"name":"workforce-acp","private":true}' > "$ACP_DIR/package.json"
-  # shellcheck disable=SC2086
-  npm install --prefix "$ACP_DIR" --save-exact --no-fund --no-audit --loglevel=error $want
+  cat > "$ACP_DIR/package.json" <<JSON
+{
+  "name": "workforce-acp",
+  "private": true,
+  "dependencies": {
+    "@agentclientprotocol/claude-agent-acp": "$CLAUDE_ACP_VERSION",
+    "@agentclientprotocol/codex-acp": "$CODEX_ACP_VERSION"
+  },
+  "overrides": {
+    "@agentclientprotocol/claude-agent-acp": { "@agentclientprotocol/sdk": "$CLAUDE_ACP_SDK" },
+    "@agentclientprotocol/codex-acp": { "@agentclientprotocol/sdk": "$CODEX_ACP_SDK" }
+  }
+}
+JSON
+  npm install --prefix "$ACP_DIR" --no-fund --no-audit --loglevel=error
   echo "$want" > "$ACP_DIR/.installed"
 fi
 for tool in claude-agent-acp codex-acp; do ln -sfn "$ACP_DIR/node_modules/.bin/$tool" "$BIN/$tool"; done

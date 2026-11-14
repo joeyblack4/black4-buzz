@@ -7,7 +7,7 @@
   },
   "scripts": {
     "test": "node --test tests/*.test.mjs",
-    "check": "node --check plugins/black4/plugin.js && node --check plugins/hardware/plugin.js && node scripts/check-build-folder.mjs && node subscriptions/build.mjs --check && npm test",
+    "check": "node --check plugins/black4/plugin.js && node --check plugins/hardware/plugin.js && node scripts/check-build-folder.mjs && node subscriptions/build.mjs --check && python3 -m unittest discover -s machine/tests && npm test",
     "test:subscriptions": "npm ci --prefix subscriptions --no-fund --no-audit && npm test --prefix subscriptions"
   }
 }

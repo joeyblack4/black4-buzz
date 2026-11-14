@@ -25,7 +25,7 @@ const TIMEOUT_MS = 45 * 1000;
 const STATUS_TIMEOUT_MS = 12 * 1000;
 const STATUS_TTL_MS = 20 * 1000;
 const UNREACHABLE_TTL_MS = 4 * 1000;
-const LOGIN_TIMEOUT_MS = 60 * 1000;
+const LOGIN_TIMEOUT_MS = 120 * 1000; // the machine waits up to 90 s for Claude Code to accept a code
 
 export const HARNESSES = [
   { id: "claude", label: "Claude Code" },

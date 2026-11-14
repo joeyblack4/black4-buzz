@@ -667,6 +667,15 @@ def login_helper(login_id):
                 break
         finish({"ok": False, "error": "Claude Code did not finish the sign-in. Start the sign-in again."})
     finally:
+        # What Claude Code showed after the code went in, for diagnosing a
+        # sign-in that did not finish. The token and the code are masked first.
+        try:
+            shown = TOKEN_RE.sub("<token>", screen_text(raw))
+            if "code" in dir() and code: shown = shown.replace(code, "<code>")
+            if not (ROOT / "secrets" / "claude").exists() or "<token>" not in shown:
+                write_private(private_dir(ROOT / "run") / "login-debug.txt", shown[-4000:])
+        except Exception:
+            pass
         raw = b""
         try: os.close(fd)
         except OSError: pass

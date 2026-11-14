@@ -180,6 +180,20 @@ export function createLogin(spawn, machine, harness, { onChange, onSignedIn, tim
     pending = tracked;
     return tracked;
   };
+  /** Asks for a new sign-in and shows its link; a reply for a cancelled or
+   * replaced attempt is cancelled on the machine instead. */
+  const open = (mine, extra = {}) => ask(spawn, machine, { op: "login.start", harness }, { timeoutMs })
+    .then((reply) => {
+      const id = typeof reply.loginId === "string" ? reply.loginId : null;
+      if (disposed || mine !== generation) return cancelRemote(id);
+      const url = typeof reply.url === "string" && /^https:\/\//.test(reply.url) ? reply.url : null;
+      if (!url || !id) {
+        void cancelRemote(id);
+        throw new Error("The machine did not return a sign-in link.");
+      }
+      loginId = id;
+      set({ step: "waiting", url, needsCode: reply.needsCode !== false, ...extra });
+    });
   return {
     get state() { return state; },
     start() {
@@ -187,20 +201,7 @@ export function createLogin(spawn, machine, harness, { onChange, onSignedIn, tim
       if (state.step === "waiting") return Promise.resolve();
       const mine = ++generation;
       set({ step: "starting" });
-      return track(ask(spawn, machine, { op: "login.start", harness }, { timeoutMs })
-        .then((reply) => {
-          const id = typeof reply.loginId === "string" ? reply.loginId : null;
-          if (disposed || mine !== generation) return cancelRemote(id);
-          loginId = id;
-          const url = typeof reply.url === "string" && /^https:\/\//.test(reply.url) ? reply.url : null;
-          if (!url || !id) {
-            loginId = null;
-            void cancelRemote(id);
-            throw new Error("The machine did not return a sign-in link.");
-          }
-          set({ step: "waiting", url, needsCode: reply.needsCode !== false });
-        })
-        .catch((error) => { if (mine === generation) set({ step: "idle", error: message(error) }); }));
+      return track(open(mine).catch((error) => { if (mine === generation) set({ step: "idle", error: message(error) }); }));
     },
     finish(code) {
       const pasted = typeof code === "string" ? code.trim() : "";
@@ -208,18 +209,29 @@ export function createLogin(spawn, machine, harness, { onChange, onSignedIn, tim
       if (state.step !== "waiting" || !loginId) return Promise.resolve();
       if (state.needsCode && !pasted) { set({ ...state, error: "Paste the code first." }); return Promise.resolve(); }
       const mine = ++generation;
-      const waiting = { step: "waiting", url: state.url, needsCode: state.needsCode };
-      set({ step: "finishing", url: state.url, needsCode: state.needsCode });
-      return track(ask(spawn, machine, { op: "login.finish", loginId, ...(pasted ? { code: pasted } : {}) }, { timeoutMs })
+      const used = loginId;
+      set({ step: "finishing", url: state.url, needsCode: state.needsCode, ...(state.renewed ? { renewed: true } : {}) });
+      return track(ask(spawn, machine, { op: "login.finish", loginId: used, ...(pasted ? { code: pasted } : {}) }, { timeoutMs })
         .then(async (reply) => {
-          if (reply.signedIn === false) throw new Error("Sign-in did not finish. Try the code again.");
-          loginId = null;
+          if (reply.signedIn === false) throw new Error("Sign-in did not finish.");
+          if (loginId === used) loginId = null;
           if (mine !== generation) return;
           set({ step: "done", account: typeof reply.account === "string" ? reply.account : null });
           await onSignedIn?.();
           if (mine === generation) set({ step: "idle" });
-        })
-        .catch((error) => { if (mine === generation) set({ ...waiting, error: message(error, pasted) }); }));
+        }, async (error) => {
+          // A failed finish closes that sign-in on the machine: its link and
+          // id are dead. Start one fresh sign-in (once, no loop) for a new link.
+          if (loginId === used) loginId = null;
+          if (mine !== generation) return;
+          const reason = message(error, pasted);
+          set({ step: "renewing", error: reason });
+          try {
+            await open(mine, { renewed: true, error: `${reason} Open the new link and paste its code.` });
+          } catch (failure) {
+            if (mine === generation) set({ step: "idle", error: `${reason} ${message(failure)}` });
+          }
+        }));
     },
     cancel() {
       generation++;
@@ -397,14 +409,19 @@ export function apply(ctx) {
       h("div", null, h("button", { type: "button", disabled, onClick: () => void statuses.read(machine.id, { force: true }) }, "Try again")));
     if (state.kind === "unsupported") return h("div", { style: muted }, `The ${machine.label} cannot report sign-in yet.`);
     if (state.kind === "not-installed") return h("div", { role: "alert" }, `${label} is not installed on the ${machine.label}.`);
-    if (state.kind === "signed-in" && login.step !== "waiting" && login.step !== "finishing") return h("div", { style: row },
+    if (state.kind === "signed-in" && !["waiting", "finishing", "renewing"].includes(login.step)) return h("div", { style: row },
       h("span", null, state.account ? `Signed in as ${state.account}` : `${label} is signed in`));
-    if (state.kind === "unknown" && login.step === "idle") return h("div", { style: { ...row, ...muted } },
-      h("span", null, "Sign-in status unknown"),
-      h("button", { type: "button", disabled, onClick: () => void flow.current?.start() }, "Sign in"));
+    if (state.kind === "unknown" && login.step === "idle") return h("div", { style: { display: "grid", gap: 6 } },
+      h("div", { style: { ...row, ...muted } },
+        h("span", null, "Sign-in status unknown"),
+        h("button", { type: "button", disabled, onClick: () => void flow.current?.start() }, "Sign in")),
+      login.error && h("span", { role: "alert" }, login.error));
 
     // Not signed in, or a sign-in under way.
-    const busy = login.step === "starting" || login.step === "finishing";
+    const busy = login.step === "starting" || login.step === "finishing" || login.step === "renewing";
+    if (login.step === "renewing") return h("div", { style: { display: "grid", gap: 6 } },
+      h("span", { role: "alert" }, login.error),
+      h("div", { role: "status", style: { ...row, ...muted } }, h(Spinner), "Getting a new link…"));
     if (login.step === "idle" || login.step === "starting" || login.step === "done") return h("div", { style: { display: "grid", gap: 6 } },
       h("div", { style: row },
         h("span", null, login.step === "done" ? "Signed in. Checking…" : `${label} is not signed in`),
@@ -420,7 +437,7 @@ export function apply(ctx) {
     };
     return h("div", { style: { display: "grid", gap: 8 } },
       h("div", { style: row },
-        h("a", { href: login.url, target: "_blank", rel: "noopener noreferrer" }, `Open ${label} sign-in`),
+        h("a", { href: login.url, target: "_blank", rel: "noopener noreferrer" }, login.renewed ? `Open new ${label} sign-in` : `Open ${label} sign-in`),
         h("button", { type: "button", onClick: () => {
           Promise.resolve(globalThis.navigator?.clipboard?.writeText?.(login.url))
             .then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }, () => {});

@@ -204,16 +204,25 @@ async function console_(run) {
   return said;
 }
 
-test("sign-in: start, a wrong code keeps the link, the right code finishes and re-reads status", async () => {
+test("sign-in: a wrong code shows the error and a new link, and the right code on the new login finishes", async () => {
   let signedIn = false;
+  let starts = 0;
+  const open = new Set();
   const box = machine((request) => {
-    if (request.op === "login.start") return { ok: true, loginId: "L1", url: "https://example.com/oauth?x=1", needsCode: true };
-    if (request.op === "login.finish") {
-      if (request.code !== CODE) return { ok: false, error: "That code did not work. Try again." };
-      signedIn = true;
-      return { ok: true, signedIn: true, account: "ops@example.com" };
+    if (request.op === "login.start") {
+      open.clear(); // a new start cancels any earlier one
+      const loginId = `L${++starts}`;
+      open.add(loginId);
+      return { ok: true, loginId, url: `https://example.com/oauth?n=${starts}`, needsCode: true };
     }
-    if (request.op === "machine.status") return { ok: true, harnesses: harnesses({ signedIn, account: signedIn ? "ops@example.com" : null }) };
+    if (request.op === "login.finish") {
+      if (!open.has(request.loginId)) return { ok: false, error: "That sign-in has ended. Start again." };
+      open.delete(request.loginId); // any finish closes it
+      if (request.code !== CODE) return { ok: false, error: "That code was not accepted." };
+      signedIn = true;
+      return { ok: true, signedIn: true, account: null };
+    }
+    if (request.op === "machine.status") return { ok: true, harnesses: harnesses({ signedIn }) };
     return { ok: true };
   });
   const reader = statusReader(box.spawn);
@@ -227,33 +236,60 @@ test("sign-in: start, a wrong code keeps the link, the right code finishes and r
     const second = login.start();
     assert.equal(first, second, "a second click joins the first");
     await first;
-    assert.deepEqual(login.state, { step: "waiting", url: "https://example.com/oauth?x=1", needsCode: true });
+    assert.deepEqual(login.state, { step: "waiting", url: "https://example.com/oauth?n=1", needsCode: true });
 
     await login.finish("wrong-code-000");
-    assert.equal(login.state.step, "waiting");
-    assert.equal(login.state.url, "https://example.com/oauth?x=1");
-    assert.equal(login.state.error, "That code did not work. Try again.");
+    assert.deepEqual(login.state, {
+      step: "waiting", url: "https://example.com/oauth?n=2", needsCode: true, renewed: true,
+      error: "That code was not accepted. Open the new link and paste its code.",
+    });
+    assert.ok(states.some((state) => state.step === "renewing" && state.error === "That code was not accepted."));
 
     await login.finish(`  ${CODE}\n`);
     assert.deepEqual(login.state, { step: "idle" });
   });
-  assert.deepEqual(box.ops(), ["login.start", "login.finish", "login.finish", "machine.status"]);
-  assert.equal(box.seen[2].request.code, CODE, "the pasted code is trimmed and sent");
-  assert.equal(signInState(reader.peek("commerce"), "claude").account, "ops@example.com");
-  assert.ok(states.some((state) => state.step === "finishing"));
-  assert.ok(states.some((state) => state.step === "done" && state.account === "ops@example.com"));
+  assert.deepEqual(box.ops(), ["login.start", "login.finish", "login.start", "login.finish", "machine.status"]);
+  const finishes = box.seen.filter((entry) => entry.request.op === "login.finish").map((entry) => entry.request);
+  assert.deepEqual(finishes.map((request) => request.loginId), ["L1", "L2"], "the stale login is never finished again");
+  assert.equal(finishes[1].code, CODE, "the pasted code is trimmed and sent");
+  assert.deepEqual(signInState(reader.peek("commerce"), "claude"), { kind: "signed-in", account: null });
+  assert.ok(states.some((state) => state.step === "done"));
   assert.ok(!JSON.stringify(states).includes(CODE), "the code is never kept in state");
   assert.ok(!said.join("\n").includes(CODE), "the code is never logged");
 });
 
-test("sign-in: an error that echoes the code does not show it", async () => {
-  const box = machine((request) => (request.op === "login.start"
-    ? { ok: true, loginId: "L1", url: "https://example.com/a", needsCode: true }
-    : { ok: false, error: `Rejected code ${CODE}.` }));
+test("sign-in: one automatic restart per failed finish, and a failed restart offers Sign in", async () => {
+  let starts = 0;
+  const box = machine((request) => {
+    if (request.op === "login.start") return ++starts === 1
+      ? { ok: true, loginId: "L1", url: "https://example.com/a", needsCode: true }
+      : { ok: false, error: "The machine is busy." };
+    if (request.op === "login.finish") return { ok: false, error: "That code was not accepted." };
+    return { ok: true };
+  });
   const login = createLogin(box.spawn, "commerce", "claude");
   await login.start();
-  await login.finish(CODE);
-  assert.equal(login.state.error, "Rejected code ….");
+  await login.finish("wrong-code-000");
+  assert.deepEqual(login.state, { step: "idle", error: "That code was not accepted. The machine is busy." });
+  assert.deepEqual(box.ops(), ["login.start", "login.finish", "login.start"], "no loop");
+  await login.finish("again");
+  assert.equal(box.seen.length, 3, "nothing to finish after a failed restart");
+  await login.dispose();
+  assert.equal(box.seen.length, 3, "no login left to cancel");
+});
+
+test("sign-in: closing the dialog after a restart cancels the new login, not the dead one", async () => {
+  let starts = 0;
+  const box = machine((request) => {
+    if (request.op === "login.start") return { ok: true, loginId: `L${++starts}`, url: `https://example.com/${starts}`, needsCode: true };
+    if (request.op === "login.finish") return { ok: false, error: "That code was not accepted." };
+    return { ok: true };
+  });
+  const login = createLogin(box.spawn, "commerce", "claude");
+  await login.start();
+  await login.finish("wrong-code-000");
+  await login.dispose();
+  assert.deepEqual(box.seen.at(-1).request, { op: "login.cancel", loginId: "L2" });
 });
 
 test("sign-in: an empty code is not sent", async () => {

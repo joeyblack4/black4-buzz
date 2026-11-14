@@ -1,0 +1,20 @@
+{
+  "id": "black4.hardware",
+  "name": "Black 4 Hardware",
+  "apiVersion": 1,
+  "description": "Create agents in Buzz that run on Black 4's own machines instead of this computer. They keep working while Buzz is closed.",
+  "discovery": {
+    "category": "agents",
+    "tags": ["black4", "agents", "hardware"]
+  },
+  "updates": { "defaultEnabled": true },
+  "host": {
+    "processes": [
+      {
+        "id": "commerce",
+        "program": "ssh",
+        "args": ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "commerce", "workforce/bin/agentctl"]
+      }
+    ]
+  }
+}

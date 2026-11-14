@@ -1,0 +1,247 @@
+#!/usr/bin/python3
+"""agentctl: runs Buzz agents on this machine for the Black 4 hardware provider.
+
+Reads one JSON request on stdin, writes one JSON reply on stdout. The Buzz
+plugin calls it over SSH. Each agent is a folder under ~/workforce/agents/<pubkey>
+holding its key (mode 600), settings and log, and one buzz-acp process.
+
+Requests: {"op": "provision"|"activate"|"profile"|"remove"|"status"|"list", ...}
+"""
+import json, os, re, secrets, shutil, signal, subprocess, sys, time
+from pathlib import Path
+
+HOME = Path.home()
+ROOT = HOME / "workforce"
+AGENTS = ROOT / "agents"
+BIN = ROOT / "bin"
+HEX64 = re.compile(r"^[0-9a-f]{64}$")
+
+# secp256k1, for the x-only public key of a new agent key (BIP-340).
+P = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
+N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+G = (0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798,
+     0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8)
+
+
+def _add(a, b):
+    if a is None: return b
+    if b is None: return a
+    if a[0] == b[0] and (a[1] + b[1]) % P == 0: return None
+    if a == b: m = 3 * a[0] * a[0] * pow(2 * a[1], P - 2, P) % P
+    else: m = (b[1] - a[1]) * pow(b[0] - a[0], P - 2, P) % P
+    x = (m * m - a[0] - b[0]) % P
+    return (x, (m * (a[0] - x) - a[1]) % P)
+
+
+def pubkey_of(secret_hex):
+    k, point, addend = int(secret_hex, 16), None, G
+    while k:
+        if k & 1: point = _add(point, addend)
+        addend = _add(addend, addend)
+        k >>= 1
+    return format(point[0], "064x")
+
+
+def fail(message):
+    print(json.dumps({"ok": False, "error": message}))
+    sys.exit(0)
+
+
+def folder(pubkey):
+    if not isinstance(pubkey, str) or not HEX64.match(pubkey):
+        fail("pubkey must be 64 hex characters")
+    return AGENTS / pubkey
+
+
+def read_settings(d):
+    try: return json.loads((d / "agent.json").read_text())
+    except FileNotFoundError: return {}
+
+
+def write_settings(d, settings):
+    tmp = d / "agent.json.tmp"
+    tmp.write_text(json.dumps(settings, indent=2))
+    tmp.replace(d / "agent.json")
+
+
+def running(d):
+    try: pid = int((d / "pid").read_text())
+    except (FileNotFoundError, ValueError): return None
+    try: os.kill(pid, 0)
+    except OSError: return None
+    return pid
+
+
+def stop(d):
+    pid = running(d)
+    if not pid: return
+    os.kill(pid, signal.SIGTERM)
+    for _ in range(50):
+        if not running(d): break
+        time.sleep(0.1)
+    else:
+        os.kill(pid, signal.SIGKILL)
+    (d / "pid").unlink(missing_ok=True)
+
+
+HARNESS = {  # the model CLI each choice runs, as buzz-acp's agent command
+    "claude": ("claude-agent-acp", ""),
+    "codex": ("codex-acp", ""),
+    "goose": ("goose", "acp"),
+    "grok": ("grok", "agent,stdio"),
+}
+
+
+def start(d):
+    s = read_settings(d)
+    if not s.get("auth"): fail("agent has no owner attestation yet")
+    stop(d)
+    command, args = HARNESS.get(s.get("harness") or "claude", HARNESS["claude"])
+    env = dict(os.environ)
+    env["PATH"] = f"{BIN}:{HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+    env.update({
+        "BUZZ_PRIVATE_KEY": (d / "key").read_text().strip(),
+        # The harness speaks WebSocket to the relay; the CLI below uses HTTPS.
+        "BUZZ_RELAY_URL": "wss://" + s["community"].split("://", 1)[1],
+        "BUZZ_AUTH_TAG": json.dumps(s["auth"]),
+        "BUZZ_ACP_AGENT_COMMAND": command,
+        "BUZZ_ACP_RESPOND_TO": s.get("respondTo") or "owner-only",
+        "BUZZ_ACP_LAZY_POOL": "true",
+    })
+    if args: env["BUZZ_ACP_AGENT_ARGS"] = args
+    if s.get("allow"): env["BUZZ_ACP_RESPOND_TO_ALLOWLIST"] = ",".join(s["allow"])
+    if (s.get("instructions") or "").strip():
+        (d / "instructions.md").write_text(s["instructions"])
+        env["BUZZ_ACP_SYSTEM_PROMPT_FILE"] = str(d / "instructions.md")
+    if s.get("model"): env["BUZZ_ACP_MODEL"] = s["model"]
+    (d / "work").mkdir(exist_ok=True)
+    log = open(d / "agent.log", "ab")
+    proc = subprocess.Popen(
+        [str(BIN / "buzz-acp"), "--agent-owner", s["auth"][1]],
+        cwd=d / "work", env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+        start_new_session=True)
+    (d / "pid").write_text(str(proc.pid))
+    time.sleep(2.0)
+    if proc.poll() is not None:
+        tail = (d / "agent.log").read_text(errors="replace")[-600:]
+        fail("agent stopped at start: " + tail)
+    return proc.pid
+
+
+def buzz(d, *args):
+    s = read_settings(d)
+    env = dict(os.environ, BUZZ_PRIVATE_KEY=(d / "key").read_text().strip(),
+               BUZZ_RELAY_URL=s["community"], BUZZ_AUTH_TAG=json.dumps(s["auth"]))
+    return subprocess.run([str(BIN / "buzz"), *args], env=env, capture_output=True, text=True, timeout=30)
+
+
+def publish_profile(d):
+    s = read_settings(d)
+    args = ["users", "set-profile", "--name", s["name"]]
+    if s.get("picture"): args += ["--avatar", s["picture"]]
+    done = buzz(d, *args)
+    return done.returncode == 0, (done.stderr or done.stdout)[-300:]
+
+
+def community_url(value):
+    if not isinstance(value, str) or not re.match(r"^(wss|https)://[A-Za-z0-9.-]+(:\d+)?/?$", value):
+        fail("community must be a wss:// or https:// address")
+    return "https://" + value.split("://", 1)[1].rstrip("/")
+
+
+def main():
+    try: req = json.loads(sys.stdin.read() or "{}")
+    except ValueError: fail("request is not JSON")
+    op = req.get("op")
+    AGENTS.mkdir(parents=True, exist_ok=True)
+    os.chmod(AGENTS, 0o700)
+
+    if op == "provision":
+        name = (req.get("name") or "").strip()
+        if not name or len(name) > 128: fail("name is required (128 characters at most)")
+        # A retried creation gets the same agent back, not a second key.
+        for d in AGENTS.iterdir():
+            s = read_settings(d) if d.is_dir() else {}
+            if s.get("name") == name and not s.get("auth") and s.get("requestId") == req.get("requestId"):
+                return {"ok": True, "pubkey": d.name}
+        secret = secrets.token_hex(32)
+        while not 0 < int(secret, 16) < N: secret = secrets.token_hex(32)
+        pubkey = pubkey_of(secret)
+        d = AGENTS / pubkey
+        d.mkdir(mode=0o700)
+        fd = os.open(d / "key", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.write(fd, secret.encode()); os.close(fd)
+        config = req.get("config") or {}
+        write_settings(d, {
+            "name": name, "picture": req.get("picture"), "requestId": req.get("requestId"),
+            "community": community_url(req.get("community")),
+            "harness": config.get("harness") or "claude", "model": config.get("model") or "",
+            "instructions": config.get("instructions") or "",
+            "respondTo": config.get("respondTo") or "owner-only",
+            "allow": [k for k in (config.get("allow") or []) if HEX64.match(str(k))],
+            "createdAt": int(time.time()),
+        })
+        return {"ok": True, "pubkey": pubkey}
+
+    if op == "list":
+        rows = []
+        for d in sorted(AGENTS.iterdir()):
+            if not d.is_dir() or not HEX64.match(d.name): continue
+            s = read_settings(d)
+            rows.append({"pubkey": d.name, "name": s.get("name"), "harness": s.get("harness"),
+                         "respondTo": s.get("respondTo"), "activated": bool(s.get("auth")), "running": bool(running(d))})
+        return {"ok": True, "agents": rows}
+
+    d = folder(req.get("pubkey"))
+    if op == "remove":
+        if d.exists():
+            stop(d)
+            shutil.rmtree(d)
+        return {"ok": True}
+    if not d.exists(): fail("no such agent on this machine")
+    s = read_settings(d)
+
+    if op == "activate":
+        auth = req.get("auth")
+        if (not isinstance(auth, list) or len(auth) != 4 or auth[0] != "auth"
+                or not HEX64.match(str(auth[1])) or not re.match(r"^[0-9a-f]{128}$", str(auth[3]))):
+            fail("auth must be a NIP-OA tag: [auth, owner, conditions, signature]")
+        s["auth"] = auth
+        s["community"] = community_url(req.get("community") or s["community"])
+        for key in ("harness", "model", "instructions", "respondTo"):
+            if (req.get("config") or {}).get(key) is not None: s[key] = req["config"][key]
+        write_settings(d, s)
+        pid = start(d)
+        ok, detail = publish_profile(d)
+        return {"ok": True, "pid": pid, "profilePublished": ok, **({} if ok else {"profileError": detail})}
+
+    if op == "profile":
+        if req.get("name"): s["name"] = req["name"].strip()
+        if "picture" in req: s["picture"] = req.get("picture")
+        write_settings(d, s)
+        ok, detail = publish_profile(d)
+        if not ok: fail("profile was not published: " + detail)
+        return {"ok": True}
+
+    if op == "instructions.get":
+        return {"ok": True, "instructions": s.get("instructions") or ""}
+    if op == "instructions.set":
+        s["instructions"] = str(req.get("instructions") or "")[:20000]
+        write_settings(d, s)
+        if s.get("auth"): start(d)
+        return {"ok": True}
+
+    if op == "start":
+        return {"ok": True, "pid": start(d)}
+
+    if op == "status":
+        log = (d / "agent.log").read_text(errors="replace")[-1500:] if (d / "agent.log").exists() else ""
+        return {"ok": True, "running": bool(running(d)), "activated": bool(s.get("auth")),
+                "name": s.get("name"), "harness": s.get("harness"), "respondTo": s.get("respondTo"), "log": log}
+
+    fail("unknown op")
+
+
+if __name__ == "__main__":
+    reply = main()
+    if reply is not None: print(json.dumps(reply))

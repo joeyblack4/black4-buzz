@@ -8,6 +8,7 @@ holding its key (mode 600), settings and log, and one buzz-acp process.
 Requests: {"op": ...} with op one of
   provision, activate, profile, instructions.get, instructions.set, remove,
   start, status, list                     (one agent)
+  identity                                (each agent's key and the owner it attests)
   machine.status                          (what this machine can run)
   login.start, login.finish, login.cancel, logout   (model sign-in)
 
@@ -17,6 +18,10 @@ Not requests (run from cron or by agentctl itself):
 
 Secrets: agent keys live in agents/<pubkey>/key, the Claude subscription token
 in secrets/claude. Neither is ever printed, logged or put in a reply.
+
+Black 4 MCP: when setup.sh has installed the connector (mcp/black4), every agent
+gets it as buzz-acp's MCP server. It signs each request with the agent's own key
+and owner attestation, so there is nothing to sign in to and no per-agent setting.
 """
 import fcntl, hashlib, json, os, re, secrets, shutil, signal, socket, subprocess, sys, time
 from pathlib import Path
@@ -33,11 +38,14 @@ START_GRACE = 2.0            # an agent must stay up this long for start to succ
 
 def set_root(home):
     """Point every path at <home>/workforce (tests use a temporary home)."""
-    global HOME, ROOT, AGENTS, BIN, LOGINS, SECRETS, RUN, VENDOR
+    global HOME, ROOT, AGENTS, BIN, LOGINS, SECRETS, RUN, VENDOR, BLACK4_MCP
     HOME = Path(home)
     ROOT = HOME / "workforce"
     AGENTS, BIN, LOGINS = ROOT / "agents", ROOT / "bin", ROOT / "logins"
     SECRETS, RUN, VENDOR = ROOT / "secrets", ROOT / "run", ROOT / "vendor"
+    # buzz-acp names the MCP server after this file's stem, so the agent's
+    # tools appear as black4 tools (mcp__black4__<tool> in Claude Code).
+    BLACK4_MCP = ROOT / "mcp" / "black4"
 
 
 set_root(os.environ.get("AGENTCTL_HOME") or Path.home())
@@ -353,6 +361,10 @@ def _start(d):
         "BUZZ_ACP_LAZY_POOL": "true",
     })
     if args: env["BUZZ_ACP_AGENT_ARGS"] = args
+    # buzz-acp declares one MCP server per session and hands it the agent's key
+    # (nsec) and BUZZ_AUTH_TAG. Buzz's own tools are the agent's shell and the
+    # buzz CLI, so the slot is free for Black 4. Missing connector: no MCP.
+    if os.access(BLACK4_MCP, os.X_OK): env["BUZZ_ACP_MCP_COMMAND"] = str(BLACK4_MCP)
     if s.get("allow"): env["BUZZ_ACP_RESPOND_TO_ALLOWLIST"] = ",".join(s["allow"])
     if (s.get("instructions") or "").strip():
         (d / "instructions.md").write_text(s["instructions"])
@@ -706,6 +718,12 @@ def publish_profile(d):
     return done.returncode == 0, (done.stderr or done.stdout)[-300:]
 
 
+def owner_of(settings):
+    auth = settings.get("auth")
+    if isinstance(auth, list) and len(auth) == 4 and HEX64.match(str(auth[1])): return auth[1]
+    return None
+
+
 def community_url(value):
     if not isinstance(value, str) or not re.match(r"^(wss|https)://[A-Za-z0-9.-]+(:\d+)?/?$", value):
         fail("community must be a wss:// or https:// address")
@@ -755,6 +773,13 @@ def handle(req):
             "createdAt": int(time.time()),
         })
         return {"ok": True, "pubkey": pubkey}
+
+    if op == "identity":
+        # Which owner key each agent attests, so the owner can be linked to a
+        # Black 4 account. Public keys only; no key file is opened.
+        return {"ok": True, "agents": [
+            {"pubkey": d.name, "name": read_settings(d).get("name"),
+             "owner": owner_of(read_settings(d))} for d in agent_dirs()]}
 
     if op == "list":
         rows = []

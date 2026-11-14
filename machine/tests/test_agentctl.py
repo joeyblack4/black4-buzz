@@ -254,6 +254,41 @@ class Start(Base):
         self.assertTrue(env["PATH"].startswith(str(self.a.BIN)))
         self.assertNotIn(FAKE_TOKEN, (d / "agent.log").read_text())
 
+    def test_every_agent_gets_the_black4_mcp_when_installed(self):
+        self.sign_in()
+        d = self.make_agent()
+        self.assertTrue(self.req(op="start", pubkey=d.name)["ok"])
+        env = self.wait_env(d)
+        self.assertNotIn("BUZZ_ACP_MCP_COMMAND", env, "no connector installed: no MCP")
+        self.a.BLACK4_MCP.parent.mkdir(parents=True)
+        write_exe(self.a.BLACK4_MCP, "#!/bin/sh\nexit 0\n")
+        (d / "work" / "env.json").unlink()
+        self.assertTrue(self.req(op="start", pubkey=d.name)["ok"])
+        env = self.wait_env(d)
+        self.assertEqual(env["BUZZ_ACP_MCP_COMMAND"], str(self.a.ROOT / "mcp" / "black4"))
+        self.assertEqual(Path(env["BUZZ_ACP_MCP_COMMAND"]).stem, "black4")
+
+    def wait_env(self, d):
+        for _ in range(30):
+            if (d / "work" / "env.json").exists(): break
+            time.sleep(0.1)
+        time.sleep(0.1)
+        return json.loads((d / "work" / "env.json").read_text())
+
+
+class Identity(Base):
+    def test_identity_lists_each_agent_and_its_owner(self):
+        self.assertEqual(self.req(op="identity"), {"ok": True, "agents": []})
+        active = self.make_agent()
+        pending = self.make_agent(activate=False)
+        r = self.req(op="identity")
+        self.assertTrue(r["ok"])
+        rows = {row["pubkey"]: row for row in r["agents"]}
+        self.assertEqual(rows[active.name], {"pubkey": active.name, "name": "Test agent", "owner": "a" * 64})
+        self.assertEqual(rows[pending.name]["owner"], None)
+        secret = (active / "key").read_text().strip()
+        self.assertNotIn(secret, json.dumps(r))
+
 
 class Supervisor(Base):
     def test_killed_agent_comes_back(self):
@@ -386,6 +421,18 @@ class SetupPins(unittest.TestCase):
         self.assertIn('"overrides"', self.text)
         self.assertIn('"@agentclientprotocol/sdk": "$CLAUDE_ACP_SDK"', self.text)
         self.assertIn('"@agentclientprotocol/sdk": "$CODEX_ACP_SDK"', self.text)
+
+    def test_connector_is_installed_from_its_lockfile_where_agentctl_looks(self):
+        self.assertIn('npm ci --omit=dev', self.text)
+        self.assertIn('package-lock.json', self.text)
+        self.assertIn('"$ROOT/mcp/black4"', self.text)
+        a = load()
+        a.set_root("/h")
+        self.assertEqual(str(a.BLACK4_MCP), "/h/workforce/mcp/black4")
+        lock = json.loads((AGENTCTL.parent.parent / "bridge" / "black4-agent-mcp" / "package-lock.json").read_text())
+        curves = lock["packages"]["node_modules/@noble/curves"]
+        self.assertEqual(curves["version"], "2.0.1")
+        self.assertTrue(curves["integrity"].startswith("sha512-"))
 
 
 if __name__ == "__main__":

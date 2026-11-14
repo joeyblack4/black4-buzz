@@ -74,6 +74,8 @@ commit. Buzz never installs it without the person's click.
 | `plugins/<name>/` | Each plugin exactly as Buzz installs it: `manifest.json` and `plugin.js`. Buzz never runs a build, so nothing else belongs in these folders. |
 | `subscriptions/` | Source, build and tests for the two subscription plugins. `npm run build --prefix subscriptions` writes their folders under `plugins/`; the check refuses a stale copy. |
 | `bridge/black4-mcp-bridge` | The process the plugin starts: `mcp-remote` in front of the Black 4 MCP. It owns the browser sign-in and token refresh; the plugin never reads credentials. |
+| `bridge/black4-agent-mcp/` | The Black 4 MCP for agents that run on a Black 4 machine. `buzz-acp` starts it as the agent's MCP server; it signs every request with the agent's own Buzz key and owner attestation (`Authorization: Nostr`), so there is no sign-in. One pinned dependency, `@noble/curves`. |
+| `machine/` | The machine side: `agentctl` (what the hardware plugin calls over SSH), `setup.sh` and `deploy.sh <ssh-host>`, which installs both on a machine. |
 | `install.sh` | The one-command install above. |
 | `tests/` | Unit tests against the plugin file, with a process double and fictional data. No sign-in or network. |
 | `scripts/check-build-folder.mjs` | Refuses anything in a plugin folder that Buzz would not read. |
@@ -154,6 +156,7 @@ human decision tokens and preview grants, never goes into an agent result.
 ## Work on it
 
 ```sh
+npm run setup   # once: the connector's pinned dependency
 npm run check
 ```
 

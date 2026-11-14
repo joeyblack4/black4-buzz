@@ -1,7 +1,10 @@
 #!/bin/sh
 # Installs what a Buzz agent needs on a Black 4 machine, under ~/workforce.
-# Run from a computer that can reach the machine:
-#   ssh <machine> 'MACHINE_NAME=<machine> sh -s' < machine/setup.sh
+# Run from a checkout, on a computer that can reach the machine:
+#   machine/deploy.sh <machine> [name]
+# That copies agentctl and the Black 4 connector next to this script and runs
+# it there. Piped on its own (ssh <machine> 'sh -s' < machine/setup.sh) it
+# installs Node and the ACP adapters only.
 # MACHINE_NAME is what machine.status reports (default: the host name).
 # Safe to run again: it only fetches what is missing. No sudo.
 set -eu
@@ -21,6 +24,11 @@ CODEX_ACP_VERSION=2.2.2     # @agentclientprotocol/codex-acp (SDK ^1.5.0)
 CODEX_ACP_SDK=1.9.0
 
 ROOT="$HOME/workforce"
+# Files shipped with this script by deploy.sh (absent when piped to sh -s).
+case "$0" in
+  */setup.sh) SRC=$(cd "$(dirname "$0")/.." && pwd) ;;
+  *) SRC=/nonexistent ;;
+esac
 VENDOR="$ROOT/vendor"
 BIN="$ROOT/bin"
 NODE_DIR="$VENDOR/node-v$NODE_VERSION-darwin-arm64"
@@ -73,6 +81,48 @@ for tool in claude-agent-acp codex-acp; do ln -sfn "$ACP_DIR/node_modules/.bin/$
 # The Claude Code binary bundled with the adapter is what agents run; agentctl
 # uses the same one for sign-in and for checking the stored credential.
 ln -sfn "$ACP_DIR/node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64/claude" "$BIN/claude"
+
+# The Black 4 connector: every agent's MCP server (agentctl passes mcp/black4 to
+# buzz-acp). Its one dependency, @noble/curves, is pinned with integrity hashes
+# in package-lock.json and installed with npm ci; reinstalled only when the
+# lockfile changes.
+CONNECTOR="$SRC/bridge/black4-agent-mcp"
+MCP_DIR="$VENDOR/black4-agent-mcp"
+if [ -f "$CONNECTOR/black4-agent-mcp.mjs" ]; then
+  want_mcp=$(/usr/bin/shasum -a 256 "$CONNECTOR/package-lock.json" | cut -d' ' -f1)
+  if [ "$(cat "$MCP_DIR/.installed" 2>/dev/null || true)" != "$want_mcp" ] || [ ! -f "$MCP_DIR/node_modules/@noble/curves/package.json" ]; then
+    echo "installing the Black 4 connector's dependencies"
+    tmp=$(mktemp -d "$VENDOR/.mcp.XXXXXX")
+    trap 'rm -rf "$tmp"' EXIT
+    cp "$CONNECTOR/package.json" "$CONNECTOR/package-lock.json" "$tmp/"
+    (cd "$tmp" && npm ci --omit=dev --no-fund --no-audit --loglevel=error)
+    echo "$want_mcp" > "$tmp/.installed"
+    rm -rf "$MCP_DIR.old"
+    if [ -d "$MCP_DIR" ]; then mv "$MCP_DIR" "$MCP_DIR.old"; fi
+    mv "$tmp" "$MCP_DIR"
+    rm -rf "$MCP_DIR.old"
+    trap - EXIT
+  fi
+  cp "$CONNECTOR/black4-agent-mcp.mjs" "$MCP_DIR/black4-agent-mcp.mjs.tmp"
+  mv "$MCP_DIR/black4-agent-mcp.mjs.tmp" "$MCP_DIR/black4-agent-mcp.mjs"
+  mkdir -p "$ROOT/mcp"
+  cat > "$ROOT/mcp/black4.tmp" <<'SH'
+#!/bin/sh
+# The Black 4 MCP for this machine's agents. buzz-acp starts it with the
+# agent's key and owner attestation in the environment.
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+exec "$ROOT/bin/node" "$ROOT/vendor/black4-agent-mcp/black4-agent-mcp.mjs" "$@"
+SH
+  chmod 755 "$ROOT/mcp/black4.tmp"
+  mv "$ROOT/mcp/black4.tmp" "$ROOT/mcp/black4"
+  echo "Black 4 connector installed at $ROOT/mcp/black4"
+fi
+if [ -f "$SRC/machine/agentctl" ]; then
+  cp "$SRC/machine/agentctl" "$BIN/agentctl.tmp"
+  chmod 755 "$BIN/agentctl.tmp"
+  mv "$BIN/agentctl.tmp" "$BIN/agentctl"
+  echo "agentctl installed"
+fi
 
 if [ -n "${MACHINE_NAME:-}" ]; then
   printf '{"name": "%s"}\n' "$MACHINE_NAME" > "$ROOT/machine.json"

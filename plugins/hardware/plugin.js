@@ -443,10 +443,13 @@ export function apply(ctx) {
             .then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }, () => {});
         } }, copied ? "Copied" : "Copy link")),
       login.needsCode
-        ? h("form", { style: row, onSubmit: (event) => { event.preventDefault(); submit(); } },
+        // Not a <form>: this sits inside Buzz's own Create agent form, and a
+        // nested form's submit goes to the outer one, which abandons the dialog.
+        ? h("div", { style: row },
           h("input", { type: "password", autoComplete: "off", spellCheck: false, placeholder: "Paste code", "aria-label": "Sign-in code",
-            value: code, disabled: busy, onChange: (event) => setCode(event.target.value), style: { flex: 1, minWidth: 160 } }),
-          h("button", { type: "submit", disabled: busy || !code.trim(), "aria-busy": busy }, busy ? h(Spinner) : "Finish"),
+            value: code, disabled: busy, onChange: (event) => setCode(event.target.value), style: { flex: 1, minWidth: 160 },
+            onKeyDown: (event) => { if (event.key === "Enter") { event.preventDefault(); event.stopPropagation(); if (!busy && code.trim()) submit(); } } }),
+          h("button", { type: "button", disabled: busy || !code.trim(), "aria-busy": busy, onClick: submit }, busy ? h(Spinner) : "Finish"),
           h("button", { type: "button", onClick: () => { setCode(""); void flow.current?.cancel(); } }, "Cancel"))
         : h("div", { style: row },
           h("button", { type: "button", disabled: busy, "aria-busy": busy, onClick: submit }, busy ? h(Spinner) : "Done"),

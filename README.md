@@ -2,7 +2,7 @@
 
 Status: current  
 Owner: Black 4 platform  
-Updated: 2026-11-11
+Updated: 2026-11-14
 
 Black 4 builds an outcome-getting machine. This repository is how that machine
 shows up in [Buzz](https://github.com/block/buzz-app). Buzz itself stays stock,
@@ -67,6 +67,12 @@ A Mac managed for Black 4 can list the plugin in Buzz's
 `managed-plugins.json` so Settings shows it as recommended, pinned to an exact
 commit. Buzz never installs it without the person's click.
 
+Updating **Buzz itself** is a separate question: its plugin API is a preview
+and can change. The [Buzz canary](canary/README.md) checks every day whether
+the latest Buzz release, preview and `main` still offer everything these
+plugins use. Its workflow going red on the release means: do not update Buzz
+yet.
+
 ## What is here
 
 | Path | What it is |
@@ -77,6 +83,8 @@ commit. Buzz never installs it without the person's click.
 | `install.sh` | The one-command install above. |
 | `tests/` | Unit tests against the plugin file, with a process double and fictional data. No sign-in or network. |
 | `scripts/check-build-folder.mjs` | Refuses anything in a plugin folder that Buzz would not read. |
+| `canary/` | The Buzz canary: the Buzz API each plugin uses (`contract.json`), checked against Buzz's source by `check.mjs` and by starting the plugins in Buzz's real services (`load.mjs`). |
+| `machine/pins.json`, `scripts/check-machine-pins.mjs` | The buzz-acp harness and ACP adapter versions an agent machine runs together, and the check that `machine/setup.sh` agrees. |
 
 ## Reviews
 

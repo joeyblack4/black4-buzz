@@ -1,0 +1,14 @@
+{
+  "name": "black4-buzz-canary",
+  "private": true,
+  "type": "module",
+  "description": "Checks Black 4's Buzz plugins against a Buzz (block/buzz-app) checkout before anyone updates Buzz.",
+  "scripts": {
+    "check": "node check.mjs"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.2",
+    "@types/react": "19.2.18",
+    "typescript": "6.0.3"
+  }
+}

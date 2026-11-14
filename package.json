@@ -7,7 +7,9 @@
   },
   "scripts": {
     "test": "node --test tests/*.test.mjs",
-    "check": "node --check plugins/black4/plugin.js && node --check plugins/hardware/plugin.js && node scripts/check-build-folder.mjs && node subscriptions/build.mjs --check && python3 -m unittest discover -s machine/tests && npm test",
-    "test:subscriptions": "npm ci --prefix subscriptions --no-fund --no-audit && npm test --prefix subscriptions"
+    "check": "node --check plugins/black4/plugin.js && node --check plugins/hardware/plugin.js && node scripts/check-build-folder.mjs && node scripts/check-machine-pins.mjs && node --check canary/check.mjs && node --check canary/load.mjs && node subscriptions/build.mjs --check && python3 -m unittest discover -s machine/tests && npm test",
+    "test:subscriptions": "npm ci --prefix subscriptions --no-fund --no-audit && npm test --prefix subscriptions",
+    "canary": "node canary/check.mjs",
+    "canary:load": "node canary/load.mjs"
   }
 }

@@ -23,7 +23,9 @@ Not requests (run from cron or by agentctl itself):
 
 Callers: a teammate reaches this machine with their own SSH key, whose
 authorized_keys entry forces `agentctl --caller <label>` (machine/teammates.sh
-writes it). The label is stored as each agent's creator (`createdBy`, shown in
+writes it), or through the hardware door (machine/door.mjs), which runs
+`agentctl --caller <staff email>` for a request carrying a valid Platform
+Control pass. The label or email is stored as each agent's creator (`createdBy`, shown in
 `list`). A caller can read every agent, but changes, starts and removes only
 agents it created; it may sign a harness in only while that harness is signed
 out, and cannot sign the machine out. No label (the machine
@@ -48,6 +50,10 @@ from pathlib import Path
 
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 CALLER_LABEL = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
+# A staff email, set by the hardware door (machine/door.mjs) from a Platform
+# Control pass. It has an @, which no SSH label has, so the two never collide.
+# The same shape as door.mjs's EMAIL.
+CALLER_EMAIL = re.compile(r"^(?=.{3,254}$)[a-z0-9][a-z0-9._%+-]{0,63}@[a-z0-9-]+(\.[a-z0-9-]+)+$")
 CALLER = None  # set from --caller by main(); None is the admin
 LOGIN_ID = re.compile(r"^[0-9a-f]{16}$")
 LOGIN_TTL = int(os.environ.get("AGENTCTL_LOGIN_TTL") or 15 * 60)  # a sign-in left open longer is dropped
@@ -1510,9 +1516,9 @@ def main(argv=None):
     global CALLER
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["--caller"]:
-        # Only an authorized_keys forced command passes this, and then
-        # nothing else: a teammate's key never reaches supervise or a helper.
-        if len(argv) != 2 or not CALLER_LABEL.match(argv[1]):
+        # Only an authorized_keys forced command or the door passes this, and
+        # then nothing else: a teammate's key never reaches supervise or a helper.
+        if len(argv) != 2 or not (CALLER_LABEL.fullmatch(argv[1]) or CALLER_EMAIL.fullmatch(argv[1])):
             print(json.dumps({"ok": False, "error": "this key's caller label is not valid; ask an admin to add it again"}))
             return
         CALLER, argv = argv[1], []

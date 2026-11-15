@@ -163,6 +163,36 @@ if [ -n "${MACHINE_NAME:-}" ]; then
   printf '{"name": "%s"}\n' "$MACHINE_NAME" > "$ROOT/machine.json"
 fi
 
+# The hardware door (machine/door.mjs): agentctl over HTTPS for a Platform
+# Control pass, on 127.0.0.1 (8410 for ~/workforce, 8411 for a dev root) behind
+# Tailscale Funnel. It must run with no agent activated (the first provision
+# comes through it), so it has its own cron lines, apart from the supervisor's,
+# which agentctl drops once no agent is left. Each root has its own mark; the
+# lines are matched on how they end, so one root never touches another's.
+if [ -f "$SRC/machine/door.mjs" ]; then
+  cp "$SRC/machine/door.mjs" "$BIN/door.mjs.tmp"
+  chmod 644 "$BIN/door.mjs.tmp"
+  mv "$BIN/door.mjs.tmp" "$BIN/door.mjs"
+  if [ "$ROOT" = "$HOME/workforce" ]; then DOOR_MARK="# black4-door"; DOOR_PORT=8410; else DOOR_MARK="# black4-door:$ROOT"; DOOR_PORT=8411; fi
+  DOOR_CMD="$BIN/node $BIN/door.mjs >/dev/null 2>&1"
+  current=$(/usr/bin/crontab -l 2>/dev/null || true)
+  wanted=$( {
+    printf '%s\n' "$current" | awk -v m="$DOOR_MARK" 'NF && substr($0, length($0) - length(m) + 1) != m'
+    printf '@reboot %s %s\n* * * * * %s %s\n' "$DOOR_CMD" "$DOOR_MARK" "$DOOR_CMD" "$DOOR_MARK"
+  } )
+  if [ "$current" != "$wanted" ]; then printf '%s\n' "$wanted" | /usr/bin/crontab -; fi
+  # Start it now rather than at the next minute. A door running the previous
+  # file exits within 5 s of the copy above; the second try takes the port.
+  "$BIN/node" "$BIN/door.mjs" </dev/null >/dev/null 2>&1 &
+  sleep 6
+  "$BIN/node" "$BIN/door.mjs" </dev/null >/dev/null 2>&1 &
+  sleep 1
+  if [ -f "$ROOT/door.json" ]; then echo "door installed (door.json sets its port and keys)"
+  elif health=$(/usr/bin/curl -fsS --max-time 3 "http://127.0.0.1:$DOOR_PORT/health" 2>/dev/null); then echo "door up on 127.0.0.1:$DOOR_PORT: $health"
+  else echo "door installed; not answering on 127.0.0.1:$DOOR_PORT yet (see $ROOT/run/door.log)"
+  fi
+fi
+
 echo "node $("$BIN/node" --version), $want, grok $GROK_VERSION"
 # The self-test: pinned versions, buzz-acp's ACP handshake with each adapter,
 # the connector, cron and disk. An install that cannot run an agent fails here.

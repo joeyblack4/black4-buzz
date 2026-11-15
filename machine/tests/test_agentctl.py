@@ -468,6 +468,22 @@ class Callers(Base):
         self.assertEqual(self.run_main()["agents"][0], {**self.run_main()["agents"][0], "pubkey": made["pubkey"], "createdBy": "sam"})
 
 
+    def test_the_door_passes_a_staff_email_as_the_caller(self):
+        # machine/door.mjs runs `agentctl --caller <email>` for a valid pass.
+        made = self.run_main("--caller", "annabelle@black4.ai", request='{"op": "provision", "name": "A", "community": "wss://r.example.com"}')
+        self.assertTrue(made["ok"])
+        row = self.run_main()["agents"][0]
+        self.assertEqual(row["createdBy"], "annabelle@black4.ai")
+        # Only she (or the admin) changes it; an SSH label with her name does not.
+        for other in ("annabelle", "sam@black4.ai"):
+            r = self.run_main("--caller", other, request=json.dumps({"op": "remove", "pubkey": made["pubkey"]}))
+            self.assertEqual(r, {"ok": False, "error": "This agent belongs to annabelle@black4.ai. Only they or a Black 4 admin can change it."}, other)
+        self.assertTrue(self.run_main("--caller", "annabelle@black4.ai", request=json.dumps({"op": "remove", "pubkey": made["pubkey"]}))["ok"])
+        # Not an email agentctl accepts: upper case, no domain dot, spaces, a newline, too long.
+        for bad in ("Annabelle@black4.ai", "a@b", "a b@black4.ai", "sam@black4.ai\n", "sam\n", "@black4.ai", "a" * 65 + "@black4.ai"):
+            self.assertFalse(self.run_main("--caller", bad)["ok"], repr(bad))
+
+
 class Supervisor(Base):
     def test_killed_agent_comes_back(self):
         self.sign_in()

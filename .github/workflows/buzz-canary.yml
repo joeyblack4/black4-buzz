@@ -1,0 +1,74 @@
+# Does a new Buzz break Black 4's plugins? Checks the latest Buzz release, the
+# newest Buzz preview and Buzz's main branch every day, before anyone clicks
+# Update. A red run is the signal; see canary/README.md for what to do.
+name: buzz-canary
+on:
+  schedule:
+    - cron: "23 7 * * *" # daily, 07:23 UTC
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Also check this block/buzz-app tag, branch or commit (optional)"
+        required: false
+  pull_request:
+    paths: ["plugins/**", "canary/**", ".github/workflows/buzz-canary.yml"]
+permissions:
+  contents: read
+concurrency:
+  group: buzz-canary-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  refs:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+    steps:
+      - id: pick
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXTRA: ${{ inputs.ref }}
+        run: |
+          release=$(gh api repos/block/buzz-app/releases/latest --jq .tag_name)
+          released=$(gh api repos/block/buzz-app/releases/latest --jq .published_at)
+          # The newest preview, only when it is newer than the release.
+          preview=$(gh api 'repos/block/buzz-app/releases?per_page=20' --jq "[.[] | select(.prerelease and (.draft | not) and .published_at > \"$released\")][0].tag_name // empty")
+          refs=$(jq -cn --arg r "$release" --arg p "$preview" --arg x "$EXTRA" '
+            [{name: "release \($r)", ref: $r}]
+            + (if $p != "" then [{name: "preview \($p)", ref: $p}] else [] end)
+            + [{name: "main", ref: "main"}]
+            + (if $x != "" then [{name: "requested \($x)", ref: $x}] else [] end)')
+          echo "Checking: $refs"
+          echo "matrix=$refs" >> "$GITHUB_OUTPUT"
+  check:
+    needs: refs
+    name: Buzz ${{ matrix.buzz.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        buzz: ${{ fromJson(needs.refs.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: block/buzz-app
+          ref: ${{ matrix.buzz.ref }}
+          path: buzz-app
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci --prefix canary --no-fund --no-audit
+      - name: Contract (Buzz's types and manifest schema)
+        run: node canary/check.mjs buzz-app --label "${{ matrix.buzz.ref }}"
+      - name: Install Buzz's JavaScript dependencies (no build, no scripts)
+        if: ${{ !cancelled() }}
+        working-directory: buzz-app
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile --ignore-scripts
+      - name: Load (start each plugin in Buzz's real services)
+        if: ${{ !cancelled() }}
+        run: node canary/load.mjs buzz-app

@@ -1,0 +1,891 @@
+#!/usr/bin/python3
+"""agentctl: runs Buzz agents on this machine for the Black 4 hardware provider.
+
+Reads one JSON request on stdin, writes one JSON reply on stdout. The Buzz
+plugin calls it over SSH. Each agent is a folder under ~/workforce/agents/<pubkey>
+holding its key (mode 600), settings and log, and one buzz-acp process.
+
+Requests: {"op": ...} with op one of
+  provision, activate, profile, instructions.get, instructions.set, remove,
+  start, status, list                     (one agent)
+  identity                                (each agent's key and the owner it attests)
+  machine.status                          (what this machine can run)
+  login.start, login.finish, login.cancel, logout   (model sign-in)
+
+Not requests (run from cron or by agentctl itself):
+  agentctl supervise          keeps activated agents running; cron starts it
+  agentctl login-helper <id>  holds one sign-in open between SSH calls
+
+Callers: a teammate reaches this machine with their own SSH key, whose
+authorized_keys entry forces `agentctl --caller <label>` (machine/teammates.sh
+writes it). The label is stored as each agent's creator (`createdBy`, shown in
+`list`). A caller can read every agent, but changes, starts and removes only
+agents it created, and cannot sign the machine out. No label (the admin's own
+unrestricted key, or cron) may do everything; agents made before labels
+existed are open to every caller.
+
+Secrets: agent keys live in agents/<pubkey>/key, the Claude subscription token
+in secrets/claude. Neither is ever printed, logged or put in a reply.
+
+Black 4 MCP: when setup.sh has installed the connector (mcp/black4), every agent
+gets it as buzz-acp's MCP server. It signs each request with the agent's own key
+and owner attestation, so there is nothing to sign in to and no per-agent setting.
+"""
+import fcntl, hashlib, json, os, re, secrets, shutil, signal, socket, subprocess, sys, time
+from pathlib import Path
+
+HEX64 = re.compile(r"^[0-9a-f]{64}$")
+CALLER_LABEL = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
+CALLER = None  # set from --caller by main(); None is the admin
+LOGIN_ID = re.compile(r"^[0-9a-f]{16}$")
+CRON_MARK = "# black4-workforce"
+LOGIN_TTL = 15 * 60          # a sign-in left open longer than this is dropped
+CHECK_OK_TTL = 10 * 60       # how long a verified Claude credential is trusted
+CHECK_FAIL_TTL = 60          # how long a failed check is remembered
+SUPERVISE_EVERY = 5          # seconds between supervisor passes
+START_GRACE = 2.0            # an agent must stay up this long for start to succeed
+
+
+def set_root(home):
+    """Point every path at <home>/workforce (tests use a temporary home)."""
+    global HOME, ROOT, AGENTS, BIN, LOGINS, SECRETS, RUN, VENDOR, BLACK4_MCP
+    HOME = Path(home)
+    ROOT = HOME / "workforce"
+    AGENTS, BIN, LOGINS = ROOT / "agents", ROOT / "bin", ROOT / "logins"
+    SECRETS, RUN, VENDOR = ROOT / "secrets", ROOT / "run", ROOT / "vendor"
+    # buzz-acp names the MCP server after this file's stem, so the agent's
+    # tools appear as black4 tools (mcp__black4__<tool> in Claude Code).
+    BLACK4_MCP = ROOT / "mcp" / "black4"
+
+
+set_root(os.environ.get("AGENTCTL_HOME") or Path.home())
+SELF = Path(os.path.abspath(__file__))
+PYTHON = "/usr/bin/python3" if os.path.exists("/usr/bin/python3") else sys.executable
+
+# secp256k1, for the x-only public key of a new agent key (BIP-340).
+P = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
+N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+G = (0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798,
+     0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8)
+
+
+def _add(a, b):
+    if a is None: return b
+    if b is None: return a
+    if a[0] == b[0] and (a[1] + b[1]) % P == 0: return None
+    if a == b: m = 3 * a[0] * a[0] * pow(2 * a[1], P - 2, P) % P
+    else: m = (b[1] - a[1]) * pow(b[0] - a[0], P - 2, P) % P
+    x = (m * m - a[0] - b[0]) % P
+    return (x, (m * (a[0] - x) - a[1]) % P)
+
+
+def pubkey_of(secret_hex):
+    k, point, addend = int(secret_hex, 16), None, G
+    while k:
+        if k & 1: point = _add(point, addend)
+        addend = _add(addend, addend)
+        k >>= 1
+    return format(point[0], "064x")
+
+
+class Fail(Exception):
+    """A request that cannot be done; the message is the reply's plain sentence."""
+
+
+def fail(message):
+    raise Fail(message)
+
+
+def private_dir(path):
+    path.mkdir(parents=True, exist_ok=True)
+    os.chmod(path, 0o700)
+    return path
+
+
+def write_private(path, text):
+    """Write a file only this user can read, replacing it atomically."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.unlink(missing_ok=True)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as f: f.write(text)
+    tmp.replace(path)
+
+
+def read_json(path, default=None):
+    try: return json.loads(path.read_text())
+    except (FileNotFoundError, ValueError): return default
+
+
+def log_line(name, message):
+    """Append a line to run/<name>.log. Never pass a secret here."""
+    try:
+        with open(private_dir(RUN) / f"{name}.log", "a") as f:
+            f.write(time.strftime("%Y-%m-%dT%H:%M:%S ") + message + "\n")
+    except OSError:
+        pass
+
+
+# ---------------------------------------------------------------- agents
+
+def folder(pubkey):
+    if not isinstance(pubkey, str) or not HEX64.match(pubkey):
+        fail("pubkey must be 64 hex characters")
+    return AGENTS / pubkey
+
+
+def agent_dirs():
+    if not AGENTS.exists(): return []
+    return [d for d in sorted(AGENTS.iterdir()) if d.is_dir() and HEX64.match(d.name)]
+
+
+def read_settings(d):
+    return read_json(d / "agent.json", {})
+
+
+def write_settings(d, settings):
+    tmp = d / "agent.json.tmp"
+    tmp.write_text(json.dumps(settings, indent=2))
+    tmp.replace(d / "agent.json")
+
+
+def process_command(pid):
+    """The command line of a live process, or "" (gone, or a zombie)."""
+    done = subprocess.run(["/bin/ps", "-p", str(pid), "-o", "stat=,command="], capture_output=True, text=True)
+    stat_, _, command = done.stdout.strip().partition(" ")
+    return "" if not stat_ or stat_.startswith("Z") else command
+
+
+def reap():
+    """Collect exited children so they do not linger as zombies (the supervisor
+    is the parent of every agent it restarts)."""
+    while True:
+        try: pid, _ = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError: return
+        if pid == 0: return
+
+
+def running(d):
+    """The pid of this agent's buzz-acp, or None. A reused pid does not count."""
+    try: pid = int((d / "pid").read_text())
+    except (FileNotFoundError, ValueError): return None
+    try: os.kill(pid, 0)
+    except OSError: return None
+    if "buzz-acp" not in process_command(pid): return None
+    return pid
+
+
+def stop(d):
+    pid = running(d)
+    if pid:
+        try:
+            os.killpg(pid, signal.SIGTERM)
+        except OSError:
+            os.kill(pid, signal.SIGTERM)
+        for _ in range(50):
+            if not running(d): break
+            time.sleep(0.1)
+        else:
+            try: os.killpg(pid, signal.SIGKILL)
+            except OSError: pass
+    (d / "pid").unlink(missing_ok=True)
+
+
+class agent_lock:
+    """Serialises start/stop of one agent between SSH calls and the supervisor."""
+    def __init__(self, d): self.path = d / "lock"
+    def __enter__(self):
+        self.f = open(self.path, "a")
+        fcntl.flock(self.f, fcntl.LOCK_EX)
+        return self
+    def __exit__(self, *exc):
+        fcntl.flock(self.f, fcntl.LOCK_UN)
+        self.f.close()
+
+
+# ---------------------------------------------------------------- harnesses
+
+HARNESS = {  # the model CLI each choice runs, as buzz-acp's agent command
+    "claude": ("claude-agent-acp", ""),
+    "codex": ("codex-acp", ""),
+    "goose": ("goose", "acp"),
+    "grok": ("grok", "agent,stdio"),
+}
+LABEL = {"claude": "Claude Code", "codex": "Codex", "grok": "Grok", "goose": "Goose"}
+
+
+def agent_path():
+    return f"{BIN}:{HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+
+
+def installed(harness):
+    return shutil.which(HARNESS[harness][0], path=agent_path()) is not None
+
+
+def base_env():
+    """A clean environment for child processes: nothing inherited from SSH or cron
+    except what a CLI needs to find its home and temp folder."""
+    env = {"HOME": str(HOME), "PATH": agent_path(), "LANG": os.environ.get("LANG") or "en_US.UTF-8"}
+    for key in ("USER", "LOGNAME", "SHELL", "TMPDIR"):
+        if os.environ.get(key): env[key] = os.environ[key]
+    env.setdefault("USER", os.environ.get("USER") or HOME.name)
+    return env
+
+
+def claude_cli():
+    """The Claude Code binary: the one bundled with the ACP adapter (what agents
+    run) when setup.sh linked it, else any claude on the agent PATH."""
+    return shutil.which("claude", path=agent_path())
+
+
+# ---------------------------------------------------------------- Claude credential
+
+def claude_token():
+    try: token = (SECRETS / "claude").read_text().strip()
+    except FileNotFoundError: return None
+    return token or None
+
+
+def token_hash(token):
+    return hashlib.sha256(token.encode()).hexdigest()[:16]
+
+
+def run_claude_check(token):
+    """Ask Claude Code for one tiny reply with this token.
+    Returns True (works), False (rejected) or None (could not tell, e.g. offline)."""
+    cli = claude_cli()
+    if not cli: return None
+    env = base_env()
+    env["CLAUDE_CODE_OAUTH_TOKEN"] = token
+    cwd = private_dir(RUN / "check")
+    try:
+        done = subprocess.run(
+            [cli, "-p", "Reply with the single word OK.", "--model", "haiku",
+             "--max-turns", "1", "--output-format", "json"],
+            cwd=cwd, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=90)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    return judge_claude_check(done.stdout)
+
+
+def judge_claude_check(stdout):
+    try: result = json.loads(stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError): return None
+    if not result.get("is_error"): return True
+    text = str(result.get("result") or "")
+    if result.get("api_error_status") in (401, 403) or re.search(
+            r"Not logged in|/login|authenticat|access token|invalid.*token|token.*(expired|revoked)", text, re.I):
+        return False
+    return None
+
+
+def claude_signed_in(force=False):
+    """(signedIn, account) for the stored Claude credential, verified with a real
+    call and cached so machine.status stays quick."""
+    token = claude_token()
+    if not token: return False, None
+    meta = read_json(SECRETS / "claude.json", {})
+    account = meta.get("account")
+    cache = read_json(RUN / "claude-check.json", {})
+    now = time.time()
+    if not force and cache.get("hash") == token_hash(token):
+        age = now - cache.get("at", 0)
+        if cache.get("ok") is True and age < CHECK_OK_TTL: return True, account
+        if cache.get("ok") is False and age < CHECK_FAIL_TTL: return False, account
+    ok = run_claude_check(token)
+    if ok is None:  # offline or CLI trouble: keep the last answer for this token
+        ok = cache.get("hash") == token_hash(token) and cache.get("ok") is True
+        if ok: return True, account
+        return False, account
+    write_private(private_dir(RUN) / "claude-check.json",
+                  json.dumps({"hash": token_hash(token), "ok": ok, "at": now}))
+    return ok, account
+
+
+def claude_known_bad():
+    """True only when the stored token was checked recently and rejected. Cheap:
+    never runs Claude, so the supervisor can ask it every pass."""
+    token = claude_token()
+    if not token: return True
+    cache = read_json(RUN / "claude-check.json", {})
+    return cache.get("hash") == token_hash(token) and cache.get("ok") is False
+
+
+def save_claude_token(token, account):
+    private_dir(SECRETS)
+    write_private(SECRETS / "claude", token + "\n")
+    write_private(SECRETS / "claude.json", json.dumps({"account": account, "savedAt": int(time.time())}))
+    write_private(private_dir(RUN) / "claude-check.json",
+                  json.dumps({"hash": token_hash(token), "ok": True, "at": time.time()}))
+
+
+def forget_claude_token():
+    for name in ("claude", "claude.json"):
+        (SECRETS / name).unlink(missing_ok=True)
+    (RUN / "claude-check.json").unlink(missing_ok=True)
+
+
+def machine_status():
+    rows = []
+    for hid in ("claude", "codex", "grok", "goose"):
+        row = {"id": hid, "label": LABEL[hid], "installed": installed(hid), "signedIn": None, "account": None}
+        if hid == "claude":
+            row["signedIn"], row["account"] = claude_signed_in()
+        rows.append(row)
+    return {"ok": True, "machine": machine_name(), "harnesses": rows}
+
+
+def machine_name():
+    name = (read_json(ROOT / "machine.json", {}) or {}).get("name")
+    return name or socket.gethostname().split(".")[0]
+
+
+# ---------------------------------------------------------------- start
+
+def start(d):
+    with agent_lock(d):
+        return _start(d)
+
+
+def _start(d):
+    s = read_settings(d)
+    if not s.get("auth"): fail("agent has no owner attestation yet")
+    harness = s.get("harness") or "claude"
+    if harness not in HARNESS: fail(f"unknown harness {harness!r}")
+    if not installed(harness):
+        fail(f"{LABEL[harness]} is not installed on this machine.")
+    env = base_env()
+    if harness == "claude":
+        token = claude_token()
+        if not token or claude_known_bad():
+            fail("Claude Code is not signed in on this machine. Sign in to Claude from Buzz first.")
+        env["CLAUDE_CODE_OAUTH_TOKEN"] = token
+    stop(d)
+    command, args = HARNESS[harness]
+    env.update({
+        "BUZZ_PRIVATE_KEY": (d / "key").read_text().strip(),
+        # The harness speaks WebSocket to the relay; the CLI below uses HTTPS.
+        "BUZZ_RELAY_URL": "wss://" + s["community"].split("://", 1)[1],
+        "BUZZ_AUTH_TAG": json.dumps(s["auth"]),
+        "BUZZ_ACP_AGENT_COMMAND": command,
+        "BUZZ_ACP_RESPOND_TO": s.get("respondTo") or "owner-only",
+        "BUZZ_ACP_LAZY_POOL": "true",
+    })
+    if args: env["BUZZ_ACP_AGENT_ARGS"] = args
+    # buzz-acp declares one MCP server per session and hands it the agent's key
+    # (nsec) and BUZZ_AUTH_TAG. Buzz's own tools are the agent's shell and the
+    # buzz CLI, so the slot is free for Black 4. Missing connector: no MCP.
+    if os.access(BLACK4_MCP, os.X_OK): env["BUZZ_ACP_MCP_COMMAND"] = str(BLACK4_MCP)
+    if s.get("allow"): env["BUZZ_ACP_RESPOND_TO_ALLOWLIST"] = ",".join(s["allow"])
+    if (s.get("instructions") or "").strip():
+        (d / "instructions.md").write_text(s["instructions"])
+        env["BUZZ_ACP_SYSTEM_PROMPT_FILE"] = str(d / "instructions.md")
+    if s.get("model"): env["BUZZ_ACP_MODEL"] = s["model"]
+    (d / "work").mkdir(exist_ok=True)
+    log = open(d / "agent.log", "ab")
+    proc = subprocess.Popen(
+        [str(BIN / "buzz-acp"), "--agent-owner", s["auth"][1]],
+        cwd=d / "work", env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+        start_new_session=True)
+    log.close()
+    (d / "pid").write_text(str(proc.pid))
+    time.sleep(START_GRACE)
+    if proc.poll() is not None:
+        tail = (d / "agent.log").read_text(errors="replace")[-600:]
+        fail("agent stopped at start: " + tail)
+    ensure_persistence()
+    return proc.pid
+
+
+def restart_harness_agents(harness):
+    """Restart running or activated agents on this harness (after a sign-in)."""
+    for d in agent_dirs():
+        s = read_settings(d)
+        if s.get("auth") and (s.get("harness") or "claude") == harness:
+            try: start(d)
+            except Fail as e: log_line("supervisor", f"restart {d.name[:8]} failed: {e}")
+
+
+def stop_harness_agents(harness):
+    for d in agent_dirs():
+        if (read_settings(d).get("harness") or "claude") == harness:
+            with agent_lock(d): stop(d)
+
+
+# ---------------------------------------------------------------- persistence
+# Nobody is logged in at the machine's screen, so there is no GUI launchd session
+# to hold a LaunchAgent across a reboot. cron runs without one: an @reboot line
+# and an every-minute line both run `agentctl supervise`, which takes a lock and
+# then loops, restarting any activated agent that is not running.
+
+def cron_lines():
+    cmd = f"{PYTHON} {BIN / 'agentctl'} supervise >/dev/null 2>&1"
+    return [f"@reboot {cmd} {CRON_MARK}", f"* * * * * {cmd} {CRON_MARK}"]
+
+
+def read_crontab():
+    done = subprocess.run(["/usr/bin/crontab", "-l"], capture_output=True, text=True)
+    return done.stdout if done.returncode == 0 else ""
+
+
+def write_crontab(text):
+    if text.strip():
+        subprocess.run(["/usr/bin/crontab", "-"], input=text, text=True, check=True, capture_output=True)
+    else:
+        subprocess.run(["/usr/bin/crontab", "-r"], capture_output=True)
+
+
+def merged_crontab(current, install):
+    keep = [line for line in current.splitlines() if CRON_MARK not in line]
+    if install: keep += cron_lines()
+    return "\n".join(keep) + ("\n" if keep else "")
+
+
+def ensure_persistence():
+    if os.environ.get("AGENTCTL_NO_CRON"): return
+    current = read_crontab()
+    wanted = merged_crontab(current, True)
+    if current != wanted: write_crontab(wanted)
+
+
+def drop_persistence():
+    """Remove the cron lines and the supervisor once no activated agent is left."""
+    if any(read_settings(d).get("auth") for d in agent_dirs()): return
+    if not os.environ.get("AGENTCTL_NO_CRON"):
+        current = read_crontab()
+        wanted = merged_crontab(current, False)
+        if current != wanted: write_crontab(wanted)
+    pid = read_json(RUN / "supervisor.json", {}).get("pid")
+    if pid and pid != os.getpid():
+        try: os.kill(pid, signal.SIGTERM)
+        except OSError: pass
+
+
+def supervise(passes=None):
+    """Keep activated agents running. Only one supervisor runs at a time; a second
+    one exits at once. Exits when agentctl itself is replaced, so cron picks up
+    the new version within a minute."""
+    private_dir(RUN)
+    lock = open(RUN / "supervisor.lock", "a")
+    try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError: return
+    write_private(RUN / "supervisor.json", json.dumps({"pid": os.getpid(), "since": int(time.time())}))
+    log_line("supervisor", f"supervisor {os.getpid()} up")
+    born = SELF.stat().st_mtime if SELF.exists() else 0
+    backoff = {}  # pubkey -> (next try time, current delay)
+    n = 0
+    while passes is None or n < passes:
+        n += 1
+        supervise_pass(backoff)
+        cleanup_logins()
+        if not any(read_settings(d).get("auth") for d in agent_dirs()):
+            drop_persistence(); break
+        if SELF.exists() and SELF.stat().st_mtime != born:
+            log_line("supervisor", "agentctl changed; exiting for cron to restart"); break
+        if passes is None or n < passes: time.sleep(SUPERVISE_EVERY)
+
+
+def supervise_pass(backoff, now=None):
+    reap()
+    now = now or time.time()
+    for d in agent_dirs():
+        s = read_settings(d)
+        if not s.get("auth"): continue
+        if running(d):
+            next_try, delay = backoff.get(d.name, (0, 0))
+            if delay and now - next_try > 300: backoff.pop(d.name, None)  # healthy for 5 min
+            continue
+        next_try, delay = backoff.get(d.name, (0, 0))
+        if now < next_try: continue
+        harness = s.get("harness") or "claude"
+        if harness == "claude" and claude_known_bad(): continue  # waits for a sign-in
+        try:
+            pid = start(d)
+            log_line("supervisor", f"started {d.name[:8]} pid {pid}")
+            delay = min(max(delay * 2, 5), 300)
+        except Fail as e:
+            delay = min(max(delay * 2, 10), 300)
+            log_line("supervisor", f"start {d.name[:8]} failed: {str(e)[:200]}")
+        backoff[d.name] = (now + delay, delay)
+
+
+# ---------------------------------------------------------------- sign-in
+# `claude setup-token` prints a link, waits for the code the person pastes back,
+# then prints a long-lived OAuth token. It needs a terminal, and the sign-in
+# spans two SSH calls, so a detached helper runs it in a pty and keeps state in
+# logins/<id>/ (mode 700): state.json (url or error), code (written by
+# login.finish), result.json (written by the helper). The token never touches
+# that folder: the helper writes it straight to secrets/claude.
+
+URL_RE = re.compile(r"https://[^\s\"'<>]+/oauth/authorize\?[^\s\"'<>]+")
+TOKEN_RE = re.compile(r"sk-ant-[a-z0-9]+-[A-Za-z0-9_\-]{20,}")
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+CODE_RE = re.compile(r"^[A-Za-z0-9_\-#.~=+/]{8,1024}$")
+
+
+def screen_text(raw):
+    """Terminal output as plain text: cursor-forward becomes spaces, other escapes go."""
+    raw = re.sub(rb"\x1b\[(\d*)C", lambda m: b" " * int(m.group(1) or 1), raw)
+    raw = re.sub(rb"\x1b\[[0-9;?>=]*[A-Za-z]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)|\x1b[()][A-Z0-9]|\x1b[=>78]", b"", raw)
+    return raw.decode(errors="replace").replace("\r", "\n")
+
+
+def login_dir(login_id):
+    if not isinstance(login_id, str) or not LOGIN_ID.match(login_id):
+        fail("loginId is not valid")
+    return LOGINS / login_id
+
+
+def kill_login(d):
+    info = read_json(d / "helper.json", {})
+    for pid in (info.get("child"), info.get("pid")):
+        if not pid: continue
+        try: os.killpg(pid, signal.SIGKILL)
+        except OSError:
+            try: os.kill(pid, signal.SIGKILL)
+            except OSError: pass
+    shutil.rmtree(d, ignore_errors=True)
+
+
+def cleanup_logins(now=None):
+    if not LOGINS.exists(): return
+    now = now or time.time()
+    for d in LOGINS.iterdir():
+        if not d.is_dir(): continue
+        info = read_json(d / "helper.json", {})
+        started = info.get("startedAt") or d.stat().st_mtime
+        alive = False
+        if info.get("pid"):
+            try: os.kill(info["pid"], 0); alive = True
+            except OSError: pass
+        if now - started > LOGIN_TTL or (not alive and now - started > 120):
+            kill_login(d)
+
+
+def login_start(harness):
+    if harness != "claude":
+        fail("Signing in from Buzz is only available for Claude Code on this machine.")
+    if not claude_cli():
+        fail("Claude Code is not installed on this machine.")
+    cleanup_logins()
+    if LOGINS.exists():  # one sign-in at a time: a new one replaces the old
+        for old in LOGINS.iterdir():
+            if old.is_dir(): kill_login(old)
+    login_id = secrets.token_hex(8)
+    d = private_dir(private_dir(LOGINS) / login_id)
+    write_private(d / "helper.json", json.dumps({"startedAt": time.time(), "harness": harness}))
+    subprocess.Popen([PYTHON, str(SELF), "login-helper", login_id], env=base_env(), cwd=str(d),
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True)
+    deadline = time.time() + 40
+    while time.time() < deadline:
+        state = read_json(d / "state.json")
+        if state and state.get("url"):
+            return {"ok": True, "loginId": login_id, "url": state["url"], "needsCode": True}
+        if state and state.get("error"):
+            kill_login(d); fail(state["error"])
+        time.sleep(0.2)
+    kill_login(d)
+    fail("Claude Code did not give a sign-in link in time. Try again.")
+
+
+def login_finish(login_id, code):
+    d = login_dir(login_id)
+    if not d.exists():
+        fail("This sign-in has expired or was cancelled. Start the sign-in again.")
+    code = (code or "").strip() if isinstance(code, str) else ""
+    if not CODE_RE.match(code):
+        fail("That does not look like a sign-in code. Copy the whole code from the Anthropic page and paste it again.")
+    if (d / "result.json").exists() or (d / "code").exists():
+        fail("This sign-in is already finishing.")
+    write_private(d / "code", code)
+    deadline = time.time() + 90
+    while time.time() < deadline:
+        result = read_json(d / "result.json")
+        if result is not None:
+            kill_login(d)
+            if not result.get("ok"): fail(result.get("error") or "The sign-in did not finish.")
+            restart_harness_agents("claude")
+            return {"ok": True, "signedIn": True, "account": result.get("account")}
+        if not d.exists():
+            fail("This sign-in has expired or was cancelled. Start the sign-in again.")
+        time.sleep(0.2)
+    kill_login(d)
+    fail("Claude Code did not answer after the code was entered. Start the sign-in again.")
+
+
+def login_helper(login_id):
+    """Runs detached. Drives `claude setup-token` in a pty for one sign-in."""
+    import pty, select, struct, termios
+    d = LOGINS / login_id
+    if not LOGIN_ID.match(login_id) or not d.is_dir(): return
+    info = read_json(d / "helper.json", {})
+    started = info.get("startedAt") or time.time()
+    env = base_env()
+    env.update({"TERM": "xterm-256color", "BROWSER": "/usr/bin/true", "COLUMNS": "1000", "LINES": "50"})
+    cli = claude_cli()
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.chdir(str(d))
+        os.execve(cli, [cli, "setup-token"], env)
+    info.update({"pid": os.getpid(), "child": pid})
+    write_private(d / "helper.json", json.dumps(info))
+    # Wide enough that the link and the token never wrap.
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 1000, 0, 0))
+    raw = b""  # held in memory only: after the code it contains the token
+
+    def pump(seconds):
+        nonlocal raw
+        end = time.time() + seconds
+        while time.time() < end:
+            r, _, _ = select.select([fd], [], [], 0.2)
+            if r:
+                try: chunk = os.read(fd, 65536)
+                except OSError: return False
+                if not chunk: return False
+                raw += chunk
+                return True
+        return True
+
+    def finish(result):
+        if d.exists(): write_private(d / "result.json", json.dumps(result))
+        try: os.kill(pid, signal.SIGKILL)
+        except OSError: pass
+
+    try:
+        url = None
+        while url is None:
+            if time.time() - started > 45 or not pump(0.5):
+                write_private(d / "state.json", json.dumps({"error": "Claude Code did not give a sign-in link. Try again."}))
+                return finish({"ok": False, "error": "no link"})
+            m = URL_RE.search(screen_text(raw))
+            if m: url = m.group(0)
+        write_private(d / "state.json", json.dumps({"url": url}))
+        while not (d / "code").exists():
+            if not d.exists() or time.time() - started > LOGIN_TTL:
+                return finish({"ok": False, "error": "This sign-in expired. Start the sign-in again."})
+            pump(0.5)  # keep the pty drained
+        code = (d / "code").read_text().strip()
+        (d / "code").unlink(missing_ok=True)
+        raw = b""
+        os.write(fd, code.encode())
+        time.sleep(0.3)
+        os.write(fd, b"\r")
+        deadline = time.time() + 75
+        alive = True
+        while time.time() < deadline:
+            alive = pump(0.5) and alive
+            text = screen_text(raw)
+            token = TOKEN_RE.search(text)
+            if token:
+                emails = EMAIL_RE.findall(text[token.end():] + text[:token.start()])
+                account = emails[0] if emails else None
+                save_claude_token(token.group(0), account)
+                raw = b""
+                return finish({"ok": True, "account": account})
+            err = re.search(r"OAuth error[^\n]*", text)
+            if err:
+                return finish({"ok": False, "error": "That code was not accepted. Start the sign-in again to get a new link."})
+            if not alive:
+                break
+        finish({"ok": False, "error": "Claude Code did not finish the sign-in. Start the sign-in again."})
+    finally:
+        # What Claude Code showed after the code went in, for diagnosing a
+        # sign-in that did not finish. The token and the code are masked first.
+        try:
+            shown = TOKEN_RE.sub("<token>", screen_text(raw))
+            if "code" in dir() and code: shown = shown.replace(code, "<code>")
+            if not (ROOT / "secrets" / "claude").exists() or "<token>" not in shown:
+                write_private(private_dir(ROOT / "run") / "login-debug.txt", shown[-4000:])
+        except Exception:
+            pass
+        raw = b""
+        try: os.close(fd)
+        except OSError: pass
+
+
+def logout(harness):
+    if harness != "claude":
+        fail("Signing out from Buzz is only available for Claude Code on this machine.")
+    forget_claude_token()
+    stop_harness_agents("claude")
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- Buzz profile
+
+def buzz(d, *args):
+    s = read_settings(d)
+    env = dict(base_env(), BUZZ_PRIVATE_KEY=(d / "key").read_text().strip(),
+               BUZZ_RELAY_URL=s["community"], BUZZ_AUTH_TAG=json.dumps(s["auth"]))
+    return subprocess.run([str(BIN / "buzz"), *args], env=env, capture_output=True, text=True, timeout=30)
+
+
+def publish_profile(d):
+    s = read_settings(d)
+    args = ["users", "set-profile", "--name", s["name"]]
+    if s.get("picture"): args += ["--avatar", s["picture"]]
+    done = buzz(d, *args)
+    return done.returncode == 0, (done.stderr or done.stdout)[-300:]
+
+
+def owner_of(settings):
+    auth = settings.get("auth")
+    if isinstance(auth, list) and len(auth) == 4 and HEX64.match(str(auth[1])): return auth[1]
+    return None
+
+
+def community_url(value):
+    if not isinstance(value, str) or not re.match(r"^(wss|https)://[A-Za-z0-9.-]+(:\d+)?/?$", value):
+        fail("community must be a wss:// or https:// address")
+    return "https://" + value.split("://", 1)[1].rstrip("/")
+
+
+# ---------------------------------------------------------------- requests
+
+CHANGES = {"remove", "activate", "profile", "instructions.set", "start"}
+
+
+def may_change(settings):
+    """A caller changes only agents it created; the admin (no label) any."""
+    creator = settings.get("createdBy")
+    if CALLER and creator and creator != CALLER:
+        fail(f"This agent belongs to {creator}. Only they or a Black 4 admin can change it.")
+
+def handle(req):
+    if not isinstance(req, dict): fail("request must be a JSON object")
+    op = req.get("op")
+    private_dir(AGENTS)
+
+    if op == "machine.status": return machine_status()
+    if op == "login.start": return login_start(req.get("harness"))
+    if op == "login.finish": return login_finish(req.get("loginId"), req.get("code"))
+    if op == "login.cancel":
+        d = login_dir(req.get("loginId"))
+        if d.exists(): kill_login(d)
+        return {"ok": True}
+    if op == "logout":
+        if CALLER: fail("Only a Black 4 admin can sign this machine out.")
+        return logout(req.get("harness"))
+
+    if op == "provision":
+        name = (req.get("name") or "").strip()
+        if not name or len(name) > 128: fail("name is required (128 characters at most)")
+        # A retried creation gets the same agent back, not a second key.
+        for d in agent_dirs():
+            s = read_settings(d)
+            if (s.get("name") == name and not s.get("auth") and s.get("requestId") == req.get("requestId")
+                    and s.get("createdBy") == CALLER):
+                return {"ok": True, "pubkey": d.name}
+        community = community_url(req.get("community"))
+        secret = secrets.token_hex(32)
+        while not 0 < int(secret, 16) < N: secret = secrets.token_hex(32)
+        pubkey = pubkey_of(secret)
+        d = AGENTS / pubkey
+        d.mkdir(mode=0o700)
+        fd = os.open(d / "key", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.write(fd, secret.encode()); os.close(fd)
+        config = req.get("config") or {}
+        write_settings(d, {
+            "name": name, "picture": req.get("picture"), "requestId": req.get("requestId"),
+            "community": community,
+            "harness": config.get("harness") or "claude", "model": config.get("model") or "",
+            "instructions": config.get("instructions") or "",
+            "respondTo": config.get("respondTo") or "owner-only",
+            "allow": [k for k in (config.get("allow") or []) if HEX64.match(str(k))],
+            "createdAt": int(time.time()), "createdBy": CALLER,
+        })
+        return {"ok": True, "pubkey": pubkey}
+
+    if op == "identity":
+        # Which owner key each agent attests, so the owner can be linked to a
+        # Black 4 account. Public keys only; no key file is opened.
+        return {"ok": True, "agents": [
+            {"pubkey": d.name, "name": read_settings(d).get("name"),
+             "owner": owner_of(read_settings(d))} for d in agent_dirs()]}
+
+    if op == "list":
+        rows = []
+        for d in agent_dirs():
+            s = read_settings(d)
+            rows.append({"pubkey": d.name, "name": s.get("name"), "harness": s.get("harness"),
+                         "respondTo": s.get("respondTo"), "activated": bool(s.get("auth")), "running": bool(running(d)),
+                         "createdBy": s.get("createdBy")})
+        return {"ok": True, "agents": rows}
+
+    d = folder(req.get("pubkey"))
+    if op in CHANGES and d.exists(): may_change(read_settings(d))
+    if op == "remove":
+        if d.exists():
+            with agent_lock(d): stop(d)
+            shutil.rmtree(d)
+        drop_persistence()
+        return {"ok": True}
+    if not d.exists(): fail("no such agent on this machine")
+    s = read_settings(d)
+
+    if op == "activate":
+        auth = req.get("auth")
+        if (not isinstance(auth, list) or len(auth) != 4 or auth[0] != "auth"
+                or not HEX64.match(str(auth[1])) or not re.match(r"^[0-9a-f]{128}$", str(auth[3]))):
+            fail("auth must be a NIP-OA tag: [auth, owner, conditions, signature]")
+        s["auth"] = auth
+        s["community"] = community_url(req.get("community") or s["community"])
+        for key in ("harness", "model", "instructions", "respondTo"):
+            if (req.get("config") or {}).get(key) is not None: s[key] = req["config"][key]
+        write_settings(d, s)
+        pid = start(d)
+        ok, detail = publish_profile(d)
+        return {"ok": True, "pid": pid, "profilePublished": ok, **({} if ok else {"profileError": detail})}
+
+    if op == "profile":
+        if req.get("name"): s["name"] = req["name"].strip()
+        if "picture" in req: s["picture"] = req.get("picture")
+        write_settings(d, s)
+        ok, detail = publish_profile(d)
+        if not ok: fail("profile was not published: " + detail)
+        return {"ok": True}
+
+    if op == "instructions.get":
+        return {"ok": True, "instructions": s.get("instructions") or ""}
+    if op == "instructions.set":
+        s["instructions"] = str(req.get("instructions") or "")[:20000]
+        write_settings(d, s)
+        if s.get("auth"): start(d)
+        return {"ok": True}
+
+    if op == "start":
+        return {"ok": True, "pid": start(d)}
+
+    if op == "status":
+        log = (d / "agent.log").read_text(errors="replace")[-1500:] if (d / "agent.log").exists() else ""
+        return {"ok": True, "running": bool(running(d)), "activated": bool(s.get("auth")),
+                "name": s.get("name"), "harness": s.get("harness"), "respondTo": s.get("respondTo"), "log": log}
+
+    fail("unknown op")
+
+
+def main(argv=None):
+    global CALLER
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["--caller"]:
+        # Only an authorized_keys forced command passes this, and then
+        # nothing else: a teammate's key never reaches supervise or a helper.
+        if len(argv) != 2 or not CALLER_LABEL.match(argv[1]):
+            print(json.dumps({"ok": False, "error": "this key's caller label is not valid; ask an admin to add it again"}))
+            return
+        CALLER, argv = argv[1], []
+    if argv[:1] == ["supervise"]: return supervise()
+    if argv[:1] == ["login-helper"] and len(argv) == 2: return login_helper(argv[1])
+    try:
+        try: req = json.loads(sys.stdin.read() or "{}")
+        except ValueError: fail("request is not JSON")
+        reply = handle(req)
+    except Fail as e:
+        reply = {"ok": False, "error": str(e)}
+    except Exception as e:  # an unexpected failure is still one JSON line
+        reply = {"ok": False, "error": f"agentctl failed: {type(e).__name__}: {str(e)[:300]}"}
+    print(json.dumps(reply))
+
+
+if __name__ == "__main__":
+    main()

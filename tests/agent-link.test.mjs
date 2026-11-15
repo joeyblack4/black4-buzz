@@ -411,3 +411,25 @@ test("the hardware type reaches the Commerce Mac through its door, with a pass m
   assert.match(signed.bodySha256, /^[A-Za-z0-9_-]{43}$/);
   assert.equal(ui.door.refused.length, 0);
 });
+
+test("a pass refused because this Buzz's key is not linked says so and brings back the link step", async (t) => {
+  const black4 = server({ links: [link(VIEWER)] });
+  const ui = await harness(t, black4, { agentctl: () => ({ ok: true, agents: [] }) });
+  await settle();
+  assert.match(ui.text(), /^Agent access Linked/);
+  black4.links[0].revokedAt = "2026-11-15T12:00:00.000Z"; // removed elsewhere
+  ui.mcp.ownerKeys = [];
+  const { remote } = hardwareType(ui);
+  await assert.rejects(
+    remote.provision({ name: "Rock", community: "wss://example.test", config: {}, signal: new AbortController().signal }),
+    /^Error: Your agents are not linked to you on this Buzz identity, or the key is linked to someone else\. Choose Link my agents, then try again\.$/,
+  );
+  await settle();
+  assert.ok(find(ui.view(), "Link my agents"), "the link step is back in Settings");
+  assert.equal(ui.door.seen.filter((request) => request.op === "provision").length, 0, "the refused provision never reached the door");
+  ui.mcp.ownerKeys = [VIEWER];
+  await ui.click("Link my agents");
+  const made = await remote.provision({ name: "Rock", community: "wss://example.test", config: {}, signal: new AbortController().signal }).catch((error) => error);
+  assert.ok(ui.mcp.signed.some((entry) => entry.ownerKey === VIEWER && entry.op === "provision"), "after linking, the pass is minted");
+  assert.ok(made);
+});

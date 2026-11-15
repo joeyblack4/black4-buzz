@@ -105,6 +105,10 @@ sign-in.
   says **Connected** with a *(staff)* account. If the card instead says
   *Black 4 hardware is unavailable in this Buzz*, this Buzz version changed the
   agent API. Tell the platform team; everything else keeps working.
+- **New agent says *Your agents are not linked to you on this Buzz
+  identity*.** This Buzz identity's key isn't one of your live links: it was
+  never linked, it was removed, or it belongs to someone else. Choose **Link
+  my agents** (in the form or in Settings → Black 4), then try again.
 - **The card says your agents are not linked, because the key is linked to
   another person.** That person, or any staff member, removes their link
   first. Then choose **Link my agents**.

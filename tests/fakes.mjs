@@ -81,7 +81,8 @@ export function fakeAuthKit({ polls = ["ok"], expiresIn = 3600, interval = 0.001
  * `sign_hardware_request` (reached directly or through call_tool) mints
  * passes the door below accepts. */
 export function fakeMcp(authkit, { answer = () => ({ result: {} }), sse = false, instructions = "People decide." } = {}) {
-  const self = { calls: [], passes: new Map(), sessions: new Set(), signed: [], tokens: [] };
+  // `ownerKeys`: when set, a sign_hardware_request ownerKey outside it is refused (owner_key_not_linked).
+  const self = { calls: [], passes: new Map(), sessions: new Set(), signed: [], tokens: [], ownerKeys: null };
   self.handle = async (input) => {
     const url = new URL(input.url);
     if (url.pathname !== "/mcp" || input.method !== "POST") return json(404, { error: "not found" });
@@ -105,6 +106,10 @@ export function fakeMcp(authkit, { answer = () => ({ result: {} }), sse = false,
       let { name, arguments: args } = message.params ?? {};
       if (message.method === "tools/call" && name === "call_tool" && args?.name === "sign_hardware_request") ({ name, arguments: args } = args);
       if (message.method === "tools/call" && name === "sign_hardware_request") {
+        if (self.ownerKeys && args?.ownerKey !== undefined && !self.ownerKeys.includes(args.ownerKey)) {
+          const error = { code: "owner_key_not_linked", message: "That owner key is not one of your live links." };
+          return json(200, { jsonrpc: "2.0", id: message.id, result: { isError: true, structuredContent: { error }, content: [{ type: "text", text: JSON.stringify({ error }) }] } }, headers);
+        }
         const pass = `pass-${randomUUID()}`;
         self.passes.set(pass, { ...args, expiresAt: Date.now() + 60_000, used: false });
         self.signed.push(args);

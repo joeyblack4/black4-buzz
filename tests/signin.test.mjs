@@ -265,3 +265,14 @@ test("Cancel, then Sign in again: the cancelled attempt ending later leaves the 
   assert.match(texts(view()).join(" "), /Waiting for you to sign in/);
   click("Cancel");
 });
+
+test("a 300-second access token (what AuthKit issues) is replaced at 180 s, before any long step can outlive it", async () => {
+  const { authkit, session, advance } = setup({ expiresIn: 300 });
+  await session.signIn();
+  const first = await session.accessToken();
+  advance(179_000);
+  assert.equal(await session.accessToken(), first, "still more than two minutes left");
+  advance(2_000);
+  assert.notEqual(await session.accessToken(), first, "refreshed with two minutes still to go");
+  assert.equal(authkit.calls.filter((call) => call.form.grant_type === "refresh_token").length, 1);
+});

@@ -793,9 +793,21 @@ export function apply(ctx) {
     // One 60-second pass per door request, minted as the signed-in person.
     // ownerKey: this Buzz identity's key, which becomes the pass's owner, so an
     // activate matches the attestation this Buzz signs.
+    // A key that is not one of the person's live links (never linked,
+    // removed, or someone else's) is refused as owner_key_not_linked: say so
+    // and bring back the link step, in the form and in Settings.
     sign: async (input) => {
       const ownerKey = viewerKey();
-      const answer = await callBlack4(PASS_TOOL, { ...input, ...(ownerKey ? { ownerKey } : {}) }, { unavailable: "This Black 4 server can't sign hardware requests yet." });
+      let answer;
+      try {
+        answer = await callBlack4(PASS_TOOL, { ...input, ...(ownerKey ? { ownerKey } : {}) }, { unavailable: "This Black 4 server can't sign hardware requests yet." });
+      } catch (error) {
+        if (error?.serverCode === "owner_key_not_linked" || /owner_key_not_linked/.test(String(error?.message))) {
+          void checkLink();
+          throw Object.assign(new Error("Your agents are not linked to you on this Buzz identity, or the key is linked to someone else. Choose Link my agents, then try again."), { code: "unlinked" });
+        }
+        throw error;
+      }
       return answer?.data ?? answer;
     },
   });
@@ -1381,6 +1393,7 @@ export function doorTransport({ request, sign }) {
     try {
       pass = (await sign({ machine: machine.id, op: payload.op, bodySha256: hash }))?.pass;
     } catch (error) {
+      if (error?.code === "unlinked") throw error;
       throw Object.assign(new Error(`Could not reach the ${machine.label}: your Black 4 sign-in could not get a pass (${plain(error?.message ?? error, 200)}).`), { code: "signin" });
     }
     if (typeof pass !== "string" || !pass) throw Object.assign(new Error(`Could not reach the ${machine.label}: your Black 4 sign-in got no pass.`), { code: "signin" });

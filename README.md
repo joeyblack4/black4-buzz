@@ -184,8 +184,9 @@ running; `agentctl list` still shows them, with `createdBy`.
 On the machine, a teammate can see every agent but change, restart or remove
 only the agents they created, and cannot sign the machine out of Claude. They
 can sign the machine in to Claude when it is signed out, which every Claude
-agent on it then uses. Agents made before labels existed, and anyone using an
-unrestricted key, are not limited.
+agent on it then uses. Agents made with your own unrestricted key, or before
+labels existed, are yours: teammates can see them but not change them. Your
+key is not limited.
 
 ### Set up a new machine
 
@@ -197,10 +198,20 @@ machine/deploy.sh <ssh-host> [machine-name]
 ```
 
 It installs Node, the ACP adapters, the Black 4 connector and `agentctl` under
-`~/workforce`, without sudo, and is safe to run again. Then sign the machine in
+`~/workforce`, without sudo, and is safe to run again. It ends with
+`agentctl doctor`, a self-test: each harness at its pinned version
+(`machine/pins.json`), buzz-acp's ACP handshake with each adapter, the
+connector, the cron lines and free disk. It fails loudly when the machine cannot
+run agents; Buzz's Create agent form shows the same problem for a harness
+instead of creating an agent that never answers. Then sign the machine in
 to Claude from Buzz (the Create agent dialog offers it). A second machine also
 needs an entry in `MACHINES` in `plugins/black4/plugin.js` (the Black 4
 hardware part) and a matching process in its manifest.
+
+Cron runs `agentctl supervise` at boot and every minute; it restarts an agent
+that stops, waiting 5, 10, 20 … up to 300 seconds while it keeps stopping, and
+`status` then says `keepsStopping` with the end of its log. Each agent's
+`agent.log` is cut over to `agent.log.1` past 5 MB.
 
 ### Buzz updates and releases
 

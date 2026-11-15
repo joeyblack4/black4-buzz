@@ -99,6 +99,7 @@ if args[:1] == ["app-server"]:
     cred = stored("CODEX_HOME")
     for line in sys.stdin:
         msg = json.loads(line)
+        with open(os.path.join(os.environ["HOME"], "codex-calls.txt"), "a") as f: f.write(json.dumps([msg.get("method"), msg.get("params")]) + "\\n")
         if "id" not in msg: continue
         m, i = msg["method"], msg["id"]
         if m == "initialize": r = {{"result": {{"codexHome": os.environ["CODEX_HOME"]}}}}
@@ -119,11 +120,10 @@ FAKE_GROK = f"""#!{PY}
 args = sys.argv[1:]
 if args[:2] == ["login", "--device-auth"]:
     device_login("GROK_HOME", "\\r\\nTo sign in, open this URL in your browser:\\r\\n\\r\\n  https://accounts.x.ai/oauth2/device?user_code=QRST-UVWX\\r\\n\\r\\nConfirm this code in your browser:\\r\\n\\r\\n  QRST-UVWX\\r\\n\\r\\nWaiting for authorization...\\r\\n")
-if "-p" in args:
+if args[:1] == ["models"]:  # what 1.0.70 prints; it calls no model
     cred = stored("GROK_HOME")
-    if {FAKE_CRED!r} in cred and "revoked" not in cred:
-        print(json.dumps({{"type": "result", "result": "OK"}})); sys.exit(0)
-    print(json.dumps({{"type": "error", "message": "Not signed in. To authenticate without a browser, run: grok login --device-code"}})); sys.exit(1)
+    if not ({FAKE_CRED!r} in cred and "revoked" not in cred): print("You are not authenticated.\\n")
+    print("Default model: grok-4.6\\n\\nAvailable models:\\n  * grok-4.6 (default)\\n  - grok-4.5"); sys.exit(0)
 """
 
 
@@ -162,6 +162,8 @@ class Base(unittest.TestCase):
         # Only the fake bin and the system: a real goose or grok on the test
         # computer must not count as installed.
         self.a.agent_path = lambda: f"{bin_}:/usr/bin:/bin"
+        # Sign-in checks run in this process, not in a detached `agentctl check`.
+        self.a.spawn_check = lambda harness: self.a.run_check(harness)
 
     def tearDown(self):
         for d in self.a.agent_dirs():
@@ -189,6 +191,13 @@ class Base(unittest.TestCase):
 
     def sign_in(self):
         self.a.save_claude_token(FAKE_TOKEN, None)
+
+    def wait_running(self, d, seconds=15):
+        """A sign-in's helper restarts the agents after login.finish has replied."""
+        for _ in range(int(seconds * 10)):
+            if self.a.running(d): return True
+            time.sleep(0.1)
+        return False
 
 
 class PureLogic(unittest.TestCase):
@@ -487,7 +496,7 @@ class Login(Base):
         self.assertEqual(secret.read_text().strip(), FAKE_TOKEN)
         self.assertEqual(stat.S_IMODE(secret.stat().st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(self.a.SECRETS.stat().st_mode), 0o700)
-        self.assertTrue(self.a.running(d_agent))  # restarted on the new credential
+        self.assertTrue(self.wait_running(d_agent))  # restarted on the new credential, after the reply
         for path in self.a.ROOT.rglob("*"):
             if path.is_file() and path != secret and path.name != "env.json" and path.parent != self.a.BIN:
                 self.assertNotIn(FAKE_TOKEN, path.read_text(errors="replace"), path)
@@ -587,7 +596,7 @@ class DeviceLogin(DeviceBase):
                 self.assertEqual(stat.S_IMODE(cred.stat().st_mode), 0o600)
                 self.assertEqual(stat.S_IMODE((self.a.HOMES / harness).stat().st_mode), 0o700)
                 self.assertEqual(stat.S_IMODE(self.a.HOMES.stat().st_mode), 0o700)
-                self.assertTrue(self.a.running(agent))
+                self.assertTrue(self.wait_running(agent))
                 env = json.loads((agent / "work" / "env.json").read_text())
                 home_env = "CODEX_HOME" if harness == "codex" else "GROK_HOME"
                 self.assertEqual(env[home_env], str(self.a.HOMES / harness))
@@ -660,6 +669,72 @@ class DeviceLogin(DeviceBase):
         self.assertIn("not signed in", self.req(op="start", pubkey=agent.name)["error"])
 
 
+class DeviceFinishNeverHangs(DeviceBase):
+    """login.finish answers pending only while the sign-in can still finish."""
+    def test_a_helper_that_died_is_an_error_not_pending_forever(self):
+        r, d = self.start_device("codex")
+        info = json.loads((d / "helper.json").read_text())
+        os.kill(info["pid"], signal.SIGKILL)
+        self.assertTrue(gone(info["pid"]))
+        self.assertEqual(self.req(op="login.finish", loginId=r["loginId"]),
+                         {"ok": False, "error": "The Codex sign-in stopped on this machine. Start the sign-in again."})
+        self.assertFalse(d.exists())
+
+    def test_a_sign_in_past_its_lifetime_is_an_error(self):
+        r, d = self.start_device("grok")
+        info = json.loads((d / "helper.json").read_text())
+        info["startedAt"] -= info["ttl"] + 60
+        (d / "helper.json").write_text(json.dumps(info))
+        self.assertEqual(self.req(op="login.finish", loginId=r["loginId"])["error"],
+                         "This sign-in code expired. Start the sign-in again.")
+
+    def test_an_unexpected_helper_failure_is_written_as_the_result(self):
+        d = self.a.private_dir(self.a.private_dir(self.a.LOGINS) / ("a" * 16))
+        (d / "helper.json").write_text(json.dumps({"harness": "grok", "startedAt": time.time()}))
+        def boom(*args): raise UnicodeDecodeError("utf-8", b"", 0, 1, "bad")
+        self.a.device_helper = boom
+        self.a.login_helper("a" * 16)
+        error = "The sign-in failed on this machine. Start the sign-in again."
+        self.assertEqual(json.loads((d / "result.json").read_text()), {"ok": False, "error": error})
+        self.assertEqual(json.loads((d / "state.json").read_text()), {"error": error})
+        self.assertEqual(self.req(op="login.finish", loginId="a" * 16), {"ok": False, "error": error})
+
+
+class SafeWrites(DeviceBase):
+    def test_config_toml_keeps_what_the_cli_wrote_and_is_written_only_on_change(self):
+        home = self.a.cli_home("codex")
+        path = home / "config.toml"
+        path.write_text('model = "gpt-5"\ncli_auth_credentials_store = "keyring"\n\n[projects."/x"]\ntrust_level = "trusted"\n')
+        self.a.cli_home("codex")
+        text = path.read_text()
+        self.assertTrue(text.startswith('cli_auth_credentials_store = "file"\n'))
+        self.assertIn('model = "gpt-5"', text)
+        self.assertIn('trust_level = "trusted"', text)
+        self.assertNotIn("keyring", text)
+        mtime = path.stat().st_mtime_ns
+        time.sleep(0.01)
+        self.a.cli_home("codex")
+        self.assertEqual(path.stat().st_mtime_ns, mtime, "unchanged: not rewritten")
+        grok = self.a.cli_home("grok") / "config.toml"
+        grok.write_text("[cli]\nauto_update = true\ntheme = \"dark\"\n\n[mcp]\nx = 1\n")
+        self.a.cli_home("grok")
+        self.assertEqual(grok.read_text(), "[cli]\nauto_update = false\ntheme = \"dark\"\n\n[mcp]\nx = 1\n")
+
+    def test_concurrent_private_writes_never_collide(self):
+        import threading
+        target = self.a.private_dir(self.a.RUN) / "x.json"
+        errors = []
+        def write(i):
+            try:
+                for _ in range(50): self.a.write_private(target, str(i))
+            except Exception as e: errors.append(e)
+        threads = [threading.Thread(target=write, args=(i,)) for i in range(8)]
+        for t in threads: t.start()
+        for t in threads: t.join()
+        self.assertEqual(errors, [])
+        self.assertEqual(sorted(p.name for p in self.a.RUN.iterdir()), ["x.json"], "no temporary file left")
+
+
 class DeviceStatusAndStart(DeviceBase):
     def rows(self):
         return {h["id"]: h for h in self.req(op="machine.status")["harnesses"]}
@@ -671,12 +746,63 @@ class DeviceStatusAndStart(DeviceBase):
         self.sign_in_device("codex")
         self.assertEqual((self.rows()["codex"]["signedIn"], self.rows()["codex"]["account"]), (True, "owner@example.com"))
 
-    def test_signed_in_is_verified_with_the_service_not_just_a_file(self):
-        for harness in ("codex", "grok"):
-            home = self.a.cli_home(harness)
-            (home / "auth.json").write_text(json.dumps({"tokens": FAKE_CRED + "-revoked"}))
-            self.assertFalse(self.rows()[harness]["signedIn"], harness)
-            self.assertTrue(self.a.device_known_bad(harness))
+    def test_a_grok_sign_in_is_verified_not_just_a_file(self):
+        (self.a.cli_home("grok") / "auth.json").write_text(json.dumps({"tokens": FAKE_CRED + "-revoked"}))
+        self.assertFalse(self.rows()["grok"]["signedIn"])
+        self.assertTrue(self.a.known_bad("grok"))
+
+    def test_the_codex_check_never_refreshes_the_sign_in(self):
+        # Codex's refresh token is used once: a check that refreshed beside a
+        # running agent could sign the agent out. Only account/read, without refresh.
+        self.sign_in_device("codex")
+        (self.home / "codex-calls.txt").unlink(missing_ok=True)
+        self.a.run_check("codex")
+        calls = [json.loads(line) for line in (self.home / "codex-calls.txt").read_text().splitlines()]
+        self.assertEqual([c[0] for c in calls], ["initialize", "initialized", "account/read"])
+        self.assertEqual(calls[2][1], {"refreshToken": False})
+
+    def test_status_answers_from_the_last_check_and_starts_at_most_one(self):
+        self.sign_in_device("grok")
+        spawned = []
+        self.a.spawn_check = spawned.append  # a due check goes out of band
+        self.a.STATUS_WAIT = 0.3
+        self.assertTrue(self.rows()["grok"]["signedIn"])
+        self.assertEqual(spawned, [], "a fresh check is not repeated")
+        cache = self.a.RUN / "grok-check.json"
+        old = json.loads(cache.read_text()); old["at"] -= 3600
+        cache.write_text(json.dumps(old))
+        t = time.time()
+        self.assertTrue(self.rows()["grok"]["signedIn"], "the last answer stands while the check runs")
+        self.assertLess(time.time() - t, 3)
+        self.assertEqual(spawned, ["grok"])
+        # Single flight: a check that finds the lock held returns at once.
+        import fcntl
+        held = open(self.a.RUN / "grok-check.lock", "a"); fcntl.flock(held, fcntl.LOCK_EX)
+        self.a.DEVICE_CHECK["grok"] = lambda: self.fail("a second check ran")
+        self.a.run_check("grok")
+        held.close()
+
+    def test_the_check_command_runs_detached(self):
+        self.sign_in_device("grok")
+        (self.a.RUN / "grok-check.json").unlink()
+        env = dict(os.environ, HOME=str(self.home), AGENTCTL_HOME=str(self.home))
+        subprocess.run([PY, str(AGENTCTL), "check", "grok"], env=env, timeout=60, check=True)
+        self.assertTrue(json.loads((self.a.RUN / "grok-check.json").read_text())["ok"])
+        out = subprocess.run([PY, str(AGENTCTL), "--caller", "sam", "check", "grok"], input="", env=env, capture_output=True, text=True, timeout=60)
+        self.assertFalse(json.loads(out.stdout)["ok"], "not open to a teammate's key")
+
+    def test_a_rejection_expires_and_is_checked_again(self):
+        (self.a.cli_home("grok") / "auth.json").write_text(json.dumps({"tokens": FAKE_CRED + "-revoked"}))
+        self.a.run_check("grok")
+        spawned = []
+        self.a.spawn_check = spawned.append
+        self.assertTrue(self.a.known_bad("grok"))
+        self.assertEqual(spawned, [])
+        cache = self.a.RUN / "grok-check.json"
+        old = json.loads(cache.read_text()); old["at"] -= self.a.KNOWN_BAD_TTL + 1
+        cache.write_text(json.dumps(old))
+        self.assertTrue(self.a.known_bad("grok"), "stands until the new check answers")
+        self.assertEqual(spawned, ["grok"])
 
     def test_an_api_key_sign_in_is_not_a_subscription(self):
         (self.a.cli_home("codex") / "auth.json").write_text(json.dumps({"auth_mode": "apikey"}))

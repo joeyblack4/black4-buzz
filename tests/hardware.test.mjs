@@ -248,6 +248,18 @@ test("sign-in: a device sign-in shows the link and code, then waits by itself un
   assert.equal(box.seen.length, 5);
 });
 
+test("sign-in: a status refresh that fails after a device approval still leaves the form idle", async () => {
+  const box = machine((request) => {
+    if (request.op === "login.start") return { ok: true, loginId: "D4", url: "https://auth.openai.com/codex/device", needsCode: false, userCode: "ABCD-12EFG" };
+    if (request.op === "login.finish") return { ok: true, signedIn: true, account: null };
+    return { ok: true };
+  });
+  const login = createLogin(box.spawn, "commerce", "codex", { onSignedIn: () => Promise.reject(new Error("unreachable")) });
+  await login.start();
+  for (let i = 0; i < 50 && login.state.step !== "idle"; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(login.state, { step: "idle" });
+});
+
 test("sign-in: Cancel stops waiting for a device approval and cancels it on the machine", async () => {
   let release;
   const box = machine((request) => {

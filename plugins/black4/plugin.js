@@ -1222,7 +1222,11 @@ export function createLogin(spawn, machine, harness, { onChange, onSignedIn, tim
       const needsCode = reply.needsCode !== false;
       const userCode = !needsCode && typeof reply.userCode === "string" && /^[A-Za-z0-9-]{4,32}$/.test(reply.userCode) ? reply.userCode : null;
       set({ step: "waiting", url, needsCode, ...(userCode ? { userCode } : {}), ...extra });
-      if (!needsCode) void approval(mine, id);
+      if (!needsCode) approval(mine, id).catch((error) => {
+        if (disposed || mine !== generation) return;
+        loginId = null;
+        set({ step: "idle", error: message(error) });
+      });
     });
   /** Waits for a device approval: one login.finish after another while the
    * machine answers pending. Stops when this attempt is cancelled or replaced. */
@@ -1240,11 +1244,16 @@ export function createLogin(spawn, machine, harness, { onChange, onSignedIn, tim
       if (disposed || mine !== generation || loginId !== id) return;
       if (reply.pending || reply.signedIn === false) continue;
       loginId = null;
-      set({ step: "done", account: typeof reply.account === "string" ? reply.account : null });
-      await onSignedIn?.();
-      if (mine === generation) set({ step: "idle" });
+      await signedIn(mine, reply);
       return;
     }
+  };
+  /** Signed in: show it, refresh the machine's status, then back to idle. A
+   * status refresh that fails leaves the form idle, never stuck on "done". */
+  const signedIn = async (mine, reply) => {
+    set({ step: "done", account: typeof reply.account === "string" ? reply.account : null });
+    try { await onSignedIn?.(); } catch { /* the next status read shows it */ }
+    if (mine === generation) set({ step: "idle" });
   };
   return {
     get state() { return state; },
@@ -1269,9 +1278,7 @@ export function createLogin(spawn, machine, harness, { onChange, onSignedIn, tim
           if (reply.signedIn === false) throw new Error("Sign-in did not finish.");
           if (loginId === used) loginId = null;
           if (mine !== generation) return;
-          set({ step: "done", account: typeof reply.account === "string" ? reply.account : null });
-          await onSignedIn?.();
-          if (mine === generation) set({ step: "idle" });
+          await signedIn(mine, reply);
         }, async (error) => {
           // A failed finish closes that sign-in on the machine: its link and
           // id are dead. Start one fresh sign-in (once, no loop) for a new link.

@@ -18,6 +18,29 @@ const START_TIMEOUT_MS = 10 * 60 * 1000; // a first browser sign-in can take a w
 const RETRY_DELAYS_MS = [5000, 15000, 60000, 300000];
 const QUEUE_POLL_MS = 60 * 1000; // the Reviews badge refreshes this often while connected
 const QUEUE_TIMEOUT_MS = 30 * 1000;
+const LINK_TIMEOUT_MS = 30 * 1000;
+const LINK_UNAVAILABLE = "This Black 4 server can't link agents yet.";
+
+// A tool's answer as data, or its refusal as an Error carrying the server's
+// own sentence. The MCP answers `{"error":{"code","message"}}` text on refusal.
+export function readAnswer(result) {
+  const text = (result?.content ?? []).filter((part) => part?.type === "text").map((part) => part.text).join("\n");
+  let body;
+  try { body = text ? JSON.parse(text) : undefined; } catch { body = undefined; }
+  if (result?.isError) {
+    const error = result.structuredContent?.error ?? body?.error;
+    const message = typeof error === "string" ? error : error?.message;
+    const code = typeof error === "object" ? error?.code : undefined;
+    throw Object.assign(new Error(message || text || "Black 4 refused the request."), /^(unknown_tool|tool_not_found)$/.test(code ?? "") ? { code: "unavailable" } : { serverCode: code });
+  }
+  return result?.structuredContent?.data ?? body;
+}
+
+// The label Black 4 shows for this link: which kind of computer it came from.
+export function linkLabel(platform = globalThis.navigator?.userAgentData?.platform ?? globalThis.navigator?.platform ?? "") {
+  const name = /mac/i.test(platform) ? "Mac" : /win/i.test(platform) ? "Windows" : /linux/i.test(platform) ? "Linux" : "";
+  return name ? `Buzz on ${name}` : "Buzz";
+}
 
 // Match only the authenticated human surface. Review file grants and MCP
 // tokens never belong in a conversation renderer or a generic agent tool.
@@ -194,12 +217,14 @@ export function apply(ctx) {
     instructions: "",
     log: [],
     waiting: null, // decisions waiting on the connected account, or null when unknown
+    // idle | no-key | checking | unlinked | linking | linked | removing | error | unavailable
+    agentLink: { status: "idle" },
   };
   const listeners = new Set();
   const update = (patch) => {
     // Any status other than connected makes the count unknown: no stale badge
     // survives a disconnect, a failed refresh or a reconnect to another account.
-    if (patch.status && patch.status !== "connected") patch = { ...patch, waiting: null };
+    if (patch.status && patch.status !== "connected") patch = { ...patch, waiting: null, agentLink: { status: "idle" } };
     state = { ...state, ...patch };
     for (const listener of listeners) listener();
   };
@@ -401,6 +426,85 @@ export function apply(ctx) {
     queueTimer = setTimeout(pollQueue, QUEUE_POLL_MS);
   };
 
+  // ---- agent access: this Buzz's key, linked to the signed-in person ------
+  // Agents that run elsewhere (Black 4 hardware) sign their own requests; the
+  // MCP accepts them when their owner's Buzz key is linked to a staff person.
+  // The link is a claim made from the person's own sign-in, so it is asked
+  // for once, with one button, and never made on its own.
+  let listedNames = new Set();
+  let linkTicket = 0;
+  const viewerKey = () => {
+    try {
+      const viewer = ctx.relay?.snapshot?.()?.viewer;
+      return /^[0-9a-f]{64}$/i.test(viewer ?? "") ? viewer.toLowerCase() : null;
+    } catch {
+      return null;
+    }
+  };
+  const setLink = (agentLink) => update({ agentLink });
+  const callBlack4 = async (name, args) => {
+    let result;
+    try {
+      if (listedNames.has(name)) result = await request("tools/call", { name, arguments: args }, { timeoutMs: LINK_TIMEOUT_MS });
+      else if (listedNames.has("call_tool")) result = await request("tools/call", { name: "call_tool", arguments: { name, arguments: args } }, { timeoutMs: LINK_TIMEOUT_MS });
+      else throw Object.assign(new Error(LINK_UNAVAILABLE), { code: "unavailable" });
+    } catch (error) {
+      if (error.code) throw error;
+      if (/unknown tool|no tool|not found/i.test(error.message)) throw Object.assign(new Error(LINK_UNAVAILABLE), { code: "unavailable" });
+      throw Object.assign(new Error("Couldn't reach Black 4. Check your connection and try again."), { code: "offline" });
+    }
+    return readAnswer(result);
+  };
+  const linkFailure = (error, key) => ({
+    status: error.code === "unavailable" ? "unavailable" : "error",
+    key,
+    message: error.code === "unavailable" ? LINK_UNAVAILABLE : error.message,
+  });
+  // A check whose answer arrives after the connection, key or a newer check
+  // replaced it is dropped.
+  const linkStep = async (status, key, work) => {
+    const ticket = ++linkTicket;
+    const attempt = generation;
+    const previous = state.agentLink;
+    setLink({ ...previous, status, key, message: "", confirming: false });
+    const current = () => ticket === linkTicket && attempt === generation && state.status === "connected" && viewerKey() === key;
+    try {
+      const next = await work(previous);
+      if (current()) setLink(next);
+    } catch (error) {
+      if (current()) setLink(linkFailure(error, key));
+    }
+  };
+  const checkLink = () => {
+    const key = viewerKey();
+    if (state.status !== "connected") return setLink({ status: "idle" });
+    if (!key) return setLink({ status: "no-key" });
+    return linkStep("checking", key, async () => {
+      const data = await callBlack4("list_agent_owner_keys", {});
+      const link = (data?.links ?? []).find((entry) => String(entry.ownerKey).toLowerCase() === key && !entry.revokedAt);
+      return link ? { status: "linked", key, link } : { status: "unlinked", key };
+    });
+  };
+  const linkAgents = () => {
+    const key = viewerKey();
+    if (state.status !== "connected" || !key) return checkLink();
+    return linkStep("linking", key, async () => {
+      const data = await callBlack4("link_agent_owner_key", { ownerKey: key, label: linkLabel() });
+      if (!data?.link || String(data.link.ownerKey).toLowerCase() !== key) throw new Error("Black 4 did not confirm the link.");
+      return { status: "linked", key, link: data.link };
+    });
+  };
+  const removeLink = () => {
+    const key = viewerKey();
+    const linkId = state.agentLink?.link?.linkId;
+    if (state.status !== "connected" || !key || !linkId) return checkLink();
+    return linkStep("removing", key, async () => {
+      await callBlack4("revoke_agent_access", { linkId });
+      return { status: "unlinked", key };
+    });
+  };
+  const confirmRemove = (confirming) => setLink({ ...state.agentLink, confirming });
+
   // ---- lifecycle ----------------------------------------------------------
   const scheduleRetry = (why) => {
     stopQueuePolling();
@@ -455,6 +559,7 @@ export function apply(ctx) {
       await send({ jsonrpc: "2.0", method: "notifications/initialized" });
       const listed = await request("tools/list", {});
       if (attempt !== generation || stopped) return;
+      listedNames = new Set((listed?.tools ?? []).map((tool) => tool.name));
       register(listed?.tools ?? [], init?.instructions ?? "");
       let account = null;
       try {
@@ -465,6 +570,7 @@ export function apply(ctx) {
       retry = 0;
       update({ status: "connected", detail: "", account, instructions: init?.instructions ?? "" });
       void pollQueue();
+      void checkLink();
     } catch (error) {
       if (attempt !== generation || stopped) return;
       rejectAll("The Black 4 connection failed.");
@@ -511,6 +617,15 @@ export function apply(ctx) {
       update({ status: "stopped", tools: 0 });
     };
   });
+
+  // The selected community can change who the viewer is (a debug build, an
+  // identity switch): check again whenever the key changes.
+  if (ctx.relay?.subscribe) {
+    ctx.effect(() => ctx.relay.subscribe(() => {
+      const key = viewerKey();
+      if (state.status === "connected" && key !== (state.agentLink.key ?? null)) void checkLink();
+    }));
+  }
 
   // ---- Settings card ------------------------------------------------------
   const STATUS_TEXT = {
@@ -623,6 +738,51 @@ export function apply(ctx) {
     },
   });
 
+  // One prompt, one button. The result stays where the button was.
+  function AgentAccess({ link, connected }) {
+    const busy = ["checking", "linking", "removing"].includes(link.status);
+    React.useEffect(() => {
+      if (connected && !busy) void checkLink();
+    }, []);
+    const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+    const when = (iso) => {
+      const date = new Date(iso);
+      return Number.isNaN(date.getTime()) ? "" : date.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+    };
+    const action = (text, onClick, options = {}) =>
+      h("button", { type: "button", onClick, disabled: options.disabled, "aria-busy": options.busy || undefined, className: options.primary ? "b4-primary" : undefined }, text);
+    let text;
+    let actions = [];
+    let role = "status";
+    if (!connected) text = "Connect Black 4 first.";
+    else if (link.status === "no-key") text = "Open a community in Buzz first.";
+    else if (link.status === "checking" || link.status === "idle") text = "Checking…";
+    else if (link.status === "unlinked" || link.status === "linking") {
+      text = "Agents you create on Black 4 hardware need this to use Black 4 as you.";
+      actions = [action(link.status === "linking" ? "Linking…" : "Link my agents", linkAgents, { primary: true, disabled: link.status === "linking", busy: link.status === "linking" })];
+    } else if ((link.status === "linked" || link.status === "removing") && link.link) {
+      const used = (link.link.agents ?? []).length;
+      text = [`Linked${when(link.link.linkedAt) ? ` ${when(link.link.linkedAt)}` : ""}`, used ? `${plural(used, "agent")} used it` : "No agents yet"].join(" · ");
+      if (link.status === "removing") actions = [action("Removing…", removeLink, { disabled: true, busy: true })];
+      else if (link.confirming) {
+        text = "Your agents on Black 4 hardware lose Black 4 access.";
+        actions = [action("Remove access", removeLink, { primary: true }), action("Cancel", () => confirmRemove(false))];
+      } else actions = [action("Remove…", () => confirmRemove(true))];
+    } else if (link.status === "unavailable") text = link.message || LINK_UNAVAILABLE;
+    else {
+      role = "alert";
+      text = link.message || "Black 4 could not check this link.";
+      actions = [action("Try again", checkLink)];
+    }
+    return h(
+      "section",
+      { className: "ui-card", "aria-label": "Agent access", "aria-busy": busy || undefined, style: { padding: "var(--space-panel-inset)", display: "flex", flexDirection: "column", gap: "var(--space-2)" } },
+      h("strong", null, "Agent access"),
+      h("span", { role }, text),
+      actions.length ? h("div", { style: { display: "flex", gap: "var(--space-2)" } }, ...actions) : null,
+    );
+  }
+
   function Black4Settings() {
     const current = useBridgeState();
     const row = (label, value) =>
@@ -655,6 +815,7 @@ export function apply(ctx) {
           h("button", { type: "button", onClick: reconnect }, current.status === "connected" ? "Reconnect" : "Connect"),
         ),
       ),
+      h(AgentAccess, { link: current.agentLink, connected: current.status === "connected" }),
       current.log.length
         ? h(
             "details",

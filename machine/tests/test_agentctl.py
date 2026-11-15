@@ -429,6 +429,19 @@ class Callers(Base):
         r2 = self.req(op="provision", name="A", community="wss://r.example.com", requestId="q1")
         self.assertNotEqual(r1["pubkey"], r2["pubkey"])
 
+    def test_a_caller_signs_in_only_a_signed_out_harness(self):
+        self.as_caller("sam")
+        r = self.req(op="login.start", harness="claude")
+        self.assertTrue(r["ok"], "signed out: a teammate may sign it in")
+        self.req(op="login.cancel", loginId=r["loginId"])
+        self.sign_in()
+        self.assertEqual(self.req(op="login.start", harness="claude"),
+                         {"ok": False, "error": "Claude Code is already signed in on this machine. Only a Black 4 admin can switch it to another account."})
+        self.a.CALLER = None
+        r = self.req(op="login.start", harness="claude")
+        self.assertTrue(r["ok"], "the admin may switch it")
+        self.req(op="login.cancel", loginId=r["loginId"])
+
     def test_only_the_admin_signs_the_machine_out(self):
         self.as_caller("sam")
         self.assertEqual(self.req(op="logout", harness="claude"),

@@ -183,8 +183,9 @@ running; `agentctl list` still shows them, with `createdBy`.
 
 On the machine, a teammate can see every agent but change, restart or remove
 only the agents they created, and cannot sign the machine out of Claude. They
-can sign the machine in to Claude when it is signed out, which every Claude
-agent on it then uses. Agents made with your own unrestricted key, or before
+can sign the machine in to Claude, Codex or Grok Build while it is signed out,
+which every agent on that harness then uses; only your key can switch a
+working sign-in to another account. Agents made with your own unrestricted key, or before
 labels existed, are yours: teammates can see them but not change them. Your
 key is not limited.
 

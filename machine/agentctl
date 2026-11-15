@@ -25,7 +25,8 @@ Callers: a teammate reaches this machine with their own SSH key, whose
 authorized_keys entry forces `agentctl --caller <label>` (machine/teammates.sh
 writes it). The label is stored as each agent's creator (`createdBy`, shown in
 `list`). A caller can read every agent, but changes, starts and removes only
-agents it created, and cannot sign the machine out. No label (the machine
+agents it created; it may sign a harness in only while that harness is signed
+out, and cannot sign the machine out. No label (the machine
 owner's own unrestricted key, or cron) may do everything, and only it changes
 the agents it made or ones made before creators were recorded.
 
@@ -1361,7 +1362,13 @@ def handle(req):
 
     if op == "machine.status": return machine_status()
     if op == "doctor": return doctor()
-    if op == "login.start": return login_start(req.get("harness"), req.get("flows"))
+    if op == "login.start":
+        harness = req.get("harness")
+        # Every agent on a harness uses the machine's one sign-in: a teammate
+        # may sign it in when it is signed out, never switch a working one.
+        if CALLER and harness in SIGN_IN and credential(harness) and not known_bad(harness):
+            fail(f"{LABEL[harness]} is already signed in on this machine. Only a Black 4 admin can switch it to another account.")
+        return login_start(harness, req.get("flows"))
     if op == "login.finish": return login_finish(req.get("loginId"), req.get("code"))
     if op == "login.cancel":
         d = login_dir(req.get("loginId"))

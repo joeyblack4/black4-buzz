@@ -1,0 +1,14 @@
+{
+  "$comment": "The one set of versions an agent machine runs together. buzz-acp (Buzz's headless harness, from the block/buzz release bundle) speaks one ACP protocol, and the npm adapters must speak it too: a newer adapter's SDK rejected buzz-acp 0.5.30's initialize (protocolVersion 2 with clientInfo; SDK 2.0.1+ wants info). machine/setup.sh carries these values as shell variables; scripts/check-machine-pins.mjs (in npm run check) fails when setup.sh, its comments or machine/tests disagree with this file. To move any of them, move them together here and in setup.sh, and check the initialize handshake on a machine first.",
+  "harness": {
+    "name": "buzz-acp",
+    "source": "block/buzz release bundle, vendored by hand on each machine",
+    "release": "0.5.30",
+    "vendorDir": "vendor/buzz-0.5.30",
+    "maxAdapterSdk": "2.0.0"
+  },
+  "adapters": {
+    "@agentclientprotocol/claude-agent-acp": { "version": "0.94.0", "sdk": "2.0.0", "versionVar": "CLAUDE_ACP_VERSION", "sdkVar": "CLAUDE_ACP_SDK" },
+    "@agentclientprotocol/codex-acp": { "version": "2.2.2", "sdk": "1.9.0", "versionVar": "CODEX_ACP_VERSION", "sdkVar": "CODEX_ACP_SDK" }
+  }
+}

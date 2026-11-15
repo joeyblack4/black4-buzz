@@ -35,10 +35,11 @@ const LINK_UNAVAILABLE = "This Black 4 server can't link agents yet.";
 // never in UI state, logs, error text or anything an agent receives.
 
 /** WorkOS AuthKit, device authorization (RFC 8628). Platform Control owns the
- * client; `clientId`, `scope` and `params` are what it registered. */
+ * client ("Black 4 for Buzz": public, no secret). `params` go with every
+ * request: the access token is for the Black 4 MCP resource. */
 export const AUTHKIT = Object.freeze({
   origin: "https://overjoyed-tea-41.authkit.app",
-  clientId: "PENDING_PLATFORM_CONTROL_CLIENT_ID", // PENDING: Platform Control sends the real one
+  clientId: "client_01M7G889K5GQTA4Q38Q6PPJQSN",
   scope: "openid profile email offline_access",
   params: Object.freeze({ resource: "https://api.black4.ai/mcp" }),
 });
@@ -121,7 +122,7 @@ export function createSession({ request, store = signInMemory, now = () => Date.
   };
 
   const exchange = async (token) => {
-    const { status, body } = await post("/oauth2/token", { grant_type: "refresh_token", client_id: authkit.clientId, refresh_token: token });
+    const { status, body } = await post("/oauth2/token", { grant_type: "refresh_token", client_id: authkit.clientId, refresh_token: token, ...authkit.params });
     if (status === 200 && body.access_token) return { ok: true, body };
     return { ok: false, grant: body.error === "invalid_grant" || status === 400 || status === 401, message: reason(body, `HTTP ${status}`) };
   };
@@ -201,7 +202,7 @@ export function createSession({ request, store = signInMemory, now = () => Date.
           if (now() > expiresAt) throw Object.assign(new Error("The sign-in code expired. Sign in again."), { code: "expired" });
           let polled;
           try {
-            polled = await post("/oauth2/token", { grant_type: "urn:ietf:params:oauth:grant-type:device_code", device_code: code.device_code, client_id: authkit.clientId });
+            polled = await post("/oauth2/token", { grant_type: "urn:ietf:params:oauth:grant-type:device_code", device_code: code.device_code, client_id: authkit.clientId, ...authkit.params });
           } catch (error) {
             if (error.code === "offline") continue; // a dropped poll is asked again
             throw error;
@@ -1366,7 +1367,8 @@ export function doorTransport({ request, sign }) {
       throw Object.assign(new Error(`Could not reach the ${machine.label}: its door refused the pass${reply?.error ? ` (${plain(reply.error, 160)})` : ""}.`), { code: "door" });
     }
     if (reply && typeof reply === "object" && typeof reply.ok === "boolean") return reply;
-    throw Object.assign(new Error(`Could not reach the ${machine.label}: its door answered HTTP ${response.status}.`), { code: "door" });
+    const said = typeof reply?.error === "string" && reply.error ? ` (${plain(reply.error, 160)})` : "";
+    throw Object.assign(new Error(`Could not reach the ${machine.label}: its door answered HTTP ${response.status}${said}.`), { code: "door" });
   };
 }
 

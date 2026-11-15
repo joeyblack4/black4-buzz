@@ -529,3 +529,9 @@ test("door: agentctl's own refusal comes through as its sentence", async () => {
   const d = await door({ agentctl: () => ({ ok: false, error: "no such agent on this machine" }) });
   await assert.rejects(askMachine(d.ask, "commerce", { op: "status", pubkey: PUBKEY }), /^Error: no such agent on this machine$/);
 });
+
+test("door: a door that is overloaded or broken says so with its own words", async () => {
+  const d = await door();
+  d.box.handle = async () => ({ status: 503, headers: {}, body: JSON.stringify({ error: "too many requests in flight" }) });
+  await assert.rejects(askMachine(d.ask, "commerce", { op: "list" }), /^Error: Could not reach the Commerce Mac: its door answered HTTP 503 \(too many requests in flight\)\.$/);
+});

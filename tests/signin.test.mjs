@@ -30,7 +30,8 @@ test("device sign-in asks AuthKit as the Black 4 client, shows the prefilled lin
   assert.deepEqual(start.form, { client_id: CLIENT.clientId, scope: CLIENT.scope, ...CLIENT.params });
   const polls = authkit.calls.filter((call) => call.form.grant_type === "urn:ietf:params:oauth:grant-type:device_code");
   assert.equal(polls.length, 3);
-  assert.ok(polls.every((call) => call.form.client_id === CLIENT.clientId && call.form.device_code === "device-code-1"));
+  assert.ok(polls.every((call) => call.form.client_id === CLIENT.clientId && call.form.device_code === "device-code-1" && call.form.resource === "https://api.black4.ai/mcp"));
+  assert.equal(CLIENT.clientId, "client_01M7G889K5GQTA4Q38Q6PPJQSN");
   assert.deepEqual(slept, [5000, 5000, 5000], "waits the server's interval before each poll");
   assert.match(await session.accessToken(), /^access-/);
   assert.doesNotMatch(JSON.stringify(session.snapshot()), tokenText, "the state never holds a token");
@@ -96,6 +97,7 @@ test("an access token near its end is refreshed first, once for concurrent calle
   assert.equal(a, b);
   assert.notEqual(a, first);
   assert.equal(authkit.calls.filter((call) => call.form.grant_type === "refresh_token").length, 1, "one refresh for both");
+  assert.equal(authkit.calls.find((call) => call.form.grant_type === "refresh_token").form.resource, "https://api.black4.ai/mcp");
   assert.equal(await store.load(), "refresh-2", "the rotated token replaced the old one");
   assert.ok(!authkit.refresh.has("refresh-1"), "the old one is spent");
 });

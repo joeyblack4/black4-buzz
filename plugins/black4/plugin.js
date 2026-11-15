@@ -1147,9 +1147,17 @@ export function signInOf(row) {
   return { flow: null, reason: `This machine's runner cannot sign in ${harnessLabel(row.id) ?? row.id} from Buzz yet.` };
 }
 
+/** Why the machine cannot run this harness now (its self-test: a version off
+ * its pin, or buzz-acp's ACP handshake with the adapter failing), or null. An
+ * older runner reports no `problem`. */
+function problemOf(row) {
+  return typeof row?.problem === "string" && row.problem ? `This machine cannot run it right now: ${row.problem}.` : null;
+}
+
 /** Harnesses to offer for a machine: those it reports installed once its
- * status has loaded, every harness otherwise. One installed that Buzz cannot
- * sign in, and that is not signed in already, is listed as unavailable, with
+ * status has loaded, every harness otherwise. One the machine cannot run, or
+ * one installed that Buzz cannot sign in and that is not signed in already, is
+ * listed as unavailable, with
  * its reason. */
 export function harnessOptions(status) {
   if (status?.kind !== "ok") return HARNESSES;
@@ -1157,7 +1165,8 @@ export function harnessOptions(status) {
     const row = status.harnesses.find((candidate) => candidate?.id === entry.id);
     if (!row || row.installed === false) return [];
     const { flow, reason } = signInOf(row);
-    return [!flow && row.signedIn !== true ? { ...entry, label: `${entry.label} (unavailable)`, unavailable: reason } : entry];
+    const unavailable = problemOf(row) ?? (!flow && row.signedIn !== true ? reason : null);
+    return [unavailable ? { ...entry, label: `${entry.label} (unavailable)`, unavailable } : entry];
   });
 }
 
@@ -1169,6 +1178,7 @@ export function signInState(status, harness) {
   if (status.kind === "unsupported") return { kind: "unsupported" };
   const row = status.harnesses.find((entry) => entry?.id === harness);
   if (!row || row.installed === false) return { kind: "not-installed" };
+  if (problemOf(row)) return { kind: "unavailable", reason: problemOf(row) };
   if (row.signedIn === true) return { kind: "signed-in", account: typeof row.account === "string" && row.account ? row.account : null };
   const { flow, reason } = signInOf(row);
   if (!flow) return { kind: "unavailable", reason };

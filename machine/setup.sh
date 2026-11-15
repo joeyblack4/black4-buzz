@@ -157,9 +157,17 @@ if [ -f "$SRC/machine/agentctl" ]; then
   echo "agentctl installed"
 fi
 
+if [ -f "$SRC/machine/pins.json" ]; then cp "$SRC/machine/pins.json" "$ROOT/pins.json"; fi
+
 if [ -n "${MACHINE_NAME:-}" ]; then
   printf '{"name": "%s"}\n' "$MACHINE_NAME" > "$ROOT/machine.json"
 fi
 
 echo "node $("$BIN/node" --version), $want, grok $GROK_VERSION"
+# The self-test: pinned versions, buzz-acp's ACP handshake with each adapter,
+# the connector, cron and disk. An install that cannot run an agent fails here.
+if [ -x "$BIN/agentctl" ]; then
+  echo "doctor:"
+  BLACK4_WORKFORCE_ROOT="$ROOT" "$BIN/agentctl" doctor || { echo "setup finished, but this machine cannot run agents yet (see PROBLEM above)" >&2; exit 1; }
+fi
 echo "setup done"

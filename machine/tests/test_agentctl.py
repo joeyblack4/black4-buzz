@@ -9,7 +9,7 @@ pty: banner, link, "Paste code" prompt, then a token or an OAuth error. The fake
 ones printed on the machine (a link and a one-time code), then wait for the
 test to approve or refuse (the file approve.txt in the test home).
 """
-import re, importlib.machinery, importlib.util, json, os, signal, stat, subprocess, sys, tempfile, textwrap, time, unittest
+import contextlib, io, re, importlib.machinery, importlib.util, json, os, signal, stat, subprocess, sys, tempfile, textwrap, time, unittest
 from pathlib import Path
 
 AGENTCTL = Path(__file__).resolve().parent.parent / "agentctl"
@@ -58,8 +58,16 @@ if "-p" in args:
 
 FAKE_BUZZ_ACP = f"""#!{PY}
 import json, os, sys, time
+home = os.environ["HOME"]
+if sys.argv[1:2] == ["auth-methods"]:  # buzz-acp's own ACP initialize with an adapter
+    with open(os.path.join(home, "handshakes.txt"), "a") as f: f.write(sys.argv[sys.argv.index("--agent-command") + 1] + "\\n")
+    if os.path.exists(os.path.join(home, "handshake-fail.txt")):
+        sys.stderr.write("error: initialize failed: -32602 Invalid params\\n"); sys.exit(1)
+    print(json.dumps({{"methods": []}})); sys.exit(0)
+if os.path.exists(os.path.join(home, "crash.txt")):
+    print("buzz-acp: relay refused the connection", flush=True); sys.exit(1)
 with open("env.json", "w") as f:
-    json.dump({{k: v for k, v in os.environ.items() if k.startswith(("BUZZ_ACP", "CLAUDE_CODE", "PATH", "CODEX", "GROK", "NO_BROWSER", "OPENAI", "XAI"))}}, f)
+    json.dump({{k: v for k, v in os.environ.items() if k.startswith(("BUZZ_ACP", "CLAUDE_CODE", "PATH", "CODEX", "GROK", "NO_BROWSER", "OPENAI", "XAI", "INITIAL_AGENT_MODE", "GOOSE"))}}, f)
 while True: time.sleep(1)
 """
 
@@ -164,6 +172,8 @@ class Base(unittest.TestCase):
         self.a.agent_path = lambda: f"{bin_}:/usr/bin:/bin"
         # Sign-in checks run in this process, not in a detached `agentctl check`.
         self.a.spawn_check = lambda harness: self.a.run_check(harness)
+        self.crontab = ""  # never the test computer's own crontab
+        self.a.read_crontab = lambda: self.crontab
 
     def tearDown(self):
         for d in self.a.agent_dirs():
@@ -335,6 +345,12 @@ class Start(Base):
         self.assertTrue(env["PATH"].startswith(str(self.a.BIN)))
         self.assertNotIn(FAKE_TOKEN, (d / "agent.log").read_text())
 
+    def test_claude_runs_with_full_access(self):
+        self.sign_in()
+        d = self.make_agent()
+        self.assertTrue(self.req(op="start", pubkey=d.name)["ok"])
+        self.assertEqual(self.wait_env(d)["BUZZ_ACP_PERMISSION_MODE"], "bypassPermissions")
+
     def test_every_agent_gets_the_black4_mcp_when_installed(self):
         self.sign_in()
         d = self.make_agent()
@@ -384,11 +400,19 @@ class Callers(Base):
         self.assertEqual(self.a.read_settings(d)["createdBy"], "sam")
         self.assertEqual(self.req(op="list")["agents"][0]["createdBy"], "sam")
 
-    def test_admin_agents_have_no_creator(self):
+    def test_the_owners_agents_are_closed_to_callers(self):
+        # Made with the machine owner's own key (no label), or before creators
+        # were recorded: a teammate reads them but cannot change them.
         d = self.make_agent(activate=False)
         self.assertIsNone(self.req(op="list")["agents"][0]["createdBy"])
         self.as_caller("lee")
-        self.assertTrue(self.req(op="instructions.set", pubkey=d.name, instructions="x")["ok"], "unlabelled agents stay open")
+        for op, extra in [("remove", {}), ("instructions.set", {"instructions": "x"}), ("profile", {"name": "Taken"}), ("start", {})]:
+            self.assertEqual(self.req(op=op, pubkey=d.name, **extra),
+                             {"ok": False, "error": "This agent belongs to the machine owner. Only they or a Black 4 admin can change it."}, op)
+        self.assertTrue(d.exists())
+        self.assertTrue(self.req(op="status", pubkey=d.name)["ok"])
+        self.assertTrue(self.req(op="instructions.get", pubkey=d.name)["ok"])
+        self.assertEqual(len(self.req(op="list")["agents"]), 1)
 
     def test_a_caller_changes_only_its_own_agents(self):
         self.as_caller("sam")
@@ -410,6 +434,19 @@ class Callers(Base):
         self.a.CALLER = "lee"
         r2 = self.req(op="provision", name="A", community="wss://r.example.com", requestId="q1")
         self.assertNotEqual(r1["pubkey"], r2["pubkey"])
+
+    def test_a_caller_signs_in_only_a_signed_out_harness(self):
+        self.as_caller("sam")
+        r = self.req(op="login.start", harness="claude")
+        self.assertTrue(r["ok"], "signed out: a teammate may sign it in")
+        self.req(op="login.cancel", loginId=r["loginId"])
+        self.sign_in()
+        self.assertEqual(self.req(op="login.start", harness="claude"),
+                         {"ok": False, "error": "Claude Code is already signed in on this machine. Only a Black 4 admin can switch it to another account."})
+        self.a.CALLER = None
+        r = self.req(op="login.start", harness="claude")
+        self.assertTrue(r["ok"], "the admin may switch it")
+        self.req(op="login.cancel", loginId=r["loginId"])
 
     def test_only_the_admin_signs_the_machine_out(self):
         self.as_caller("sam")
@@ -441,17 +478,16 @@ class Supervisor(Base):
             if not self.a.running(d): break
             time.sleep(0.1)
         self.assertIsNone(self.a.running(d))
-        self.a.supervise_pass({})
+        self.a.supervise_pass()
         new = self.a.running(d)
         self.assertTrue(new)
         self.assertNotEqual(new, pid)
 
     def test_waits_for_sign_in_instead_of_retrying(self):
         d = self.make_agent()
-        backoff = {}
-        self.a.supervise_pass(backoff)
+        self.a.supervise_pass()
         self.assertIsNone(self.a.running(d))
-        self.assertEqual(backoff, {})  # skipped, not failed: nothing to back off from
+        self.assertEqual(self.a.restarts(d), {})  # skipped, not failed: nothing to back off from
 
     def test_single_supervisor(self):
         self.a.RUN.mkdir(parents=True, exist_ok=True)
@@ -836,14 +872,245 @@ class DeviceStatusAndStart(DeviceBase):
         self.assertEqual(env["NO_BROWSER"], "1")
         self.assertIn('cli_auth_credentials_store = "file"', (self.a.HOMES / "codex" / "config.toml").read_text())
 
+    def test_codex_runs_with_full_access(self):
+        self.sign_in_device("codex")
+        agent = self.make_agent("codex")
+        self.assertTrue(self.req(op="start", pubkey=agent.name)["ok"])
+        env = json.loads((agent / "work" / "env.json").read_text())
+        self.assertEqual(env["INITIAL_AGENT_MODE"], "agent-full-access")
+        self.assertNotIn("sandbox", (self.a.HOMES / "codex" / "config.toml").read_text(), "the mode decides, not config.toml")
+
+    def test_grok_runs_with_full_access(self):
+        self.sign_in_device("grok")
+        agent = self.make_agent("grok")
+        self.assertTrue(self.req(op="start", pubkey=agent.name)["ok"])
+        env = json.loads((agent / "work" / "env.json").read_text())
+        self.assertIn("--always-approve", env["BUZZ_ACP_AGENT_ARGS"].split(","))
+        self.assertEqual(env["GROK_SANDBOX"], "off")
+
     def test_supervisor_waits_for_a_sign_in(self):
         agent = self.make_agent("codex")
-        self.a.supervise_pass({})
+        self.a.supervise_pass()
         self.assertIsNone(self.a.running(agent))
         self.sign_in_device("codex")
         self.a.stop(agent)
-        self.a.supervise_pass({})
+        self.a.supervise_pass()
         self.assertTrue(self.a.running(agent))
+
+
+
+def install_pinned(a, home):
+    """Lays out what setup.sh installs, at the versions in machine/pins.json."""
+    pins = json.loads((AGENTCTL.parent / "pins.json").read_text())
+    (a.ROOT / "pins.json").write_text(json.dumps(pins))
+    buzz = a.VENDOR / f"buzz-{pins['harness']['release']}"
+    buzz.mkdir(parents=True)
+    (a.BIN / "buzz-acp").rename(buzz / "buzz-acp")
+    (a.BIN / "buzz-acp").symlink_to(buzz / "buzz-acp")
+    def package(parts, version):
+        d = a.VENDOR / "acp" / "node_modules" / parts
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "package.json").write_text(json.dumps({"version": version}))
+    for name, pin in pins["adapters"].items():
+        package(name, pin["version"])
+    (a.VENDOR / "acp/node_modules/@agentclientprotocol/codex-acp/dist").mkdir()
+    (a.VENDOR / "acp/node_modules/@agentclientprotocol/codex-acp/dist/index.js").write_text('static AgentFullAccess = new _AgentMode(\n    "agent-full-access",\n')
+    package("@agentclientprotocol/sdk", pins["adapters"]["@agentclientprotocol/claude-agent-acp"]["sdk"])
+    package("@agentclientprotocol/codex-acp/node_modules/@agentclientprotocol/sdk", pins["adapters"]["@agentclientprotocol/codex-acp"]["sdk"])
+    package("@openai/codex", pins["clis"]["@openai/codex"]["version"])
+    grok = a.VENDOR / f"grok-{pins['clis']['grok']['version']}"
+    grok.mkdir()
+    if (a.BIN / "grok").exists():
+        (a.BIN / "grok").rename(grok / "grok")
+        (a.BIN / "grok").symlink_to(grok / "grok")
+    (a.ROOT / "mcp").mkdir()
+    write_exe(a.ROOT / "mcp" / "black4", "#!/bin/sh\nexit 0\n")
+    return pins
+
+
+class Health(DeviceBase):
+    """doctor, and the per-harness `problem` that machine.status and start use."""
+    def setUp(self):
+        super().setUp()
+        self.pins = install_pinned(self.a, self.home)
+
+    def rows(self, op="machine.status"):
+        return {h["id"]: h for h in self.req(op=op)["harnesses"]}
+
+    def test_a_pinned_install_is_healthy_and_signing_in_makes_a_harness_ready(self):
+        r = self.req(op="doctor")
+        self.assertTrue(r["healthy"], r["problems"])
+        self.assertEqual(r["problems"], [])
+        self.assertEqual((r["connector"], r["cron"]), (True, "not needed"))
+        self.assertGreater(r["diskFreeGB"], 0)
+        rows = {h["id"]: h for h in r["harnesses"]}
+        self.assertNotIn("problem", rows["claude"])
+        self.assertFalse(rows["claude"]["ready"], "signed out: healthy, not ready")
+        self.sign_in()
+        self.assertTrue(self.rows("doctor")["claude"]["ready"])
+
+    def test_a_version_off_its_pin_is_a_problem_that_blocks_start(self):
+        (self.a.VENDOR / "acp/node_modules/@agentclientprotocol/codex-acp/node_modules/@agentclientprotocol/sdk/package.json").write_text('{"version": "2.0.1"}')
+        problem = self.rows()["codex"]["problem"]
+        self.assertEqual(problem, "its ACP SDK is 2.0.1, pinned 1.9.0")
+        self.assertNotIn("problem", self.rows()["claude"])
+        r = self.req(op="doctor")
+        self.assertFalse(r["healthy"])
+        self.assertIn("Codex: its ACP SDK is 2.0.1, pinned 1.9.0.", r["problems"])
+        self.sign_in_device("codex")
+        agent = self.make_agent("codex")
+        self.assertEqual(self.req(op="start", pubkey=agent.name)["error"],
+                         "Codex cannot run on this machine: its ACP SDK is 2.0.1, pinned 1.9.0.")
+
+    def test_doctor_reports_each_harness_runs_with_full_access(self):
+        rows = self.rows("doctor")
+        for harness in ("claude", "codex", "grok", "goose"):
+            self.assertTrue(rows[harness]["access"].startswith("full access"), rows[harness])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out): self.a.print_doctor()
+        self.assertIn("Codex: signed out; full access (agent-full-access", out.getvalue())
+
+    def test_a_codex_adapter_without_the_full_access_mode_is_a_problem(self):
+        (self.a.VENDOR / "acp/node_modules/@agentclientprotocol/codex-acp/dist/index.js").write_text('static Agent = new _AgentMode("agent",')
+        self.assertEqual(self.rows()["codex"]["problem"], "@agentclientprotocol/codex-acp has no agent-full-access mode")
+
+    def test_a_failed_handshake_is_a_problem_and_a_good_one_is_remembered(self):
+        (self.home / "handshake-fail.txt").write_text("x")
+        self.assertEqual(self.rows()["claude"]["problem"],
+                         "claude-agent-acp failed buzz-acp's ACP handshake: error: initialize failed: -32602 Invalid params")
+        self.sign_in()
+        agent = self.make_agent()
+        self.assertIn("failed buzz-acp's ACP handshake", self.req(op="start", pubkey=agent.name)["error"])
+        self.assertIsNone(self.a.running(agent), "never started an agent that cannot answer")
+        (self.home / "handshake-fail.txt").unlink()
+        self.assertNotIn("problem", self.rows()["claude"])
+        (self.home / "handshakes.txt").unlink()
+        self.rows()
+        self.assertFalse((self.home / "handshakes.txt").exists(), "remembered while buzz-acp and the adapter are unchanged")
+        os.utime(self.a.BIN / "claude-agent-acp", (1, 1))
+        self.rows()
+        self.assertIn("claude-agent-acp", (self.home / "handshakes.txt").read_text().split())
+
+    def test_machine_wide_problems(self):
+        (self.a.ROOT / "mcp" / "black4").unlink()
+        (self.a.ROOT / "pins.json").unlink()
+        self.make_agent()  # activated, and no cron lines
+        r = self.req(op="doctor")
+        self.assertFalse(r["healthy"])
+        self.assertEqual(r["cron"], "missing")
+        self.assertEqual(r["problems"], [
+            "pins.json is missing; run machine/deploy.sh again.",
+            "The Black 4 connector (mcp/black4) is missing; run machine/deploy.sh again.",
+            "The cron lines that bring agents back after a reboot are missing; start any agent to restore them."])
+        self.crontab = "\n".join(self.a.cron_lines()) + "\n"
+        self.assertEqual(self.req(op="doctor")["cron"], "present")
+        self.a.DISK_MIN_GB = 10 ** 9
+        self.assertTrue(self.req(op="doctor")["problems"][-1].endswith("GB of disk is free."))
+
+    def test_agentctl_doctor_prints_and_exits_nonzero_when_unhealthy(self):
+        import io, contextlib
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out): code = self.a.print_doctor()
+        self.assertEqual(code, 0)
+        self.assertIn("Claude Code: signed out", out.getvalue())
+        self.assertTrue(out.getvalue().rstrip().endswith("doctor: healthy"))
+        self.sign_in_device("codex")
+        (self.a.ROOT / "mcp" / "black4").unlink()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out): code = self.a.print_doctor()
+        self.assertEqual(code, 1)
+        self.assertIn("Codex: ready", out.getvalue())
+        self.assertNotIn("owner@example.com", out.getvalue(), "no account is printed")
+        self.assertIn("PROBLEM: The Black 4 connector", out.getvalue())
+
+    def test_callers_may_run_doctor_but_not_as_a_command(self):
+        env = dict(os.environ, HOME=str(self.home), AGENTCTL_HOME=str(self.home))
+        out = subprocess.run([PY, str(AGENTCTL), "--caller", "sam", "doctor"], input="", capture_output=True, text=True, env=env, timeout=60)
+        self.assertFalse(json.loads(out.stdout)["ok"])
+
+
+class Restarts(Base):
+    """A crashing agent: the supervisor backs off and status says it keeps stopping."""
+    def test_a_crash_loop_backs_off_and_status_says_it_keeps_stopping(self):
+        self.sign_in()
+        d = self.make_agent()
+        (self.home / "crash.txt").write_text("x")
+        t = 1_000_000.0
+        delays = []
+        for _ in range(4):
+            self.a.supervise_pass(now=t)
+            r = self.a.restarts(d)
+            delays.append(r["delay"])
+            self.a.supervise_pass(now=t + r["delay"] - 1)  # too soon: no new try
+            self.assertEqual(self.a.restarts(d)["count"], len(delays))
+            t += r["delay"]
+        self.assertEqual(delays, [5, 10, 20, 40])
+        status = self.req(op="status", pubkey=d.name)
+        self.assertEqual((status["running"], status["keepsStopping"], status["restarts"]), (False, True, 4))
+        self.assertEqual(status["nextRestart"], int(t))
+        self.assertIn("relay refused the connection", status["log"])
+        self.assertTrue(self.req(op="list")["agents"][0]["keepsStopping"])
+        for _ in range(10):
+            self.a.supervise_pass(now=t)
+            t += self.a.restarts(d)["delay"]
+        self.assertEqual(self.a.restarts(d)["delay"], 300, "never faster than every 5 minutes")
+
+    def test_a_start_asked_for_in_person_starts_over_and_a_healthy_agent_is_forgiven(self):
+        self.sign_in()
+        d = self.make_agent()
+        (self.home / "crash.txt").write_text("x")
+        for i in range(3): self.a.supervise_pass(now=1_000_000.0 + 1000 * i)
+        self.assertTrue(self.a.keeps_stopping(d))
+        (self.home / "crash.txt").unlink()
+        self.assertTrue(self.req(op="start", pubkey=d.name)["ok"])
+        self.assertEqual(self.a.restarts(d), {})
+        self.a.stop(d)
+        self.a.supervise_pass(now=2_000_000.0)
+        self.assertTrue(self.a.running(d))
+        self.assertEqual(self.a.restarts(d)["count"], 1)
+        self.a.supervise_pass(now=2_000_000.0 + 301)
+        self.assertEqual(self.a.restarts(d), {}, "up 5 minutes: the count starts over")
+
+    def test_the_reboot_line_brings_agents_back(self):
+        # After a reboot nothing runs; cron's @reboot line runs `agentctl supervise`.
+        self.sign_in()
+        d = self.make_agent()
+        reboot = self.a.cron_lines()[0]
+        self.assertTrue(reboot.startswith("@reboot ") and " supervise " in reboot)
+        self.a.supervise(passes=1)
+        self.assertTrue(self.a.running(d))
+
+
+class Logs(Base):
+    def test_agent_log_is_cut_over_once_and_the_agent_keeps_writing(self):
+        d = self.a.AGENTS / ("e" * 64)
+        d.mkdir(parents=True)
+        log = d / "agent.log"
+        writer = open(log, "ab")  # how buzz-acp holds it
+        writer.write(b"old line\n" * 10); writer.flush()
+        self.a.cap_log(log, 50)
+        self.assertEqual(log.stat().st_size, 0)
+        self.assertEqual((d / "agent.log.1").read_bytes(), b"old line\n" * 10)
+        writer.write(b"new line\n"); writer.flush(); writer.close()
+        self.assertEqual(log.read_bytes(), b"new line\n", "appends land at the start of the emptied file")
+        self.assertEqual(self.a.log_tail(d, 18), "old line\nnew line\n")
+        self.a.cap_log(log, 50)
+        self.assertEqual(log.read_bytes(), b"new line\n", "under the cap: untouched")
+        (d / "agent.log").write_bytes(b"\x1b[2m2026\x1b[0m \x1b[33m WARN\x1b[0m relay\n")
+        self.assertEqual(self.a.log_tail(d, 17), "2026  WARN relay\n", "no terminal colours")
+
+    def test_the_supervisor_caps_every_agent_log(self):
+        d = self.make_agent(activate=False)
+        (d / "agent.log").write_bytes(b"x" * (self.a.AGENT_LOG_CAP + 1))
+        self.a.supervise_pass()
+        self.assertEqual((d / "agent.log").stat().st_size, 0)
+        self.assertEqual((d / "agent.log.1").stat().st_size, self.a.AGENT_LOG_CAP + 1)
+
+    def test_run_logs_are_capped(self):
+        self.a.RUN_LOG_CAP = 100
+        for i in range(20): self.a.log_line("supervisor", f"line {i:04d} " + "-" * 10)
+        self.assertLessEqual((self.a.RUN / "supervisor.log").stat().st_size, 100 + 40)
+        self.assertTrue((self.a.RUN / "supervisor.log.1").exists())
 
 
 class SecondRoot(unittest.TestCase):

@@ -3,13 +3,17 @@
 
 Reads one JSON request on stdin, writes one JSON reply on stdout. The Buzz
 plugin calls it over SSH. Each agent is a folder under ~/workforce/agents/<pubkey>
-holding its key (mode 600), settings and log, and one buzz-acp process.
+holding its key (mode 600), settings and log (agent.log, cut over to
+agent.log.1 past 5 MB), and one buzz-acp process.
 
 Requests: {"op": ...} with op one of
   provision, activate, profile, instructions.get, instructions.set, remove,
   start, status, list                     (one agent)
   identity                                (each agent's key and the owner it attests)
   machine.status                          (what this machine can run)
+  doctor                                  (machine.status plus every check that
+                                           an agent can run now; `agentctl doctor`
+                                           prints it, deploy.sh runs that)
   login.start, login.finish, login.cancel, logout   (model sign-in)
 
 Not requests (run from cron or by agentctl itself):
@@ -21,9 +25,10 @@ Callers: a teammate reaches this machine with their own SSH key, whose
 authorized_keys entry forces `agentctl --caller <label>` (machine/teammates.sh
 writes it). The label is stored as each agent's creator (`createdBy`, shown in
 `list`). A caller can read every agent, but changes, starts and removes only
-agents it created, and cannot sign the machine out. No label (the admin's own
-unrestricted key, or cron) may do everything; agents made before labels
-existed are open to every caller.
+agents it created; it may sign a harness in only while that harness is signed
+out, and cannot sign the machine out. No label (the machine
+owner's own unrestricted key, or cron) may do everything, and only it changes
+the agents it made or ones made before creators were recorded.
 
 Secrets: agent keys live in agents/<pubkey>/key, the Claude subscription token
 in secrets/claude, the Codex and Grok subscription sign-ins in
@@ -53,13 +58,20 @@ KNOWN_BAD_TTL = 30 * 60      # a rejection stops restarts this long, then is che
 STATUS_WAIT = 6.0            # machine.status waits this long for a due check
 SUPERVISE_EVERY = 5          # seconds between supervisor passes
 START_GRACE = 2.0            # an agent must stay up this long for start to succeed
+AGENT_LOG_CAP = 5 << 20      # agent.log is cut over to agent.log.1 past this size
+RUN_LOG_CAP = 1 << 20        # likewise run/*.log
+RESTART_MAX_DELAY = 300      # a crashing agent is retried at 5, 10, 20 ... 300 s
+HEALTHY_AFTER = 300          # up this long after a restart: the count starts over
+KEEPS_STOPPING = 3           # restarts in a row before status says "keeps stopping"
+DISK_MIN_GB = 2              # doctor's floor for free disk
+PINNED = ("claude", "codex", "grok")  # harnesses setup.sh installs at pins.json versions
 
 
 def set_root(home, root=None):
     """Point every path at the runner's root: <home>/workforce, or `root`
     (BLACK4_WORKFORCE_ROOT) for a second runner beside it, e.g. a dev copy.
     Tests use a temporary home."""
-    global HOME, ROOT, AGENTS, BIN, LOGINS, SECRETS, RUN, VENDOR, BLACK4_MCP, HOMES, CRON_MARK
+    global HOME, ROOT, AGENTS, BIN, LOGINS, SECRETS, RUN, VENDOR, BLACK4_MCP, HOMES, CRON_MARK, PINS
     HOME = Path(home)
     ROOT = (HOME / Path(root).expanduser()) if root else HOME / "workforce"
     # Each root has its own cron lines. The default root keeps the released
@@ -74,6 +86,9 @@ def set_root(home, root=None):
     # buzz-acp names the MCP server after this file's stem, so the agent's
     # tools appear as black4 tools (mcp__black4__<tool> in Claude Code).
     BLACK4_MCP = ROOT / "mcp" / "black4"
+    # The version set this machine was installed with (machine/pins.json,
+    # copied by setup.sh). doctor and machine.status check the install against it.
+    PINS = ROOT / "pins.json"
 
 
 set_root(os.environ.get("AGENTCTL_HOME") or Path.home(), os.environ.get("BLACK4_WORKFORCE_ROOT") or None)
@@ -138,10 +153,40 @@ def read_json(path, default=None):
     except (FileNotFoundError, ValueError): return default
 
 
+def cap_log(path, limit):
+    """Past `limit` bytes, copy the log to <name>.1 and empty it in place. A
+    running agent holds its log open for appending, so it carries on writing at
+    the start of the emptied file; nothing has to restart."""
+    try:
+        if path.stat().st_size <= limit: return
+        shutil.copyfile(path, path.with_name(path.name + ".1"))
+        with open(path, "r+") as f: f.truncate(0)
+    except OSError:
+        pass
+
+
+def tail(path, n):
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - n))
+            return f.read().decode(errors="replace")
+    except OSError:
+        return ""
+
+
+def log_tail(d, n):
+    """The last n characters an agent logged, across the cut-off file, without
+    the terminal colours buzz-acp writes."""
+    text = re.sub(r"\x1b\[[0-9;]*m", "", tail(d / "agent.log.1", 4 * n) + tail(d / "agent.log", 4 * n))
+    return text[-n:]
+
+
 def log_line(name, message):
     """Append a line to run/<name>.log. Never pass a secret here."""
     try:
-        with open(private_dir(RUN) / f"{name}.log", "a") as f:
+        cap_log(private_dir(RUN) / f"{name}.log", RUN_LOG_CAP)
+        with open(RUN / f"{name}.log", "a") as f:
             f.write(time.strftime("%Y-%m-%dT%H:%M:%S ") + message + "\n")
     except OSError:
         pass
@@ -234,6 +279,25 @@ HARNESS = {  # the model CLI each choice runs, as buzz-acp's agent command
     "grok": ("grok", "agent,--always-approve,stdio"),
 }
 LABEL = {"claude": "Claude Code", "codex": "Codex", "grok": "Grok Build", "goose": "Goose"}
+
+# Every agent is a full-access agent. It lives on its own computer, so no
+# harness asks permission or runs sandboxed; the one gate on customer changes
+# is the Reviews flow in Platform Control. buzz-acp approves any permission
+# prompt an adapter still sends; these settings make each harness say so itself.
+FULL_ACCESS = {
+    # claude-agent-acp's session mode, which buzz-acp sets (its default too).
+    "claude": {"BUZZ_ACP_PERMISSION_MODE": "bypassPermissions"},
+    # codex-acp's own preset: no sandbox, network allowed, approval "never".
+    # It picks the sandbox for every turn from this mode, not from config.toml.
+    "codex": {"INITIAL_AGENT_MODE": "agent-full-access"},
+    # With --always-approve in its arguments above. Off is grok's default.
+    "grok": {"GROK_SANDBOX": "off"},
+    "goose": {"GOOSE_MODE": "auto"},
+}
+ACCESS = {"claude": "full access (permission mode bypassPermissions)",
+          "codex": "full access (agent-full-access: no sandbox, network on, never asks)",
+          "grok": "full access (--always-approve, sandbox off)",
+          "goose": "full access (GOOSE_MODE=auto)"}
 
 
 def agent_path():
@@ -568,6 +632,8 @@ def machine_status():
             if row["id"] in SIGN_IN: row["signedIn"], row["account"] = signed_in(row["id"])
         except Exception as e:  # one harness's trouble must not hide the others
             log_line("status", f"{row['id']} check failed: {type(e).__name__}")
+        problem = harness_problem(row["id"])
+        if problem: row["problem"] = problem
     threads = [threading.Thread(target=check, args=(row,)) for row in rows if row["installed"]]
     for t in threads: t.start()
     for t in threads: t.join(100)
@@ -577,6 +643,135 @@ def machine_status():
 def machine_name():
     name = (read_json(ROOT / "machine.json", {}) or {}).get("name")
     return name or socket.gethostname().split(".")[0]
+
+
+# ---------------------------------------------------------------- health
+# Whether a harness can run here, cheap enough for machine.status and start:
+# the installed versions against pins.json, and buzz-acp's own ACP initialize
+# with the harness's adapter (`buzz-acp auth-methods`), remembered until either
+# program changes. `doctor` adds the machine-wide checks.
+
+ADAPTER_PACKAGE = {"claude": "@agentclientprotocol/claude-agent-acp", "codex": "@agentclientprotocol/codex-acp"}
+
+
+def vendored_version(link, name):
+    """The version in a vendored program's folder: vendor/<name>-<version>/..."""
+    found = re.search(rf"/{name}-(\d[^/]*)/", os.path.realpath(link))
+    return found.group(1) if found else None
+
+
+def npm_version(*parts):
+    return (read_json(VENDOR / "acp" / "node_modules" / Path(*parts) / "package.json", {}) or {}).get("version")
+
+
+def version_problems(harness):
+    pins = read_json(PINS)
+    if not pins: return []  # doctor reports a missing pins.json once
+    out = []
+    def want(what, have, pinned):
+        if have != pinned: out.append(f"{what} is {have or 'missing'}, pinned {pinned}")
+    want("buzz-acp", vendored_version(BIN / "buzz-acp", "buzz"), pins["harness"]["release"])
+    package = ADAPTER_PACKAGE.get(harness)
+    if package:
+        pin = pins["adapters"][package]
+        want(package, npm_version(package), pin["version"])
+        sdk = npm_version(package, "node_modules", "@agentclientprotocol", "sdk") or npm_version("@agentclientprotocol", "sdk")
+        want("its ACP SDK", sdk, pin["sdk"])
+    if harness == "codex":
+        want("@openai/codex", npm_version("@openai/codex"), pins["clis"]["@openai/codex"]["version"])
+        # codex-acp falls back to its sandboxed mode, silently, on a mode it does not know.
+        adapter = VENDOR / "acp" / "node_modules" / ADAPTER_PACKAGE["codex"] / "dist" / "index.js"
+        if adapter.exists() and f'"{FULL_ACCESS["codex"]["INITIAL_AGENT_MODE"]}"' not in adapter.read_text(errors="replace"):
+            out.append(f"{ADAPTER_PACKAGE['codex']} has no {FULL_ACCESS['codex']['INITIAL_AGENT_MODE']} mode")
+    if harness == "grok": want("grok", vendored_version(BIN / "grok", "grok"), pins["clis"]["grok"]["version"])
+    return out
+
+
+def handshake(harness):
+    """None when buzz-acp completes ACP initialize with this harness's adapter,
+    else one line why. A success is remembered until buzz-acp or the adapter
+    changes; a failure is checked again next time."""
+    command, args = HARNESS[harness]
+    found = shutil.which(command, path=agent_path())
+    if not (BIN / "buzz-acp").exists(): return "buzz-acp is not installed"
+    if not found: return f"{command} is not installed"
+    stamp = "|".join(f"{os.path.realpath(p)}:{os.stat(p).st_mtime}" for p in (BIN / "buzz-acp", found))
+    cache = RUN / f"{harness}-handshake.json"
+    if (read_json(cache, {}) or {}).get("stamp") == stamp: return None
+    env = device_env(harness) if harness in DEVICE else base_env()
+    try:
+        done = subprocess.run([str(BIN / "buzz-acp"), "auth-methods", "--json", "--agent-command", command, f"--agent-args={args}"],
+                              env=env, cwd=private_dir(RUN), stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        return f"{command} did not answer buzz-acp's ACP handshake within 30 s"
+    try: answer = json.loads(done.stdout)
+    except ValueError: answer = None
+    if done.returncode != 0 or not isinstance(answer, dict) or "methods" not in answer:
+        last = (done.stderr.strip().splitlines() or ["no answer"])[-1][:200]
+        return f"{command} failed buzz-acp's ACP handshake: {last}"
+    write_private(cache, json.dumps({"stamp": stamp}))
+    return None
+
+
+def harness_problem(harness):
+    """One line saying why this harness cannot run an agent here, or None.
+    Signing in is not a problem here; machine.status reports it apart."""
+    try: problems = version_problems(harness)
+    except (KeyError, TypeError, AttributeError): problems = ["pins.json is not readable; run machine/deploy.sh again"]
+    return "; ".join(problems) or handshake(harness)
+
+
+def supervisor_pid():
+    pid = (read_json(RUN / "supervisor.json", {}) or {}).get("pid")
+    if not pid: return None
+    try: os.kill(pid, 0)
+    except OSError: return None
+    return pid if "agentctl" in process_command(pid) else None
+
+
+def doctor():
+    """Whether this machine can run an agent now, in one reply: machine.status
+    with each harness's `problem` and `ready`, plus the connector, the cron
+    lines, the supervisor, free disk and each activated agent. `healthy` is
+    false when the install itself is wrong (deploy.sh fails on it); a harness
+    that only needs signing in leaves it true."""
+    status = machine_status()
+    problems = [] if read_json(PINS) else ["pins.json is missing; run machine/deploy.sh again."]
+    for row in status["harnesses"]:
+        if row["id"] in PINNED and not row["installed"]: problems.append(f"{row['label']} is not installed.")
+        if row["id"] in PINNED and row.get("problem"): problems.append(f"{row['label']}: {row['problem']}.")
+        row["ready"] = bool(row["installed"] and row["signedIn"] and not row.get("problem"))
+        row["access"] = ACCESS[row["id"]]
+    connector = os.access(BLACK4_MCP, os.X_OK)
+    if not connector: problems.append("The Black 4 connector (mcp/black4) is missing; run machine/deploy.sh again.")
+    active = [d for d in agent_dirs() if read_settings(d).get("auth")]
+    lines = read_crontab()
+    cron = "present" if all(line in lines for line in cron_lines()) else ("missing" if active else "not needed")
+    if cron == "missing": problems.append("The cron lines that bring agents back after a reboot are missing; start any agent to restore them.")
+    free = shutil.disk_usage(ROOT if ROOT.exists() else HOME).free / 1e9
+    if free < DISK_MIN_GB: problems.append(f"Only {free:.1f} GB of disk is free.")
+    agents = [{"pubkey": d.name, "name": read_settings(d).get("name"), "running": bool(running(d)),
+               "keepsStopping": keeps_stopping(d)} for d in active]
+    return {**status, "healthy": not problems, "problems": problems, "connector": connector, "cron": cron,
+            "supervisor": bool(supervisor_pid()), "diskFreeGB": round(free, 1), "agents": agents}
+
+
+def print_doctor():
+    """`agentctl doctor`: the same checks for a person (deploy.sh runs it).
+    Exits 1 when the install is not healthy. No account or key is printed."""
+    r = doctor()
+    for row in r["harnesses"]:
+        if not row["installed"]: continue
+        state = "ready" if row["ready"] else row.get("problem") or (
+            "signed out" if row["signedIn"] is False else "cannot be signed in from Buzz" if not row["signIn"] else "sign-in unknown")
+        print(f"  {row['label']}: {state}; {row['access']}")
+    print(f"  Black 4 connector: {'present' if r['connector'] else 'missing'}; cron: {r['cron']}; "
+          f"supervisor: {'running' if r['supervisor'] else 'not running'}; disk free: {r['diskFreeGB']} GB")
+    for a in r["agents"]:
+        print(f"  agent {a['pubkey'][:8]}: {'running' if a['running'] else 'stopped'}{', keeps stopping' if a['keepsStopping'] else ''}")
+    for p in r["problems"]: print(f"PROBLEM: {p}")
+    print("doctor: healthy" if r["healthy"] else "doctor: NOT healthy")
+    return 0 if r["healthy"] else 1
 
 
 # ---------------------------------------------------------------- start
@@ -593,6 +788,8 @@ def _start(d):
     if harness not in HARNESS: fail(f"unknown harness {harness!r}")
     if not installed(harness):
         fail(f"{LABEL[harness]} is not installed on this machine.")
+    problem = harness_problem(harness)
+    if problem: fail(f"{LABEL[harness]} cannot run on this machine: {problem}.")
     env = base_env()
     if harness == "claude":
         token = claude_token()
@@ -615,6 +812,7 @@ def _start(d):
         "BUZZ_ACP_LAZY_POOL": "true",
     })
     if args: env["BUZZ_ACP_AGENT_ARGS"] = args
+    env.update(FULL_ACCESS[harness])
     # buzz-acp declares one MCP server per session and hands it the agent's key
     # (nsec) and BUZZ_AUTH_TAG. Buzz's own tools are the agent's shell and the
     # buzz CLI, so the slot is free for Black 4. Missing connector: no MCP.
@@ -625,6 +823,7 @@ def _start(d):
         env["BUZZ_ACP_SYSTEM_PROMPT_FILE"] = str(d / "instructions.md")
     if s.get("model"): env["BUZZ_ACP_MODEL"] = s["model"]
     (d / "work").mkdir(exist_ok=True)
+    cap_log(d / "agent.log", AGENT_LOG_CAP)
     log = open(d / "agent.log", "ab")
     proc = subprocess.Popen(
         [str(BIN / "buzz-acp"), "--agent-owner", s["auth"][1]],
@@ -634,8 +833,7 @@ def _start(d):
     (d / "pid").write_text(str(proc.pid))
     time.sleep(START_GRACE)
     if proc.poll() is not None:
-        tail = (d / "agent.log").read_text(errors="replace")[-600:]
-        fail("agent stopped at start: " + tail)
+        fail("agent stopped at start: " + log_tail(d, 600))
     ensure_persistence()
     return proc.pid
 
@@ -721,11 +919,10 @@ def supervise(passes=None):
     write_private(RUN / "supervisor.json", json.dumps({"pid": os.getpid(), "since": int(time.time())}))
     log_line("supervisor", f"supervisor {os.getpid()} up")
     born = SELF.stat().st_mtime if SELF.exists() else 0
-    backoff = {}  # pubkey -> (next try time, current delay)
     n = 0
     while passes is None or n < passes:
         n += 1
-        supervise_pass(backoff)
+        supervise_pass()
         cleanup_logins()
         if not any(read_settings(d).get("auth") for d in agent_dirs()):
             drop_persistence(); break
@@ -734,28 +931,40 @@ def supervise(passes=None):
         if passes is None or n < passes: time.sleep(SUPERVISE_EVERY)
 
 
-def supervise_pass(backoff, now=None):
+def restarts(d):
+    """The supervisor's restarts of this agent in a row (agents/<pubkey>/restarts.json):
+    count, delay, at (last restart), next (earliest next try). It lives on disk,
+    so a crash loop keeps backing off across supervisors and reboots."""
+    return read_json(d / "restarts.json", {}) or {}
+
+
+def keeps_stopping(d):
+    return restarts(d).get("count", 0) >= KEEPS_STOPPING
+
+
+def supervise_pass(now=None):
+    """One look at every agent: restart an activated agent that is not running,
+    waiting 5, 10, 20 ... 300 s between restarts while it keeps stopping. One
+    that has stayed up 5 minutes since its last restart starts over at 5 s."""
     reap()
     now = now or time.time()
     for d in agent_dirs():
+        cap_log(d / "agent.log", AGENT_LOG_CAP)
         s = read_settings(d)
         if not s.get("auth"): continue
+        r = restarts(d)
         if running(d):
-            next_try, delay = backoff.get(d.name, (0, 0))
-            if delay and now - next_try > 300: backoff.pop(d.name, None)  # healthy for 5 min
+            if r and now - r.get("at", now) > HEALTHY_AFTER: (d / "restarts.json").unlink(missing_ok=True)
             continue
-        next_try, delay = backoff.get(d.name, (0, 0))
-        if now < next_try: continue
-        harness = s.get("harness") or "claude"
-        if known_bad(harness): continue  # waits for a sign-in
+        if now < r.get("next", 0): continue
+        if known_bad(s.get("harness") or "claude"): continue  # waits for a sign-in
+        delay = min(max(r.get("delay", 0) * 2, 5), RESTART_MAX_DELAY)
         try:
-            pid = start(d)
-            log_line("supervisor", f"started {d.name[:8]} pid {pid}")
-            delay = min(max(delay * 2, 5), 300)
+            log_line("supervisor", f"started {d.name[:8]} pid {start(d)}")
         except Exception as e:  # Fail, or anything unexpected: back off all the same
-            delay = min(max(delay * 2, 10), 300)
             log_line("supervisor", f"start {d.name[:8]} failed: {str(e)[:200]}")
-        backoff[d.name] = (now + delay, delay)
+        if d.exists():
+            write_private(d / "restarts.json", json.dumps({"count": r.get("count", 0) + 1, "delay": delay, "at": now, "next": now + delay}))
 
 
 # ---------------------------------------------------------------- sign-in
@@ -1165,10 +1374,12 @@ CHANGES = {"remove", "activate", "profile", "instructions.set", "start"}
 
 
 def may_change(settings):
-    """A caller changes only agents it created; the admin (no label) any."""
+    """A caller changes only agents it created. The admin (the machine owner's
+    own key, which has no label) changes any, and only the admin changes the
+    agents it made, or ones made before creators were recorded."""
     creator = settings.get("createdBy")
-    if CALLER and creator and creator != CALLER:
-        fail(f"This agent belongs to {creator}. Only they or a Black 4 admin can change it.")
+    if CALLER and creator != CALLER:
+        fail(f"This agent belongs to {creator or 'the machine owner'}. Only they or a Black 4 admin can change it.")
 
 def handle(req):
     if not isinstance(req, dict): fail("request must be a JSON object")
@@ -1176,7 +1387,14 @@ def handle(req):
     private_dir(AGENTS)
 
     if op == "machine.status": return machine_status()
-    if op == "login.start": return login_start(req.get("harness"), req.get("flows"))
+    if op == "doctor": return doctor()
+    if op == "login.start":
+        harness = req.get("harness")
+        # Every agent on a harness uses the machine's one sign-in: a teammate
+        # may sign it in when it is signed out, never switch a working one.
+        if CALLER and harness in SIGN_IN and credential(harness) and not known_bad(harness):
+            fail(f"{LABEL[harness]} is already signed in on this machine. Only a Black 4 admin can switch it to another account.")
+        return login_start(harness, req.get("flows"))
     if op == "login.finish": return login_finish(req.get("loginId"), req.get("code"))
     if op == "login.cancel":
         d = login_dir(req.get("loginId"))
@@ -1228,11 +1446,13 @@ def handle(req):
             s = read_settings(d)
             rows.append({"pubkey": d.name, "name": s.get("name"), "harness": s.get("harness"),
                          "respondTo": s.get("respondTo"), "activated": bool(s.get("auth")), "running": bool(running(d)),
-                         "createdBy": s.get("createdBy")})
+                         "keepsStopping": keeps_stopping(d), "createdBy": s.get("createdBy")})
         return {"ok": True, "agents": rows}
 
     d = folder(req.get("pubkey"))
     if op in CHANGES and d.exists(): may_change(read_settings(d))
+    # Asked for in person: the supervisor's backoff starts over.
+    if op in ("start", "activate", "instructions.set") and d.exists(): (d / "restarts.json").unlink(missing_ok=True)
     if op == "remove":
         if d.exists():
             with agent_lock(d): stop(d)
@@ -1276,9 +1496,12 @@ def handle(req):
         return {"ok": True, "pid": start(d)}
 
     if op == "status":
-        log = (d / "agent.log").read_text(errors="replace")[-1500:] if (d / "agent.log").exists() else ""
+        r = restarts(d)
         return {"ok": True, "running": bool(running(d)), "activated": bool(s.get("auth")),
-                "name": s.get("name"), "harness": s.get("harness"), "respondTo": s.get("respondTo"), "log": log}
+                "name": s.get("name"), "harness": s.get("harness"), "respondTo": s.get("respondTo"),
+                "keepsStopping": keeps_stopping(d), "restarts": r.get("count", 0),
+                **({"nextRestart": int(r["next"])} if r.get("next") and not running(d) else {}),
+                "log": log_tail(d, 1500)}
 
     fail("unknown op")
 
@@ -1294,6 +1517,7 @@ def main(argv=None):
             return
         CALLER, argv = argv[1], []
     if argv[:1] == ["supervise"]: return supervise()
+    if argv[:1] == ["doctor"]: sys.exit(print_doctor())
     if argv[:1] == ["login-helper"] and len(argv) == 2: return login_helper(argv[1])
     if argv[:1] == ["check"] and len(argv) == 2 and argv[1] in SIGN_IN: return run_check(argv[1])
     try:

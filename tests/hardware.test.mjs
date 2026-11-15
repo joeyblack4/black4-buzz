@@ -221,6 +221,18 @@ test("Codex and Grok sign in from Buzz; an installed harness Buzz cannot sign in
   assert.equal(harnessOptions({ kind: "ok", harnesses: [{ id: "grok", installed: false, signIn: "device" }] }).length, 0, "not installed: not offered");
 });
 
+test("a harness the machine's self-test says it cannot run is unavailable, even when signed in", () => {
+  const rows = deviceRows({ codex: true });
+  rows[1].problem = "its ACP SDK is 2.0.1, pinned 1.9.0";
+  const ok = { kind: "ok", harnesses: rows };
+  const codex = harnessOptions(ok).find((entry) => entry.id === "codex");
+  assert.equal(codex.label, "Codex (unavailable)");
+  assert.equal(codex.unavailable, "This machine cannot run it right now: its ACP SDK is 2.0.1, pinned 1.9.0.");
+  assert.deepEqual(signInState(ok, "codex"), { kind: "unavailable", reason: codex.unavailable });
+  assert.equal(readyToCreate(signInState(ok, "codex")), false);
+  assert.ok(!harnessOptions(ok).find((entry) => entry.id === "claude").unavailable, "the others are unaffected");
+});
+
 test("sign-in: a device sign-in shows the link and code, then waits by itself until approved", async () => {
   let finishes = 0;
   const box = machine((request) => {

@@ -214,6 +214,10 @@ that stops, waiting 5, 10, 20 … up to 300 seconds while it keeps stopping, and
 `status` then says `keepsStopping` with the end of its log. Each agent's
 `agent.log` is cut over to `agent.log.1` past 5 MB.
 
+Agents run with full access on their own machine: no harness asks permission
+or runs sandboxed (`FULL_ACCESS` in `agentctl`; `doctor` shows each one's mode).
+Changes to a customer's systems are gated by Reviews in Platform Control.
+
 ### Buzz updates and releases
 
 The [Buzz canary](canary/README.md) checks every day that the latest Buzz still

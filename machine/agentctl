@@ -280,6 +280,25 @@ HARNESS = {  # the model CLI each choice runs, as buzz-acp's agent command
 }
 LABEL = {"claude": "Claude Code", "codex": "Codex", "grok": "Grok Build", "goose": "Goose"}
 
+# Every agent is a full-access agent. It lives on its own computer, so no
+# harness asks permission or runs sandboxed; the one gate on customer changes
+# is the Reviews flow in Platform Control. buzz-acp approves any permission
+# prompt an adapter still sends; these settings make each harness say so itself.
+FULL_ACCESS = {
+    # claude-agent-acp's session mode, which buzz-acp sets (its default too).
+    "claude": {"BUZZ_ACP_PERMISSION_MODE": "bypassPermissions"},
+    # codex-acp's own preset: no sandbox, network allowed, approval "never".
+    # It picks the sandbox for every turn from this mode, not from config.toml.
+    "codex": {"INITIAL_AGENT_MODE": "agent-full-access"},
+    # With --always-approve in its arguments above. Off is grok's default.
+    "grok": {"GROK_SANDBOX": "off"},
+    "goose": {"GOOSE_MODE": "auto"},
+}
+ACCESS = {"claude": "full access (permission mode bypassPermissions)",
+          "codex": "full access (agent-full-access: no sandbox, network on, never asks)",
+          "grok": "full access (--always-approve, sandbox off)",
+          "goose": "full access (GOOSE_MODE=auto)"}
+
 
 def agent_path():
     return f"{BIN}:{HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
@@ -658,7 +677,12 @@ def version_problems(harness):
         want(package, npm_version(package), pin["version"])
         sdk = npm_version(package, "node_modules", "@agentclientprotocol", "sdk") or npm_version("@agentclientprotocol", "sdk")
         want("its ACP SDK", sdk, pin["sdk"])
-    if harness == "codex": want("@openai/codex", npm_version("@openai/codex"), pins["clis"]["@openai/codex"]["version"])
+    if harness == "codex":
+        want("@openai/codex", npm_version("@openai/codex"), pins["clis"]["@openai/codex"]["version"])
+        # codex-acp falls back to its sandboxed mode, silently, on a mode it does not know.
+        adapter = VENDOR / "acp" / "node_modules" / ADAPTER_PACKAGE["codex"] / "dist" / "index.js"
+        if adapter.exists() and f'"{FULL_ACCESS["codex"]["INITIAL_AGENT_MODE"]}"' not in adapter.read_text(errors="replace"):
+            out.append(f"{ADAPTER_PACKAGE['codex']} has no {FULL_ACCESS['codex']['INITIAL_AGENT_MODE']} mode")
     if harness == "grok": want("grok", vendored_version(BIN / "grok", "grok"), pins["clis"]["grok"]["version"])
     return out
 
@@ -717,6 +741,7 @@ def doctor():
         if row["id"] in PINNED and not row["installed"]: problems.append(f"{row['label']} is not installed.")
         if row["id"] in PINNED and row.get("problem"): problems.append(f"{row['label']}: {row['problem']}.")
         row["ready"] = bool(row["installed"] and row["signedIn"] and not row.get("problem"))
+        row["access"] = ACCESS[row["id"]]
     connector = os.access(BLACK4_MCP, os.X_OK)
     if not connector: problems.append("The Black 4 connector (mcp/black4) is missing; run machine/deploy.sh again.")
     active = [d for d in agent_dirs() if read_settings(d).get("auth")]
@@ -739,7 +764,7 @@ def print_doctor():
         if not row["installed"]: continue
         state = "ready" if row["ready"] else row.get("problem") or (
             "signed out" if row["signedIn"] is False else "cannot be signed in from Buzz" if not row["signIn"] else "sign-in unknown")
-        print(f"  {row['label']}: {state}")
+        print(f"  {row['label']}: {state}; {row['access']}")
     print(f"  Black 4 connector: {'present' if r['connector'] else 'missing'}; cron: {r['cron']}; "
           f"supervisor: {'running' if r['supervisor'] else 'not running'}; disk free: {r['diskFreeGB']} GB")
     for a in r["agents"]:
@@ -787,6 +812,7 @@ def _start(d):
         "BUZZ_ACP_LAZY_POOL": "true",
     })
     if args: env["BUZZ_ACP_AGENT_ARGS"] = args
+    env.update(FULL_ACCESS[harness])
     # buzz-acp declares one MCP server per session and hands it the agent's key
     # (nsec) and BUZZ_AUTH_TAG. Buzz's own tools are the agent's shell and the
     # buzz CLI, so the slot is free for Black 4. Missing connector: no MCP.

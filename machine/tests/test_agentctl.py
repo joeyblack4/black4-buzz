@@ -9,7 +9,7 @@ pty: banner, link, "Paste code" prompt, then a token or an OAuth error. The fake
 ones printed on the machine (a link and a one-time code), then wait for the
 test to approve or refuse (the file approve.txt in the test home).
 """
-import re, importlib.machinery, importlib.util, json, os, signal, stat, subprocess, sys, tempfile, textwrap, time, unittest
+import contextlib, io, re, importlib.machinery, importlib.util, json, os, signal, stat, subprocess, sys, tempfile, textwrap, time, unittest
 from pathlib import Path
 
 AGENTCTL = Path(__file__).resolve().parent.parent / "agentctl"
@@ -67,7 +67,7 @@ if sys.argv[1:2] == ["auth-methods"]:  # buzz-acp's own ACP initialize with an a
 if os.path.exists(os.path.join(home, "crash.txt")):
     print("buzz-acp: relay refused the connection", flush=True); sys.exit(1)
 with open("env.json", "w") as f:
-    json.dump({{k: v for k, v in os.environ.items() if k.startswith(("BUZZ_ACP", "CLAUDE_CODE", "PATH", "CODEX", "GROK", "NO_BROWSER", "OPENAI", "XAI"))}}, f)
+    json.dump({{k: v for k, v in os.environ.items() if k.startswith(("BUZZ_ACP", "CLAUDE_CODE", "PATH", "CODEX", "GROK", "NO_BROWSER", "OPENAI", "XAI", "INITIAL_AGENT_MODE", "GOOSE"))}}, f)
 while True: time.sleep(1)
 """
 
@@ -344,6 +344,12 @@ class Start(Base):
         self.assertEqual(env["BUZZ_ACP_AGENT_COMMAND"], "claude-agent-acp")
         self.assertTrue(env["PATH"].startswith(str(self.a.BIN)))
         self.assertNotIn(FAKE_TOKEN, (d / "agent.log").read_text())
+
+    def test_claude_runs_with_full_access(self):
+        self.sign_in()
+        d = self.make_agent()
+        self.assertTrue(self.req(op="start", pubkey=d.name)["ok"])
+        self.assertEqual(self.wait_env(d)["BUZZ_ACP_PERMISSION_MODE"], "bypassPermissions")
 
     def test_every_agent_gets_the_black4_mcp_when_installed(self):
         self.sign_in()
@@ -866,6 +872,22 @@ class DeviceStatusAndStart(DeviceBase):
         self.assertEqual(env["NO_BROWSER"], "1")
         self.assertIn('cli_auth_credentials_store = "file"', (self.a.HOMES / "codex" / "config.toml").read_text())
 
+    def test_codex_runs_with_full_access(self):
+        self.sign_in_device("codex")
+        agent = self.make_agent("codex")
+        self.assertTrue(self.req(op="start", pubkey=agent.name)["ok"])
+        env = json.loads((agent / "work" / "env.json").read_text())
+        self.assertEqual(env["INITIAL_AGENT_MODE"], "agent-full-access")
+        self.assertNotIn("sandbox", (self.a.HOMES / "codex" / "config.toml").read_text(), "the mode decides, not config.toml")
+
+    def test_grok_runs_with_full_access(self):
+        self.sign_in_device("grok")
+        agent = self.make_agent("grok")
+        self.assertTrue(self.req(op="start", pubkey=agent.name)["ok"])
+        env = json.loads((agent / "work" / "env.json").read_text())
+        self.assertIn("--always-approve", env["BUZZ_ACP_AGENT_ARGS"].split(","))
+        self.assertEqual(env["GROK_SANDBOX"], "off")
+
     def test_supervisor_waits_for_a_sign_in(self):
         agent = self.make_agent("codex")
         self.a.supervise_pass()
@@ -891,6 +913,8 @@ def install_pinned(a, home):
         (d / "package.json").write_text(json.dumps({"version": version}))
     for name, pin in pins["adapters"].items():
         package(name, pin["version"])
+    (a.VENDOR / "acp/node_modules/@agentclientprotocol/codex-acp/dist").mkdir()
+    (a.VENDOR / "acp/node_modules/@agentclientprotocol/codex-acp/dist/index.js").write_text('static AgentFullAccess = new _AgentMode(\n    "agent-full-access",\n')
     package("@agentclientprotocol/sdk", pins["adapters"]["@agentclientprotocol/claude-agent-acp"]["sdk"])
     package("@agentclientprotocol/codex-acp/node_modules/@agentclientprotocol/sdk", pins["adapters"]["@agentclientprotocol/codex-acp"]["sdk"])
     package("@openai/codex", pins["clis"]["@openai/codex"]["version"])
@@ -937,6 +961,18 @@ class Health(DeviceBase):
         agent = self.make_agent("codex")
         self.assertEqual(self.req(op="start", pubkey=agent.name)["error"],
                          "Codex cannot run on this machine: its ACP SDK is 2.0.1, pinned 1.9.0.")
+
+    def test_doctor_reports_each_harness_runs_with_full_access(self):
+        rows = self.rows("doctor")
+        for harness in ("claude", "codex", "grok", "goose"):
+            self.assertTrue(rows[harness]["access"].startswith("full access"), rows[harness])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out): self.a.print_doctor()
+        self.assertIn("Codex: signed out; full access (agent-full-access", out.getvalue())
+
+    def test_a_codex_adapter_without_the_full_access_mode_is_a_problem(self):
+        (self.a.VENDOR / "acp/node_modules/@agentclientprotocol/codex-acp/dist/index.js").write_text('static Agent = new _AgentMode("agent",')
+        self.assertEqual(self.rows()["codex"]["problem"], "@agentclientprotocol/codex-acp has no agent-full-access mode")
 
     def test_a_failed_handshake_is_a_problem_and_a_good_one_is_remembered(self):
         (self.home / "handshake-fail.txt").write_text("x")

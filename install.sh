@@ -67,10 +67,10 @@ hardware() {
       END { exit !found }' "$config"; then
     echo "Your $config already has its own 'Host $ALIAS'; leaving it as it is."
   else
+    # At the top: ssh keeps the first value it finds for each setting, so a
+    # later `Host *` (say, with another User) cannot change this entry.
     tmp=$(mktemp "$SSH_DIR/.config.XXXXXX")
-    awk -v b="$BEGIN" -v e="$END" '$0 == b { skip = 1 } !skip { print } $0 == e { skip = 0 }' "$config" > "$tmp"
     {
-      [ -s "$tmp" ] && [ "$(tail -c 1 "$tmp")" != "" ] && echo
       echo "$BEGIN"
       echo "Host $ALIAS"
       echo "  HostName $address"
@@ -79,7 +79,9 @@ hardware() {
       echo "  IdentitiesOnly yes"
       echo "  StrictHostKeyChecking accept-new"
       echo "$END"
-    } >> "$tmp"
+      echo
+      awk -v b="$BEGIN" -v e="$END" '$0 == b { skip = 1; next } skip && $0 == e { skip = 0; drop = 1; next } !skip && !(drop && $0 == "") { print; drop = 0 }' "$config"
+    } > "$tmp"
     chmod 600 "$tmp"
     mv "$tmp" "$config"
     echo "SSH alias '$ALIAS' points at $user@$address (in $config)."

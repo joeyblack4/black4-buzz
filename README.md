@@ -29,7 +29,8 @@ machine and keep working while your computer is off.
 - Node 22.12 or newer (`node -v`; get it from [nodejs.org](https://nodejs.org)).
 - For hardware: the company network (Tailscale on), and a Black 4 admin
   (Joey) who will give you the machine's `<user>@<address>` and add your key.
-- A Mac. Windows: see [On Windows](#on-windows) first.
+- A Mac. Mac is the supported path for now; Windows is best effort, see
+  [Windows (untested)](#windows-untested).
 
 Open Terminal for the commands below.
 
@@ -103,45 +104,44 @@ sign-in.
 - **"Could not reach the Commerce Mac"** in the Create agent dialog. Turn
   Tailscale on and run `--check-hardware`. *The machine refused this key*
   means the admin has not added your line yet.
+- **`install.sh` says your shell does not have `~/.local/bin` on its PATH.**
+  Buzz starts the sign-in bridge by name, so add the line it prints to
+  `~/.zprofile`, then quit and reopen Buzz (Cmd-Q, not just the window).
 - **A change in this repository doesn't show up.** A plugin installed from a
   folder is a copy taken at install time: install it again, then ask a Buzz
   agent to run `plugin_reload`. Plugins installed with the links above update
   themselves (**Update and reload** in Settings).
 
-### On Windows
+### Windows (untested)
 
-Untested. What is known from Buzz's source: Buzz for Windows starts a
-plugin's program by name, and Windows 10 and 11 ship the OpenSSH client
-(`ssh.exe`), so the hardware plugin's `ssh` should start. The Black 4 plugin's
-sign-in bridge is a shell script and does **not** start on Windows today, and
-`install.sh` needs a POSIX shell. Until that is built:
+Mac is the supported path for now. Nobody has tried this on Windows; these
+are the steps we believe are needed.
 
-1. Step 2 another way: in Claude (or any app with the Black 4 MCP), ask it to
-   call `link_agent_owner_key` with your Buzz public key as 64 hex characters
-   (Buzz shows it in Settings; Claude can convert an `npub`).
-2. Step 3 by hand, in PowerShell:
+- **What is most likely to break:** the Black 4 plugin. Its sign-in bridge is
+  a shell script, which Buzz for Windows cannot start, so step 1 will show
+  *Not connected* and step 2's button never appears. `install.sh` needs a
+  POSIX shell too.
+- **Step 2 instead:** ask Claude (or any app with the Black 4 MCP) to call
+  `link_agent_owner_key` with your Buzz public key as 64 hex characters.
+- **Step 3 by hand:** Windows ships OpenSSH. Make the key with
+  `ssh-keygen -t ed25519 -C black4-hardware -f %USERPROFILE%\.ssh\black4_hardware`
+  (press Enter twice for no passphrase). Send `black4_hardware.pub` to your
+  admin. Put the `Host commerce` block that `install.sh --hardware` would
+  write at the top of `%USERPROFILE%\.ssh\config`:
 
-   ```powershell
-   ssh-keygen -t ed25519 -C black4-hardware -f "$env:USERPROFILE\.ssh\black4_hardware" -N '""'
-   Get-Content "$env:USERPROFILE\.ssh\black4_hardware.pub"   # send this line to your admin
-   notepad "$env:USERPROFILE\.ssh\config"
-   ```
+  ```
+  Host commerce
+    HostName <address>
+    User <user>
+    IdentityFile ~/.ssh/black4_hardware
+    IdentitiesOnly yes
+    StrictHostKeyChecking accept-new
+  ```
 
-   Add to the end of that file, with the values your admin gave you:
-
-   ```
-   Host commerce
-     HostName <address>
-     User <user>
-     IdentityFile ~/.ssh/black4_hardware
-     IdentitiesOnly yes
-     StrictHostKeyChecking accept-new
-   ```
-
-   Install the hardware plugin from
-   `buzz://plugin-install?repository=joeyblack4%2Fblack4-buzz&ref=stable&path=plugins%2Fhardware`
-   and check with
-   `'{"op":"machine.status"}' | ssh -o BatchMode=yes commerce workforce/bin/agentctl`.
+  Then install the hardware plugin with
+  `buzz://plugin-install?repository=joeyblack4%2Fblack4-buzz&ref=stable&path=plugins%2Fhardware`.
+  Buzz starts plugin programs by name, so `ssh` should resolve to Windows'
+  own `ssh.exe`; whether it does is the next thing to find out.
 
 ## Admin
 

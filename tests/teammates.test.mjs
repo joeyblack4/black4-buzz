@@ -81,7 +81,8 @@ test("install.sh --hardware makes a dedicated key, the alias, and prints the one
   assert.ok(first.stdout.includes(pub));
   assert.match(first.stdout, /path=plugins%2Fhardware/);
   const config = readFileSync(join(ssh, "config"), "utf8");
-  assert.ok(config.startsWith("Host other\n  HostName other.example.test\n"), "existing config is kept");
+  assert.ok(config.startsWith("# >>> black4-hardware"), "first, so a later Host * cannot override it");
+  assert.ok(config.endsWith("\n\nHost other\n  HostName other.example.test\n"), "existing config is kept as it was");
   assert.match(config, /Host commerce\n  HostName 192\.0\.2\.10\n  User machineuser\n  IdentityFile \S+black4_hardware\n  IdentitiesOnly yes\n  StrictHostKeyChecking accept-new\n/);
 
   // Again, with a new address: the same key, one block, updated.
@@ -90,10 +91,30 @@ test("install.sh --hardware makes a dedicated key, the alias, and prints the one
   assert.equal(readFileSync(join(ssh, "black4_hardware.pub"), "utf8").trim(), pub);
   assert.equal(again.match(/Host commerce/g).length, 1);
   assert.match(again, /HostName 192\.0\.2\.11/);
+  assert.equal(again.replace(/192\.0\.2\.11/, "192.0.2.10"), config, "running again replaces the block and nothing else");
   // ssh itself reads it the way the plugin will use it.
   const resolved = execFileSync("ssh", ["-G", "-F", join(ssh, "config"), "commerce"], { encoding: "utf8" });
   assert.match(resolved, /^hostname 192\.0\.2\.11$/m);
   assert.match(resolved, /^user machineuser$/m);
+});
+
+test("a Host * elsewhere in the config does not change the machine's user", { skip: !sshKeygen }, () => {
+  const ssh = join(temp(), ".ssh");
+  execFileSync("mkdir", ["-p", ssh]);
+  writeFileSync(join(ssh, "config"), "Host *\n  User someoneelse\n");
+  assert.equal(install(ssh, "--hardware", "machineuser@192.0.2.10").status, 0);
+  const resolved = execFileSync("ssh", ["-G", "-F", join(ssh, "config"), "commerce"], { encoding: "utf8" });
+  assert.match(resolved, /^user machineuser$/m);
+});
+
+test("piped from the web, with no checkout, --hardware works the same", { skip: !sshKeygen }, () => {
+  const ssh = join(temp(), ".ssh");
+  const result = spawnSync("sh", ["-s", "--", "--hardware", "machineuser@192.0.2.10"], {
+    input: readFileSync(join(root, "install.sh")), cwd: temp(),
+    env: { ...process.env, BLACK4_SSH_DIR: ssh, BLACK4_NO_OPEN: "1" }, encoding: "utf8",
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(result.stdout.includes(readFileSync(join(ssh, "black4_hardware.pub"), "utf8").trim()));
 });
 
 test("install.sh --hardware leaves someone's own Host commerce alone", { skip: !sshKeygen }, () => {

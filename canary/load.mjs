@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Black 4 Buzz canary, part 2: start the four plugins in a real Buzz checkout.
+// Black 4 Buzz canary, part 2: start the three plugins in a real Buzz checkout.
 //
 //   node canary/load.mjs <block/buzz-app checkout with its dependencies installed>
 //

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 // Black 4 canary, part 2: actually start Black 4's plugins in a Buzz checkout.
-// canary/load.mjs copies this file and the four plugin.js files into
+// canary/load.mjs copies this file and the three plugin.js files into
 // <buzz-app>/src/__black4_canary__/ and runs it with Buzz's own vitest, so
 // everything below is Buzz's real code: createServices() is the composition
 // the app itself runs, and each plugin starts the way src/plugins/runtime.ts
@@ -9,6 +9,11 @@
 // with the props Buzz gives it, so a prop or service change that throws at
 // render shows up too. Nothing here reaches a network or a machine: off the
 // desktop, host.spawn rejects and the plugins handle that as "unreachable".
+// The Black 4 plugin offers its hosted "Black 4 hardware" type only to a staff
+// sign-in, which never happens here, so two more tests start that part on its
+// own through the plugin's exported hardwareSlot: once to register, render and
+// withdraw it, and once with Buzz's agents.register made to throw, to prove the
+// rest of the plugin starts anyway and the failure is reported.
 import { afterAll, expect, test, vi } from "vitest";
 import { createElement, type ComponentType } from "react";
 import { renderToString } from "react-dom/server";
@@ -22,10 +27,13 @@ import plugins from "./plugins.json";
 type Registered = { plugin: string; kind: string; value: Record<string, unknown> };
 const registered: Registered[] = [];
 let current = "";
+let refuseHardware = false; // makes agents.register throw for the hardware type
 const record = (kind: string, target: { prototype: Record<string, unknown> }, method = "register") => {
   const original = target.prototype[method] as (...args: unknown[]) => unknown;
   vi.spyOn(target.prototype as never, method as never).mockImplementation(function (this: unknown, ...args: unknown[]) {
-    if (current) registered.push({ plugin: current, kind, value: args[0] as Record<string, unknown> });
+    const value = args[0] as Record<string, unknown>;
+    if (refuseHardware && kind === "agent type" && value?.id === "hardware") throw new Error("canary refused the hardware type");
+    if (current) registered.push({ plugin: current, kind, value });
     return original.apply(this, args);
   } as never);
 };
@@ -64,6 +72,67 @@ for (const plugin of plugins as { id: string; title: string; file: string }[]) {
     }
     expect(fiber.state, `${plugin.title} did not become active in 10 s (a service it injects is missing?)`).toBe(ACTIVE);
     expect(registered.some((entry) => entry.plugin === plugin.id), `${plugin.title} registered nothing`).toBe(true);
+  });
+}
+
+const owner = (id: string) => Object.freeze({ id, revision: "canary", agentHooks: [], agentExecution: [] });
+const until = async (done: () => boolean, ms = 10_000) => {
+  const deadline = Date.now() + ms;
+  while (!done() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+};
+const hardwarePlugins: { id: string; title: string; module: any }[] = [];
+for (const plugin of plugins as { id: string; title: string; file: string }[]) {
+  const module = await import(/* @vite-ignore */ `./${plugin.file}`);
+  if (typeof module.hardwareSlot === "function") hardwarePlugins.push({ id: plugin.id, title: plugin.title, module });
+}
+
+for (const { id, title, module } of hardwarePlugins) {
+  test(`${title}: Black 4 hardware registers in its own scope, and withdraws so it can be offered again`, async () => {
+    const errors: unknown[] = [];
+    const access = { use: () => ({ status: "unlinked" }), link: () => {} };
+    let slot: { offer(): void; withdraw(): void; offered: boolean } | undefined;
+    current = id;
+    const fiber = root.extend({ pluginOwner: owner(`${id}.hardware-canary`) }).plugin({
+      name: `${id}.hardware-canary`, inject: ["react", "host", "agents"],
+      apply: (ctx: unknown) => { slot = module.hardwareSlot(ctx, { report: (error: unknown) => errors.push(error), access }); slot!.offer(); },
+    });
+    fibers.push(fiber);
+    const count = () => registered.filter((entry) => entry.plugin === id && entry.value.id === "hardware").length;
+    await until(() => count() === 1 || errors.length > 0);
+    expect(errors.map(String), "registering the hardware type").toEqual([]);
+    expect(count(), "the hardware type was registered").toBe(1);
+    slot!.withdraw();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // Buzz refuses a second registration of the same key, so this only works
+    // when withdrawing really removed the first.
+    slot!.offer();
+    await until(() => count() === 2 || errors.length > 0);
+    current = "";
+    expect(errors.map(String), "offering the hardware type again after withdrawing it").toEqual([]);
+    expect(count()).toBe(2);
+    expect(slot!.offered).toBe(true);
+  });
+
+  test(`${title}: when Buzz refuses the hardware type, the rest of the plugin starts and the failure is reported`, async () => {
+    const errors: unknown[] = [];
+    const name = `${id}.isolation-canary`;
+    refuseHardware = true;
+    current = name;
+    const fiber = root.extend({ pluginOwner: owner(name) }).plugin({
+      name, inject: module.inject ?? [],
+      apply: (ctx: unknown) => {
+        module.apply(ctx);
+        module.hardwareSlot(ctx, { report: (error: unknown) => errors.push(error), access: { use: () => ({ status: "idle" }), link: () => {} } }).offer();
+      },
+    });
+    fibers.push(fiber);
+    await until(() => (fiber.state === ACTIVE && errors.length > 0) || fiber.state === FAILED);
+    refuseHardware = false;
+    current = "";
+    expect(fiber.state, "the plugin stays active").toBe(ACTIVE);
+    expect(errors.map((error) => String((error as Error)?.message ?? error))).toEqual(["canary refused the hardware type"]);
+    const kinds = registered.filter((entry) => entry.plugin === name).map((entry) => entry.kind);
+    for (const kind of ["settings card", "page", "panel"]) expect(kinds, `it still registered its ${kind}`).toContain(kind);
   });
 }
 

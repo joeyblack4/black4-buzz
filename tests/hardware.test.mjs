@@ -1,10 +1,10 @@
-// The hardware provider against a process double: no SSH, no machine.
+// Black 4 hardware (the hosted agent type in plugins/black4) against a process double: no SSH, no machine.
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  ask, provider, defaults, MACHINES, machineOf, statusReader, harnessOptions, signInState, ready,
+  askMachine, hardwareProvider, hardwareDefaults, MACHINES, machineOf, statusReader, harnessOptions, signInState, readyToCreate,
   createLogin, agentDirectory, summaryOf,
-} from "../plugins/hardware/plugin.js";
+} from "../plugins/black4/plugin.js";
 
 /** A spawn double: records each request and answers with `reply(request)`.
  * `undefined` means the machine cannot be reached; a promise is a slow
@@ -46,23 +46,23 @@ const harnesses = (claude = {}) => [
 
 test("ask returns the machine's reply and names the machine's own error", async () => {
   const ok = machine(() => ({ ok: true, agents: [] }));
-  assert.deepEqual(await ask(ok.spawn, "commerce", { op: "list" }), { ok: true, agents: [] });
+  assert.deepEqual(await askMachine(ok.spawn, "commerce", { op: "list" }), { ok: true, agents: [] });
   assert.equal(ok.seen[0].id, "commerce");
   const refused = machine(() => ({ ok: false, error: "no such agent on this machine" }));
-  await assert.rejects(ask(refused.spawn, "commerce", { op: "status", pubkey: PUBKEY }), /no such agent/);
+  await assert.rejects(askMachine(refused.spawn, "commerce", { op: "status", pubkey: PUBKEY }), /no such agent/);
 });
 
 test("ask takes the last line, so an SSH banner before the reply is ignored", async () => {
   const chatty = machine(() => ({ ok: true, running: true }), { banner: "Welcome to the machine\n{not json\n" });
-  assert.deepEqual(await ask(chatty.spawn, "commerce", { op: "status" }), { ok: true, running: true });
+  assert.deepEqual(await askMachine(chatty.spawn, "commerce", { op: "status" }), { ok: true, running: true });
 });
 
 test("ask says so when the machine cannot be reached or is too slow", async () => {
   const down = machine(() => undefined);
-  await assert.rejects(ask(down.spawn, "commerce", { op: "list" }), /Could not reach the Commerce Mac: ssh: connect/);
-  await assert.rejects(ask(undefined, "commerce", { op: "list" }), /cannot start processes/);
+  await assert.rejects(askMachine(down.spawn, "commerce", { op: "list" }), /Could not reach the Commerce Mac: ssh: connect/);
+  await assert.rejects(askMachine(undefined, "commerce", { op: "list" }), /cannot start processes/);
   const slow = machine(() => new Promise(() => {}));
-  await assert.rejects(ask(slow.spawn, "commerce", { op: "machine.status" }, { timeoutMs: 20 }), /did not answer in time/);
+  await assert.rejects(askMachine(slow.spawn, "commerce", { op: "machine.status" }, { timeoutMs: 20 }), /did not answer in time/);
 });
 
 test("machines: a config or id names one, and anything else is the default", () => {
@@ -71,20 +71,20 @@ test("machines: a config or id names one, and anything else is the default", () 
   assert.equal(machineOf({ harness: "claude" }).id, "commerce", "a config from before machines");
   assert.equal(machineOf(undefined).id, "commerce");
   assert.equal(machineOf("gone").id, "commerce");
-  assert.equal(defaults().machine, "commerce");
+  assert.equal(hardwareDefaults().machine, "commerce");
   for (const entry of MACHINES) assert.ok(entry.id && entry.label && entry.process);
 });
 
 test("a retried creation asks for the same agent, and activation carries the attestation", async () => {
   const box = machine((request) => (request.op === "provision" ? { ok: true, pubkey: PUBKEY } : { ok: true }));
   let ids = 0;
-  const remote = provider(box.spawn, () => `request-${++ids}`);
+  const remote = hardwareProvider(box.spawn, () => `request-${++ids}`);
   const input = { name: "Paid Media", community: "wss://example.communities.buzz.xyz", config: { harness: "codex" } };
   assert.deepEqual(await remote.provision(input), { pubkey: PUBKEY });
   await remote.provision(input);
   assert.equal(box.seen[0].request.requestId, "request-1");
   assert.equal(box.seen[1].request.requestId, "request-1");
-  assert.deepEqual(box.seen[0].request.config, { ...defaults(), harness: "codex", machine: "commerce" });
+  assert.deepEqual(box.seen[0].request.config, { ...hardwareDefaults(), harness: "codex", machine: "commerce" });
 
   await remote.activate({ pubkey: PUBKEY, name: "Paid Media", community: input.community, auth: AUTH });
   assert.deepEqual(box.seen[2].request, { op: "activate", pubkey: PUBKEY, community: input.community, auth: AUTH });
@@ -94,7 +94,7 @@ test("a retried creation asks for the same agent, and activation carries the att
 
 test("every step goes to the agent's machine, and a legacy agent goes to commerce", async () => {
   const box = machine((request) => (request.op === "instructions.get" ? { ok: true, instructions: "Be brief." } : { ok: true }));
-  const remote = provider(box.spawn);
+  const remote = hardwareProvider(box.spawn);
   // Never seen by this copy (made before machines were a choice): the default.
   await remote.profile({ pubkey: PUBKEY, community: "wss://x", name: "Rock" });
   assert.equal(await remote.instructions.get({ pubkey: PUBKEY, community: "wss://x" }), "Be brief.");
@@ -119,7 +119,7 @@ test("with a second machine, creation follows the config and later steps find th
       ? { ok: true, agents: [{ pubkey: OTHER, harness: "goose", respondTo: "anyone" }] } : { ok: true }));
     const spawn = (id, options) => (id === "lab" ? listing.spawn(id, options) : box.spawn(id, options));
     const directory = agentDirectory(spawn);
-    const remote = provider(spawn, () => "r", directory);
+    const remote = hardwareProvider(spawn, () => "r", directory);
     await remote.provision({ name: "A", community: "wss://x", config: { machine: "commerce" } });
     await remote.remove({ pubkey: PUBKEY, community: "wss://x" });
     assert.deepEqual(box.ops(), ["provision", "remove"], "known agent: no search");
@@ -186,7 +186,7 @@ test("readiness for each sign-in state", () => {
   for (const [status, harness, kind, isReady] of cases) {
     const state = signInState(status, harness);
     assert.equal(state.kind, kind, `${harness} ${kind}`);
-    assert.equal(ready(state), isReady, `${harness} ${kind} ready`);
+    assert.equal(readyToCreate(state), isReady, `${harness} ${kind} ready`);
   }
   assert.equal(signInState(ok, "codex").account, "ops@example.com");
   assert.equal(signInState({ kind: "ok", harnesses: harnesses({ signedIn: true, account: null }) }, "claude").account, null);
@@ -354,8 +354,10 @@ test("sign-in: an unreachable machine or a missing link is a plain error", async
   assert.deepEqual(linkless.ops(), ["login.start", "login.cancel"]);
 });
 
-test("the plugin source never logs", async () => {
+test("the hardware part never logs (a pasted sign-in code must not reach a log)", async () => {
   const { readFile } = await import("node:fs/promises");
-  const source = await readFile(new URL("../plugins/hardware/plugin.js", import.meta.url), "utf8");
-  assert.doesNotMatch(source, /console\./);
+  const source = await readFile(new URL("../plugins/black4/plugin.js", import.meta.url), "utf8");
+  const part = source.slice(source.indexOf("// ---- Black 4 hardware ----"));
+  assert.ok(part.length > 10000, "the hardware part is fenced");
+  assert.doesNotMatch(part, /console\./);
 });

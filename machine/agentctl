@@ -16,6 +16,14 @@ Not requests (run from cron or by agentctl itself):
   agentctl supervise          keeps activated agents running; cron starts it
   agentctl login-helper <id>  holds one sign-in open between SSH calls
 
+Callers: a teammate reaches this machine with their own SSH key, whose
+authorized_keys entry forces `agentctl --caller <label>` (machine/teammates.sh
+writes it). The label is stored as each agent's creator (`createdBy`, shown in
+`list`). A caller can read every agent, but changes, starts and removes only
+agents it created, and cannot sign the machine out. No label (the admin's own
+unrestricted key, or cron) may do everything; agents made before labels
+existed are open to every caller.
+
 Secrets: agent keys live in agents/<pubkey>/key, the Claude subscription token
 in secrets/claude. Neither is ever printed, logged or put in a reply.
 
@@ -27,6 +35,8 @@ import fcntl, hashlib, json, os, re, secrets, shutil, signal, socket, subprocess
 from pathlib import Path
 
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
+CALLER_LABEL = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
+CALLER = None  # set from --caller by main(); None is the admin
 LOGIN_ID = re.compile(r"^[0-9a-f]{16}$")
 CRON_MARK = "# black4-workforce"
 LOGIN_TTL = 15 * 60          # a sign-in left open longer than this is dropped
@@ -732,6 +742,15 @@ def community_url(value):
 
 # ---------------------------------------------------------------- requests
 
+CHANGES = {"remove", "activate", "profile", "instructions.set", "start"}
+
+
+def may_change(settings):
+    """A caller changes only agents it created; the admin (no label) any."""
+    creator = settings.get("createdBy")
+    if CALLER and creator and creator != CALLER:
+        fail(f"This agent belongs to {creator}. Only they or a Black 4 admin can change it.")
+
 def handle(req):
     if not isinstance(req, dict): fail("request must be a JSON object")
     op = req.get("op")
@@ -744,7 +763,9 @@ def handle(req):
         d = login_dir(req.get("loginId"))
         if d.exists(): kill_login(d)
         return {"ok": True}
-    if op == "logout": return logout(req.get("harness"))
+    if op == "logout":
+        if CALLER: fail("Only a Black 4 admin can sign this machine out.")
+        return logout(req.get("harness"))
 
     if op == "provision":
         name = (req.get("name") or "").strip()
@@ -752,7 +773,8 @@ def handle(req):
         # A retried creation gets the same agent back, not a second key.
         for d in agent_dirs():
             s = read_settings(d)
-            if s.get("name") == name and not s.get("auth") and s.get("requestId") == req.get("requestId"):
+            if (s.get("name") == name and not s.get("auth") and s.get("requestId") == req.get("requestId")
+                    and s.get("createdBy") == CALLER):
                 return {"ok": True, "pubkey": d.name}
         community = community_url(req.get("community"))
         secret = secrets.token_hex(32)
@@ -770,7 +792,7 @@ def handle(req):
             "instructions": config.get("instructions") or "",
             "respondTo": config.get("respondTo") or "owner-only",
             "allow": [k for k in (config.get("allow") or []) if HEX64.match(str(k))],
-            "createdAt": int(time.time()),
+            "createdAt": int(time.time()), "createdBy": CALLER,
         })
         return {"ok": True, "pubkey": pubkey}
 
@@ -786,10 +808,12 @@ def handle(req):
         for d in agent_dirs():
             s = read_settings(d)
             rows.append({"pubkey": d.name, "name": s.get("name"), "harness": s.get("harness"),
-                         "respondTo": s.get("respondTo"), "activated": bool(s.get("auth")), "running": bool(running(d))})
+                         "respondTo": s.get("respondTo"), "activated": bool(s.get("auth")), "running": bool(running(d)),
+                         "createdBy": s.get("createdBy")})
         return {"ok": True, "agents": rows}
 
     d = folder(req.get("pubkey"))
+    if op in CHANGES and d.exists(): may_change(read_settings(d))
     if op == "remove":
         if d.exists():
             with agent_lock(d): stop(d)
@@ -841,7 +865,15 @@ def handle(req):
 
 
 def main(argv=None):
+    global CALLER
     argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["--caller"]:
+        # Only an authorized_keys forced command passes this, and then
+        # nothing else: a teammate's key never reaches supervise or a helper.
+        if len(argv) != 2 or not CALLER_LABEL.match(argv[1]):
+            print(json.dumps({"ok": False, "error": "this key's caller label is not valid; ask an admin to add it again"}))
+            return
+        CALLER, argv = argv[1], []
     if argv[:1] == ["supervise"]: return supervise()
     if argv[:1] == ["login-helper"] and len(argv) == 2: return login_helper(argv[1])
     try:

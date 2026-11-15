@@ -290,6 +290,66 @@ class Identity(Base):
         self.assertNotIn(secret, json.dumps(r))
 
 
+class Callers(Base):
+    """A teammate's key forces `agentctl --caller <label>` (machine/teammates.sh)."""
+
+    def as_caller(self, label):
+        self.a.CALLER = label
+        self.addCleanup(setattr, self.a, "CALLER", None)
+
+    def test_creator_is_stored_and_listed(self):
+        self.as_caller("chris")
+        d = self.make_agent(activate=False)
+        self.assertEqual(self.a.read_settings(d)["createdBy"], "chris")
+        self.assertEqual(self.req(op="list")["agents"][0]["createdBy"], "chris")
+
+    def test_admin_agents_have_no_creator(self):
+        d = self.make_agent(activate=False)
+        self.assertIsNone(self.req(op="list")["agents"][0]["createdBy"])
+        self.as_caller("dave")
+        self.assertTrue(self.req(op="instructions.set", pubkey=d.name, instructions="x")["ok"], "unlabelled agents stay open")
+
+    def test_a_caller_changes_only_its_own_agents(self):
+        self.as_caller("chris")
+        mine = self.make_agent(activate=False)
+        self.a.CALLER = "dave"
+        for op, extra in [("remove", {}), ("instructions.set", {"instructions": "x"}), ("profile", {"name": "Taken"}),
+                          ("start", {}), ("activate", {"auth": ["auth", "c" * 64, "", "d" * 128]})]:
+            r = self.req(op=op, pubkey=mine.name, **extra)
+            self.assertEqual(r, {"ok": False, "error": "This agent belongs to chris. Only they or a Black 4 admin can change it."}, op)
+        self.assertTrue(mine.exists())
+        self.assertTrue(self.req(op="status", pubkey=mine.name)["ok"], "reading is allowed")
+        self.assertTrue(self.req(op="instructions.get", pubkey=mine.name)["ok"])
+        self.a.CALLER = None
+        self.assertTrue(self.req(op="remove", pubkey=mine.name)["ok"], "the admin may")
+
+    def test_a_retry_never_returns_another_callers_agent(self):
+        self.as_caller("chris")
+        r1 = self.req(op="provision", name="A", community="wss://r.example.com", requestId="q1")
+        self.a.CALLER = "dave"
+        r2 = self.req(op="provision", name="A", community="wss://r.example.com", requestId="q1")
+        self.assertNotEqual(r1["pubkey"], r2["pubkey"])
+
+    def test_only_the_admin_signs_the_machine_out(self):
+        self.as_caller("chris")
+        self.assertEqual(self.req(op="logout", harness="claude"),
+                         {"ok": False, "error": "Only a Black 4 admin can sign this machine out."})
+
+    def run_main(self, *argv, request='{"op": "list"}'):
+        env = dict(os.environ, HOME=str(self.home), AGENTCTL_HOME=str(self.home))
+        out = subprocess.run([PY, str(AGENTCTL), *argv], input=request, capture_output=True, text=True, env=env, timeout=30)
+        return json.loads(out.stdout)
+
+    def test_forced_command_ignores_what_the_client_asked_and_never_supervises(self):
+        self.assertEqual(self.run_main("--caller", "chris"), {"ok": True, "agents": []})
+        self.assertFalse(self.run_main("--caller", "Not Valid")["ok"])
+        self.assertFalse(self.run_main("--caller")["ok"])
+        # `--caller x supervise` is not a way in: anything after the label is refused.
+        self.assertFalse(self.run_main("--caller", "chris", "supervise")["ok"])
+        made = self.run_main("--caller", "chris", request='{"op": "provision", "name": "N", "community": "wss://r.example.com"}')
+        self.assertEqual(self.run_main()["agents"][0], {**self.run_main()["agents"][0], "pubkey": made["pubkey"], "createdBy": "chris"})
+
+
 class Supervisor(Base):
     def test_killed_agent_comes_back(self):
         self.sign_in()

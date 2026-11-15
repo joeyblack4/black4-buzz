@@ -6,7 +6,7 @@
 #   machine/teammates.sh --host <ssh-host> list
 #   machine/teammates.sh --host <ssh-host> remove <label>
 #
-# <label> names the teammate (lowercase letters, digits, . _ -; e.g. "chris").
+# <label> names the teammate (lowercase letters, digits, . _ -; e.g. "sam").
 # agentctl stores it as the creator of each agent they make. The public key
 # line is what the teammate's `install.sh --hardware` printed.
 #

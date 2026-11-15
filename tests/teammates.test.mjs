@@ -23,32 +23,32 @@ test("add writes one forced-command line, list shows it, remove takes only it ou
   const dir = temp();
   const file = join(dir, "ssh", "authorized_keys");
   const own = newKey(dir, "admin");
-  const chris = newKey(dir, "chris");
-  const dave = newKey(dir, "dave");
+  const sam = newKey(dir, "sam");
+  const lee = newKey(dir, "lee");
   execFileSync("mkdir", ["-p", join(dir, "ssh")]);
   writeFileSync(file, `${own}\n`);
 
-  const added = admin(file, "/Users/machine", "add", "chris", chris);
+  const added = admin(file, "/Users/machine", "add", "sam", sam);
   assert.equal(added.status, 0, added.stderr);
-  assert.equal(admin(file, "/Users/machine", "add", "dave", dave).status, 0);
+  assert.equal(admin(file, "/Users/machine", "add", "lee", lee).status, 0);
   const lines = readFileSync(file, "utf8").trim().split("\n");
   assert.equal(lines[0], own, "existing lines are kept as they were");
-  const [type, blob] = chris.split(" ");
-  assert.equal(lines[1], `command="/Users/machine/workforce/bin/agentctl --caller chris",restrict,no-port-forwarding,no-agent-forwarding,no-pty,no-X11-forwarding,no-user-rc ${type} ${blob} black4-teammate:chris`);
+  const [type, blob] = sam.split(" ");
+  assert.equal(lines[1], `command="/Users/machine/workforce/bin/agentctl --caller sam",restrict,no-port-forwarding,no-agent-forwarding,no-pty,no-X11-forwarding,no-user-rc ${type} ${blob} black4-teammate:sam`);
   assert.equal(statSync(file).mode & 0o777, 0o600);
 
   const listed = admin(file, "/Users/machine", "list");
   assert.equal(listed.status, 0, listed.stderr);
-  assert.deepEqual(listed.stdout.trim().split("\n").map((row) => row.split("\t")[0]), ["chris", "dave"]);
+  assert.deepEqual(listed.stdout.trim().split("\n").map((row) => row.split("\t")[0]), ["sam", "lee"]);
   assert.match(listed.stdout, /SHA256:/);
 
-  assert.notEqual(admin(file, "/Users/machine", "add", "chris", dave).status, 0, "one key per label");
+  assert.notEqual(admin(file, "/Users/machine", "add", "sam", lee).status, 0, "one key per label");
   assert.notEqual(admin(file, "/Users/machine", "add", "eve", own).status, 0, "a key already here, unrestricted, is not added again");
 
-  assert.equal(admin(file, "/Users/machine", "remove", "chris").status, 0);
+  assert.equal(admin(file, "/Users/machine", "remove", "sam").status, 0);
   const after = readFileSync(file, "utf8").trim().split("\n");
-  assert.deepEqual(after.map((line) => line.split(" ").at(-1)), [own.split(" ").at(-1), "black4-teammate:dave"]);
-  assert.notEqual(admin(file, "/Users/machine", "remove", "chris").status, 0);
+  assert.deepEqual(after.map((line) => line.split(" ").at(-1)), [own.split(" ").at(-1), "black4-teammate:lee"]);
+  assert.notEqual(admin(file, "/Users/machine", "remove", "sam").status, 0);
   assert.ok(existsSync(`${file}.black4-previous`));
 });
 
@@ -57,8 +57,8 @@ test("add refuses labels and keys that are not what they claim", { skip: !sshKey
   const file = join(dir, "authorized_keys");
   const key = newKey(dir, "k");
   for (const [label, line] of [
-    ["Chris", key], ["a b", key], ["chris;rm", key], ["", key],
-    ["chris", "ssh-ed25519 AAAA"], ["chris", "not-a-key AAAAC3NzaC1lZDI1NTE5AAAAI"], ["chris", `command="sh" ${key}`],
+    ["Sam", key], ["a b", key], ["sam;rm", key], ["", key],
+    ["sam", "ssh-ed25519 AAAA"], ["sam", "not-a-key AAAAC3NzaC1lZDI1NTE5AAAAI"], ["sam", `command="sh" ${key}`],
   ]) {
     const result = admin(file, dir, "add", label, line);
     assert.notEqual(result.status, 0, `${label} / ${line}`);

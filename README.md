@@ -71,7 +71,10 @@ Terminal, Node, Tailscale or an SSH key.
   request, the plugin asks Platform Control for a pass (staff only) that is
   bound to that exact request and expires after 60 seconds. It then sends the
   request and the pass to the machine's public HTTPS door. Nothing reaches the
-  machine without your sign-in.
+  machine without your sign-in. The pass names this Buzz identity's key as
+  its owner, so it matches the attestation that this Buzz signs. Only the
+  hardware agent type mints passes. Buzz's agents never can, not even through
+  `call_tool`.
 
 Each harness on a machine is signed in once, to the subscription of whoever
 signs it in. Every agent on that machine that runs the harness uses that

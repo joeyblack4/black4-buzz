@@ -407,6 +407,7 @@ test("the hardware type reaches the Commerce Mac through its door, with a pass m
   assert.ok(ui.door.seen.some((request) => request.op === "provision" && request.name === "Rock"));
   const signed = ui.mcp.signed.find((entry) => entry.op === "provision");
   assert.equal(signed.machine, "commerce");
+  assert.equal(signed.ownerKey, VIEWER, "the pass's owner is this Buzz identity");
   assert.match(signed.bodySha256, /^[A-Za-z0-9_-]{43}$/);
   assert.equal(ui.door.refused.length, 0);
 });

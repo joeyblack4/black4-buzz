@@ -22,7 +22,7 @@ async function harness(t, options = {}) {
   const held = gate();
   const mcp = fakeMcp(authkit, {
     answer: (message) => {
-      if (message.method === "tools/list") return { result: { tools } };
+      if (message.method === "tools/list") return { result: { tools: options.tools ?? tools } };
       const name = message.params?.name;
       if (name === "whoami") return { result: { content: [{ type: "text", text: '{"kind":"staff","email":"operator@example.test"}' }] } };
       if (options.holdCalls && message.method === "tools/call") return held.hold({ result: { content: [{ type: "text", text: "late" }] } });
@@ -167,6 +167,26 @@ test("keeps private MCP metadata out of agent results and removes abort listener
   const value = await h.registered.get("black4_open_review").call({ signal: controller.signal }, {}, {});
   assert.equal(value, "readable result");
   assert.equal(listeners, 0);
+});
+
+test("agents can never mint a hardware pass: not offered, and refused directly or through call_tool", async (t) => {
+  const listed = [...tools, ...["call_tool", "sign_hardware_request"].map((name) => ({ name, description: name, inputSchema: { type: "object" } }))];
+  const h = await harness(t, { tools: listed });
+  await settle();
+  assert.ok(h.registered.has("black4_call_tool"));
+  assert.equal(h.registered.has("black4_sign_hardware_request"), false, "never offered to agents");
+  const input = { machine: "commerce", op: "list", bodySha256: "x".repeat(43) };
+  for (const args of [
+    { name: "sign_hardware_request", arguments: input },
+    { name: " Sign_Hardware_Request ", arguments: input },
+    { name: "call_tool", arguments: { name: "sign_hardware_request", arguments: input } },
+  ]) {
+    await assert.rejects(h.registered.get("black4_call_tool").call({ key: "agent" }, {}, args), /Agents cannot mint Black 4 hardware passes/);
+  }
+  // (The plugin's own hardware provider may mint passes for its requests; none for the agent's.)
+  assert.equal(h.mcp.calls.filter((call) => JSON.stringify(call).includes(input.bodySha256)).length, 0, "nothing the agent asked for reached Black 4");
+  assert.equal(h.mcp.signed.filter((entry) => entry.bodySha256 === input.bodySha256).length, 0);
+  assert.equal(await h.registered.get("black4_call_tool").call({ key: "agent" }, {}, { name: "open_review", arguments: {} }), "readable result", "other tools still pass");
 });
 
 test("Black 4 out of reach is a retry with the reason, and no tools", async (t) => {

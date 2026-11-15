@@ -28,6 +28,16 @@ const QUEUE_POLL_MS = 60 * 1000; // the Reviews badge refreshes this often while
 const QUEUE_TIMEOUT_MS = 30 * 1000;
 const LINK_TIMEOUT_MS = 30 * 1000;
 const LINK_UNAVAILABLE = "This Black 4 server can't link agents yet.";
+const PASS_TOOL = "sign_hardware_request";
+const PASS_REFUSED = "Agents cannot mint Black 4 hardware passes. Only the Black 4 plugin's hardware agent type does, for its own requests.";
+/** Whether a tool call (directly, or through call_tool, however nested) asks
+ * for a hardware pass. */
+export function mintsPass(name, args, depth = 0) {
+  const tool = String(name ?? "").trim().toLowerCase();
+  if (tool === PASS_TOOL) return true;
+  if (tool === "call_tool" && depth < 4 && args && typeof args === "object") return mintsPass(args.name, args.arguments, depth + 1);
+  return false;
+}
 
 // ---- sign-in, the Black 4 MCP and the hardware door, over HTTPS -------------
 // Everything goes through `ctx.host.request` to the origins the manifest
@@ -575,6 +585,9 @@ export function apply(ctx) {
       .join("\n");
 
   const toolCall = (name) => async (client, context, args) => {
+    // Only this plugin's own hardware provider mints door passes. An agent's
+    // call carries the person's sign-in, so Black 4 cannot tell it apart.
+    if (mintsPass(name, args)) throw new Error(PASS_REFUSED);
     if (state.status !== "connected") {
       throw new Error(
         `Black 4 is not connected in Buzz (${state.status}${state.detail ? `: ${state.detail}` : ""}). ` +
@@ -601,6 +614,7 @@ export function apply(ctx) {
     for (const tool of tools) {
       const name = PREFIX + tool.name;
       if (registered.has(name)) continue;
+      if (mintsPass(tool.name)) continue; // never offered to agents
       if (!/^[a-z][a-z0-9_]{0,63}$/.test(name)) {
         note(`Skipped a tool whose name Buzz refuses: ${tool.name}`);
         continue;
@@ -777,8 +791,11 @@ export function apply(ctx) {
     },
     access: { use: () => useBridgeState().agentLink, link: () => linkAgents() },
     // One 60-second pass per door request, minted as the signed-in person.
+    // ownerKey: this Buzz identity's key, which becomes the pass's owner, so an
+    // activate matches the attestation this Buzz signs.
     sign: async (input) => {
-      const answer = await callBlack4("sign_hardware_request", input, { unavailable: "This Black 4 server can't sign hardware requests yet." });
+      const ownerKey = viewerKey();
+      const answer = await callBlack4(PASS_TOOL, { ...input, ...(ownerKey ? { ownerKey } : {}) }, { unavailable: "This Black 4 server can't sign hardware requests yet." });
       return answer?.data ?? answer;
     },
   });

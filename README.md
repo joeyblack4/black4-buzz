@@ -55,13 +55,18 @@ Terminal, Node, Tailscale or an SSH key.
   until you choose **Link my agents** again. Reconnecting doesn't relink it.
 - **You sign in once each time Buzz starts.** Your sign-in is kept in memory
   while Buzz runs: turning the plugin off and on, or reloading it, keeps you
-  signed in, but quitting Buzz signs you out. Buzz plugins have no private
-  key-value store, and Buzz's artifact storage syncs with the community
-  server, so nothing is written to disk. Access tokens are refreshed before
-  they expire. Tokens never go into logs, into the Settings card or to any
-  agent. Your agents on Black 4 hardware keep running while you are signed
-  out. Until you sign in, you can't create new hardware agents or change
-  existing ones, and Buzz's own agents can't use Black 4 tools.
+  signed in, but quitting Buzz signs you out. Nothing is written to disk,
+  because Buzz gives plugins no private key-value store. The only way to keep
+  data is `ctx.artifactStorage`, and that isn't a good home for a refresh
+  token: opening a collection starts relay sync queries, a collection belongs
+  to one identity and one community, and it is stored as plaintext on disk
+  where local agents can read it. The cost is one browser approval per
+  launch. Access tokens are refreshed before they expire. Tokens never go into
+  logs, into the Settings card or to any agent.
+- **Until you sign in after a launch**, Buzz's own agents can't use Black 4
+  tools, and **Black 4 hardware** isn't offered. Your existing hardware agents
+  keep running on the machine, but Buzz shows them as *Harness unavailable*
+  until you sign in.
 - **Each request to Black 4 hardware carries its own pass.** For every
   request, the plugin asks Platform Control for a pass (staff only) that is
   bound to that exact request and expires after 60 seconds. It then sends the
@@ -104,8 +109,11 @@ sign-in.
   the message says which part failed:
   - *your Black 4 sign-in could not get a pass*: sign in again, or your
     account isn't staff.
-  - *its door did not answer* or *its door refused the pass*: the machine or
-    its door is down. Tell an admin.
+  - *its door did not answer*, or *its door answered HTTP …*: the machine or
+    its door is down or busy. Tell an admin.
+  - *its door refused the pass*: the pass was expired or already used, or (on
+    activate) it was for a different owner than the agent's attestation. Try
+    again; if it keeps happening, tell an admin.
 - **A change in this repository doesn't show up.** A plugin installed from a
   folder is a copy taken at install time. Install it again, then ask a Buzz
   agent to run `plugin_reload`. Plugins installed with the link above update

@@ -237,7 +237,7 @@ export function createMcp({ request, session, url = MCP_URL, clientInfo = { name
   let opened = null; // the initialize result
   let nextId = 1;
 
-  const post = async (message, { timeoutMs = 60 * 1000, retried = false } = {}) => {
+  const post = async (message, { timeoutMs = 60 * 1000, retried = false, reopened = false } = {}) => {
     let token;
     try { token = await session.accessToken({ force: retried }); } catch (error) {
       throw Object.assign(new Error(error.message), { code: "signin" });
@@ -255,7 +255,7 @@ export function createMcp({ request, session, url = MCP_URL, clientInfo = { name
     } catch (error) {
       throw Object.assign(new Error(`Could not reach Black 4 (${plain(error?.message ?? error, 120)}).`), { code: "offline" });
     }
-    if (response.status === 401 && !retried) return post(message, { timeoutMs, retried: true });
+    if (response.status === 401 && !retried) return post(message, { timeoutMs, retried: true, reopened });
     if (response.status === 401 || response.status === 403) {
       const body = jsonOf(response.body);
       const said = plain(body?.error_description ?? body?.error?.message ?? body?.error ?? "");
@@ -263,12 +263,13 @@ export function createMcp({ request, session, url = MCP_URL, clientInfo = { name
     }
     const sid = headerOf(response, "mcp-session-id");
     if (sid) sessionId = sid;
-    if (response.status === 404 && headers["mcp-session-id"] && message.method !== "initialize") {
-      // The server forgot this MCP session: open a new one and ask again.
+    // (Never for a notification: initialized is sent from inside open itself.)
+    if (response.status === 404 && headers["mcp-session-id"] && message.id != null && message.method !== "initialize" && !reopened) {
+      // The server forgot this MCP session: open a new one and ask again, once.
       sessionId = null;
       opened = null;
       await open();
-      return post(message, { timeoutMs, retried });
+      return post(message, { timeoutMs, retried, reopened: true });
     }
     if (response.status === 202 || response.status === 204) return undefined;
     if (response.status < 200 || response.status >= 300) {
@@ -681,18 +682,25 @@ export function apply(ctx) {
     }
   };
   const setLink = (agentLink) => update({ agentLink });
-  const callBlack4 = async (name, args) => {
+  /** A Black 4 tool by name, directly when listed, else through call_tool.
+   * `unavailable` is the sentence for a server that does not have it. */
+  const callBlack4 = async (name, args, { unavailable = LINK_UNAVAILABLE } = {}) => {
     let result;
     try {
       if (listedNames.has(name)) result = await request("tools/call", { name, arguments: args }, { timeoutMs: LINK_TIMEOUT_MS });
       else if (listedNames.has("call_tool")) result = await request("tools/call", { name: "call_tool", arguments: { name, arguments: args } }, { timeoutMs: LINK_TIMEOUT_MS });
-      else throw Object.assign(new Error(LINK_UNAVAILABLE), { code: "unavailable" });
+      else throw Object.assign(new Error(unavailable), { code: "unavailable" });
     } catch (error) {
       if (error.code === "unavailable" || error.code === "signin") throw error;
-      if (/unknown tool|no tool|not found/i.test(error.message)) throw Object.assign(new Error(LINK_UNAVAILABLE), { code: "unavailable" });
+      if (/unknown tool|no tool|not found/i.test(error.message)) throw Object.assign(new Error(unavailable), { code: "unavailable" });
       throw Object.assign(new Error("Couldn't reach Black 4. Check your connection and try again."), { code: "offline" });
     }
-    return readAnswer(result);
+    try {
+      return readAnswer(result);
+    } catch (error) {
+      if (error.code === "unavailable") throw Object.assign(new Error(unavailable), { code: "unavailable" });
+      throw error;
+    }
   };
   const linkFailure = (error, key) => ({
     status: error.code === "unavailable" ? "unavailable" : "error",
@@ -770,7 +778,7 @@ export function apply(ctx) {
     access: { use: () => useBridgeState().agentLink, link: () => linkAgents() },
     // One 60-second pass per door request, minted as the signed-in person.
     sign: async (input) => {
-      const answer = await callBlack4("sign_hardware_request", input);
+      const answer = await callBlack4("sign_hardware_request", input, { unavailable: "This Black 4 server can't sign hardware requests yet." });
       return answer?.data ?? answer;
     },
   });
@@ -848,28 +856,34 @@ export function apply(ctx) {
   };
 
   /** Settings → Black 4 → Sign in: the device sign-in, then connect and link. */
+  // Each Sign in is its own attempt: a cancelled one that ends later (its
+  // poll was asleep) never touches the one that replaced it.
+  let signInTicket = 0;
   const signIn = async () => {
     if (stopped || state.status === "signing-in") return;
+    const mine = ++signInTicket;
     clearTimeout(retryTimer);
     generation += 1;
     starting = false;
     update({ status: "signing-in", detail: "", signIn: null });
     try {
-      await session.signIn({ onCode: (code) => update({ status: "signing-in", signIn: { url: code.url, userCode: code.userCode } }) });
+      await session.signIn({ onCode: (code) => { if (mine === signInTicket) update({ status: "signing-in", signIn: { url: code.url, userCode: code.userCode } }); } });
     } catch (error) {
-      if (!stopped && state.status === "signing-in") update({ status: "signed-out", signIn: null, detail: error?.code === "cancelled" ? "" : error?.message ?? String(error) });
+      if (!stopped && mine === signInTicket && state.status === "signing-in") update({ status: "signed-out", signIn: null, detail: error?.code === "cancelled" ? "" : error?.message ?? String(error) });
       return;
     }
-    if (stopped) return;
+    if (stopped || mine !== signInTicket) return;
     update({ signIn: null });
     linkOnConnect = true;
     reconnect();
   };
   const cancelSignIn = () => {
+    signInTicket += 1;
     session.cancel();
     update({ status: "signed-out", signIn: null, detail: "" });
   };
   const signOut = async () => {
+    signInTicket += 1;
     generation += 1;
     starting = false;
     clearTimeout(retryTimer);

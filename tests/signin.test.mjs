@@ -209,3 +209,59 @@ test("Settings → Black 4: Sign in shows the prefilled link and code, then Conn
   await settle();
   assert.match(texts(view()).join(" "), /Status Not signed in/);
 });
+
+test("an MCP that keeps forgetting its session is reopened once per call, then reported", async () => {
+  const authkit = fakeAuthKit();
+  const mcp = fakeMcp(authkit, { answer: () => ({ result: {} }) });
+  const net = https({ authkit, mcp });
+  const store = memoryStore();
+  await store.save(authkit.issue().refresh_token);
+  const session = createSession({ request: net.request, store });
+  await session.restore();
+  const client = createMcp({ request: net.request, session });
+  await client.initialize();
+  const handle = mcp.handle;
+  mcp.handle = async (input) => (JSON.parse(input.body).method === "initialize" ? handle(input) : { status: 404, headers: {}, body: "session not found" });
+  await assert.rejects(client.request("tools/list", {}), /Black 4 answered HTTP 404/);
+  assert.equal(mcp.calls.filter((call) => call.method === "initialize").length, 2, "one reopen, not a loop");
+});
+
+test("Cancel, then Sign in again: the cancelled attempt ending later leaves the new link and code in place", async (t) => {
+  const { apply } = await freshPlugin();
+  const authkit = fakeAuthKit({ polls: ["authorization_pending"], interval: 0.15 });
+  const net = https({ authkit, mcp: fakeMcp(authkit) });
+  let card;
+  const cleanups = [];
+  const h = (type, props, ...children) => ({ type, props: props ?? {}, children });
+  apply({
+    react: { createElement: h, useState: (v) => [typeof v === "function" ? v() : v, () => {}], useEffect: () => {}, useRef: (v) => ({ current: v }), Component: class {} },
+    agents: { snapshot: () => ({ running: [] }), addTool: () => () => {}, register: () => {} },
+    settingsCards: { register: (value) => { card = value; } },
+    pages: { register() {} }, panels: { register() {} }, conversation: {}, browser: { available: false },
+    effect: (fn) => { const off = fn(); if (off) cleanups.push(off); },
+    host: { request: net.request },
+  });
+  t.after(() => { for (const off of cleanups.reverse()) off(); });
+  const expand = (node) => (!node || typeof node !== "object" ? node
+    : typeof node.type === "function" ? expand(node.type(node.props)) : { ...node, children: (node.children ?? []).map(expand) });
+  const texts = (node) => (node == null || node === false ? [] : typeof node !== "object" ? [String(node)] : (node.children ?? []).flatMap(texts));
+  const find = (node, test) => {
+    if (!node || typeof node !== "object") return null;
+    if (test(node)) return node;
+    for (const child of node.children ?? []) { const found = find(child, test); if (found) return found; }
+    return null;
+  };
+  const view = () => expand(card.component());
+  const click = (label) => find(view(), (node) => node.type === "button" && texts(node).join("") === label).props.onClick();
+  await settle();
+  click("Sign in");
+  await until(() => find(view(), (node) => node.type === "a"), { what: "the first link" });
+  click("Cancel");
+  click("Sign in");
+  await until(() => find(view(), (node) => node.type === "a"), { what: "the second link" });
+  await new Promise((resolve) => setTimeout(resolve, 250)); // the first attempt's poll wakes and ends
+  await settle();
+  assert.ok(find(view(), (node) => node.type === "a"), "the new link is still shown");
+  assert.match(texts(view()).join(" "), /Waiting for you to sign in/);
+  click("Cancel");
+});

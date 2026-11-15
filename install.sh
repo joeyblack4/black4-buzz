@@ -1,30 +1,28 @@
 #!/bin/sh
-# Puts Black 4 in Buzz on a Mac (or any computer with a POSIX shell).
+# Black 4 in Buzz. Nothing here is needed to use the plugin: install it from
+# Buzz (Settings > Plugins > install from GitHub, joeyblack4/black4-buzz,
+# ref stable, path plugins/black4), or open
+#   buzz://plugin-install?repository=joeyblack4%2Fblack4-buzz&ref=stable&path=plugins%2Fblack4
 #
-#   install.sh                          the Black 4 plugin: installs the sign-in
-#                                       bridge, then opens Buzz's install review
+#   install.sh                          opens that link: Buzz's install review
 #   install.sh --hardware <user>@<address>
-#                                       machine access for Black 4 hardware:
-#                                       makes this computer's key for the
-#                                       machines and the `commerce` SSH alias,
-#                                       and prints the line to send an admin
-#   install.sh --check-hardware         after the admin added you: asks the
-#                                       machine what it can run
-#   install.sh --bridge-only            repairs the bridge, opens nothing
+#                                       admin, legacy: direct SSH to a machine's
+#                                       agentctl (makes a key for the machines and
+#                                       the `commerce` SSH alias, and prints the
+#                                       line to send the machine's admin). The
+#                                       plugin does not use it.
+#   install.sh --check-hardware         admin, legacy: asks the machine over SSH
+#                                       what it can run
 #
-# One plugin, Black 4, holds everything; Black 4 hardware is part of it.
-# Buzz shows what each plugin may do, and nothing is installed until you choose
-# Install. Run it again any time: it only repairs what is missing. The admin
-# gives you <user>@<address>; neither is written in this repository.
+# Buzz shows what the plugin may do, and nothing is installed until you choose
+# Install. The admin gives you <user>@<address>; neither is written in this
+# repository.
 set -eu
 
-HERE="$(cd "$(dirname "$0")" 2>/dev/null && pwd || pwd)"
-BRIDGE_HOME="${BLACK4_MCP_BRIDGE_HOME:-$HOME/.black4/mcp-bridge}"
-BIN="$HOME/.local/bin"
 REPOSITORY="${BLACK4_BUZZ_REPOSITORY:-joeyblack4/black4-buzz}"
 REF="${BLACK4_BUZZ_REF:-stable}"
 SSH_DIR="${BLACK4_SSH_DIR:-$HOME/.ssh}"
-ALIAS=commerce                       # what plugins/black4/manifest.json runs: ssh ... commerce
+ALIAS=commerce                       # the SSH alias for the Commerce Mac (legacy admin access)
 KEY="$SSH_DIR/black4_hardware"
 BEGIN="# >>> black4-hardware (install.sh; edits inside are replaced) >>>"
 END="# <<< black4-hardware <<<"
@@ -39,7 +37,7 @@ open_review() {
   echo "Open that link yourself once Buzz is installed."
 }
 
-# ---- Black 4 hardware: this computer's side -----------------------------------
+# ---- legacy admin access: direct SSH to a machine's agentctl -----------------
 hardware() {
   target=$1
   case "$target" in
@@ -110,39 +108,11 @@ case "${1:-}" in
   --check-hardware) check_hardware; exit 0 ;;
 esac
 
-# ---- the Black 4 plugin and its sign-in bridge --------------------------------
-if ! command -v node >/dev/null 2>&1; then
-  echo "Node 22.12 or newer is required: https://nodejs.org" >&2
-  exit 1
+if [ -n "${1:-}" ]; then
+  echo "usage: install.sh [--hardware <user>@<address> | --check-hardware]" >&2
+  exit 2
 fi
-if ! node -e 'const [a,b]=process.versions.node.split(".").map(Number);process.exit(a>22||(a===22&&b>=12)?0:1)'; then
-  echo "Node $(node -v) is too old; Black 4 needs 22.12 or newer." >&2
-  exit 1
-fi
-
-mkdir -p "$BRIDGE_HOME" "$BIN"
-npm install --prefix "$BRIDGE_HOME" --save-exact --no-fund --no-audit mcp-remote@0.15.2 >/dev/null
-command -v node > "$BRIDGE_HOME/node-path"
-if [ -f "$HERE/bridge/black4-mcp-bridge" ]; then
-  install -m 755 "$HERE/bridge/black4-mcp-bridge" "$BIN/black4-mcp-bridge"
-else
-  # Run straight from the web, without a checkout: fetch the bridge it needs.
-  curl -fsSL "https://raw.githubusercontent.com/$REPOSITORY/$REF/bridge/black4-mcp-bridge" -o "$BIN/black4-mcp-bridge.tmp"
-  chmod 755 "$BIN/black4-mcp-bridge.tmp"
-  mv "$BIN/black4-mcp-bridge.tmp" "$BIN/black4-mcp-bridge"
-fi
-echo "Sign-in bridge installed at $BIN/black4-mcp-bridge"
-
-# Buzz starts the bridge by name, so your login shell must find it.
-SHELL_BIN="${SHELL:-/bin/zsh}"
-if ! "$SHELL_BIN" -lic 'command -v black4-mcp-bridge' >/dev/null 2>&1; then
-  echo "Your shell does not have $BIN on its PATH yet, so Buzz will not find the bridge." >&2
-  echo "Add this line to ~/.zprofile, then quit and reopen Buzz:" >&2
-  echo "  export PATH=\"\$HOME/.local/bin:\$PATH\"" >&2
-fi
-
-[ "${1:-}" = "--bridge-only" ] && exit 0
 
 open_review black4
-echo "After you choose Install, turn the plugin on and finish the Black 4 sign-in in your browser."
-echo "Then in Settings > Black 4, choose Link my agents, and create agents in Agents > New agent > Black 4 hardware."
+echo "After you choose Install, turn Black 4 on, then Settings > Black 4 > Sign in."
+echo "Black 4 staff: then Agents > New agent > Black 4 hardware."

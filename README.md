@@ -2,7 +2,7 @@
 
 Status: current  
 Owner: Black 4 platform  
-Updated: 2026-11-14
+Updated: 2026-11-15
 
 Black 4 runs its AI workforce in [Buzz](https://github.com/block/buzz-app).
 Buzz stays stock, so it can be updated at any time; everything Black 4 adds is
@@ -14,180 +14,112 @@ a plugin in this repository, one folder each under `plugins/`:
 | **Claude Sub Plugin** (`black4.claude-subscription`) | `plugins/claude-subscription` | A person who wants agents on their own Claude subscription. |
 | **Grok Sub Plugin** (`black4.grok-subscription`) | `plugins/grok-subscription` | A person who wants agents on their own Grok subscription. |
 
-## Set up your Buzz (Black 4 staff)
+## Set up your Buzz
 
 **What you get:** one plugin, **Black 4**. Every agent in your Buzz can use
-Black 4 (goals, context, metrics, skills, Reviews) as you; Reviews in Buzz's
-dock; and **Black 4 hardware** in Buzz's Create agent dialog, for agents that
-run on a Black 4 machine and keep working while your computer is off. Black 4
-hardware appears only once you are signed in to Black 4 with a staff account.
+Black 4 (goals, context, metrics, skills, Reviews) as you, and Reviews shows up
+in Buzz's dock. Black 4 staff also get **Black 4 hardware** in Buzz's New agent
+dialog, for agents that run on a Black 4 machine and keep working while your
+computer is off.
 
-**What you need first:**
+**What you need:** the Buzz desktop app with the Black 4 community open, and
+your Black 4 account (the one you use at app.black4.ai). You don't need
+Terminal, Node, Tailscale or an SSH key.
 
-- The Buzz desktop app, signed in, with the Black 4 community open.
-- A Black 4 staff account (the one you use at app.black4.ai).
-- Node 22.12 or newer (`node -v`; get it from [nodejs.org](https://nodejs.org)).
-- For hardware: the company network (Tailscale on), and a Black 4 admin
-  (Joey) who will give you the machine's `<user>@<address>` and add your key.
-- A Mac. Mac is the supported path for now; Windows is best effort, see
-  [Windows (untested)](#windows-untested).
+1. **Install.** Open
+   `buzz://plugin-install?repository=joeyblack4%2Fblack4-buzz&ref=stable&path=plugins%2Fblack4`,
+   or go to **Settings → Plugins → Install from GitHub** and enter
+   `joeyblack4/black4-buzz`, ref `stable`, path `plugins/black4`. Buzz's review
+   says the plugin may reach three addresses: the Black 4 sign-in
+   (`overjoyed-tea-41.authkit.app`), the Black 4 MCP (`api.black4.ai`) and the
+   Commerce Mac's door (`black4-commerce-01.tail50b7f0.ts.net`). Choose
+   **Install plugin**.
+2. **Turn it on** in **Settings → Plugins**. Plugins start off.
+3. **Sign in.** In **Settings → Black 4**, choose **Sign in**, then **Open
+   Black 4 sign-in**. Your browser opens with the code already filled in.
+   Check that it matches the code Buzz shows, then approve.
+   You should see **Connected**, your email *(staff)* if you are staff, and a
+   number of agent tools. **Agent access** says **Linked**.
+4. **New agent** (staff). Go to **Agents → New agent → Black 4 hardware**.
+   Give it a name, choose what it runs (Claude Code if unsure) and who it
+   answers, then **Create**. If the machine isn't signed in to that harness
+   yet, the form offers **Sign in**.
 
-Open Terminal for the commands below.
+### What signing in does
 
-### 1. Ask for machine access
+- **Your agents get linked right away.** If this Buzz identity's key isn't
+  linked to you yet, signing in links it, so that agents you create on Black 4
+  hardware act as you, with exactly your access. Joey approved this on
+  2026-11-15. If the key is already linked to someone else, the card says so,
+  and nothing is linked. **Remove…** undoes the link, and it stays removed
+  until you choose **Link my agents** again. Reconnecting doesn't relink it.
+- **You sign in once each time Buzz starts.** Your sign-in is kept in memory
+  while Buzz runs: turning the plugin off and on, or reloading it, keeps you
+  signed in, but quitting Buzz signs you out. Buzz plugins have no private
+  key-value store, and Buzz's artifact storage syncs with the community
+  server, so nothing is written to disk. Access tokens are refreshed before
+  they expire. Tokens never go into logs, into the Settings card or to any
+  agent. Your agents on Black 4 hardware keep running while you are signed
+  out. Until you sign in, you can't create new hardware agents or change
+  existing ones, and Buzz's own agents can't use Black 4 tools.
+- **Each request to Black 4 hardware carries its own pass.** For every
+  request, the plugin asks Platform Control for a pass (staff only) that is
+  bound to that exact request and expires after 60 seconds. It then sends the
+  request and the pass to the machine's public HTTPS door. Nothing reaches the
+  machine without your sign-in.
 
-Your admin gives you the machine's `<user>@<address>`. Then:
+Each harness on a machine is signed in once, to the subscription of whoever
+signs it in. Every agent on that machine that runs the harness uses that
+sign-in:
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/joeyblack4/black4-buzz/stable/install.sh | sh -s -- --hardware <user>@<address>
-```
-
-It makes a key used only for Black 4 machines (`~/.ssh/black4_hardware`),
-adds a `commerce` entry to `~/.ssh/config` (your own entries are left alone)
-and prints one line starting `ssh-ed25519`. Send that line to your admin (it
-is a public key; safe to paste in chat). Carry on while they add it.
-
-### 2. The Black 4 plugin and sign-in
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/joeyblack4/black4-buzz/stable/install.sh | sh
-```
-
-It installs the sign-in bridge, then Buzz opens its install review for
-**Black 4**. The review lists the two programs it may start:
-`black4-mcp-bridge` (the sign-in) and `ssh … commerce workforce/bin/agentctl`
-(Black 4 hardware). Choose **Install plugin**. Then in **Settings → Plugins**,
-turn **Black 4** on (plugins start off). Your browser opens the Black 4
-sign-in; sign in as yourself.
-
-You should see: **Settings → Black 4** says **Connected**, signed in as your
-email *(staff)*, with a number of agent tools. **Reviews** appears in the dock.
-
-### 3. Link your agents (one click)
-
-In **Settings → Black 4**, the **Agent access** card says *Agents you create
-on Black 4 hardware need this to use Black 4 as you.* Choose **Link my
-agents**.
-
-You should see: **Linked** with today's date, and *Next: Agents → New agent →
-Black 4 hardware.* Later it counts the agents that used it. **Remove…** undoes
-it.
-
-This tells Black 4 that agents your Buzz identity creates act as you, with
-exactly your access and no more. It is never done without your click.
-
-### 4. Your first agent on Black 4 hardware
-
-When your admin says you are added, check:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/joeyblack4/black4-buzz/stable/install.sh | sh -s -- --check-hardware
-```
-
-You should see: `Black 4 hardware reached:` and what the machine can run.
-
-In Buzz, **Agents → New agent**. Choose **Black 4 hardware**, give it a name
-and choose what it runs (Claude Code if unsure) and who it answers. If the
-machine is not signed in to it yet, the form offers **Sign in**. Create.
-
-Each harness is signed in once per machine, to the subscription of whoever
-signs it in, and every agent on that machine that runs it uses that sign-in:
-
-- **Claude Code** (Claude subscription): open the link, approve, paste the
-  code the Anthropic page shows into the form.
+- **Claude Code** (Claude subscription): open the link, approve, then paste
+  the code the Anthropic page shows into the form.
 - **Codex** (ChatGPT subscription) and **Grok Build** (SuperGrok or grok.com):
-  open the link, approve the short code the form shows. There is nothing to
-  paste; the machine notices the approval and the form says it is signed in.
-  The code lasts 15 minutes.
+  open the link and approve the short code the form shows. There is nothing to
+  paste: the machine notices the approval. The code lasts 15 minutes.
 
-A harness the machine has installed but Buzz cannot sign in (Goose) is listed
-as unavailable, with the reason.
+A harness that the machine has installed but Buzz can't sign in (Goose) is
+listed as unavailable, with the reason.
 
-You should see: the agent in your list with *Claude Code · Commerce Mac*
-under its name. Its **Settings** tab shows **Status: Running**. @mention it in
-a channel; it answers within a minute, and its Black 4 tools work with no
+You should see the agent in your list with *Claude Code · Commerce Mac* under
+its name, and **Status: Running** in its **Settings** tab. @mention it in a
+channel: it answers within a minute, and its Black 4 tools work with no
 sign-in.
 
 ### If something is wrong
 
 - **The plugin does nothing after Install.** It starts off: turn it on in
-  **Settings → Plugins**. Black 4 says *Not connected*: choose **Connect**,
-  and finish the browser sign-in.
+  **Settings → Plugins**.
+- **Settings → Black 4 says *Not signed in*.** Choose **Sign in**. A message
+  under the status says why the last sign-in ended: the code expired, the
+  sign-in was declined, or *Your Black 4 sign-in ended*.
 - **No Black 4 hardware in New agent.** It appears once **Settings → Black 4**
   says **Connected** with a *(staff)* account. If the card instead says
-  *Black 4 hardware is unavailable in this Buzz*, this Buzz version changed
-  the agent API: tell the platform team; everything else keeps working.
-- **An agent says no Black 4 person has linked its owner key.** Do step 3.
-  The card says the key is linked to someone else: that person (or any staff
-  member) removes their link first.
-- **"Could not reach the Commerce Mac"** in the Create agent dialog. Turn
-  Tailscale on and run `--check-hardware`. *The machine refused this key*
-  means the admin has not added your line yet.
-- **`install.sh` says your shell does not have `~/.local/bin` on its PATH.**
-  Buzz starts the sign-in bridge by name, so add the line it prints to
-  `~/.zprofile`, then quit and reopen Buzz (Cmd-Q, not just the window).
+  *Black 4 hardware is unavailable in this Buzz*, this Buzz version changed the
+  agent API. Tell the platform team; everything else keeps working.
+- **The card says your agents are not linked, because the key is linked to
+  another person.** That person, or any staff member, removes their link
+  first. Then choose **Link my agents**.
+- **"Could not reach the Commerce Mac"** in the New agent dialog. The rest of
+  the message says which part failed:
+  - *your Black 4 sign-in could not get a pass*: sign in again, or your
+    account isn't staff.
+  - *its door did not answer* or *its door refused the pass*: the machine or
+    its door is down. Tell an admin.
 - **A change in this repository doesn't show up.** A plugin installed from a
-  folder is a copy taken at install time: install it again, then ask a Buzz
-  agent to run `plugin_reload`. Plugins installed with the links above update
+  folder is a copy taken at install time. Install it again, then ask a Buzz
+  agent to run `plugin_reload`. Plugins installed with the link above update
   themselves (**Update and reload** in Settings).
+- **After updating from an older Black 4 plugin**, Buzz asks you to review the
+  update. The old version started programs on your computer; this one only
+  reaches the three addresses above. Approve it, then sign in. You can delete
+  the old `~/.black4/mcp-bridge` folder, `~/.local/bin/black4-mcp-bridge`, and
+  `~/.mcp-auth` (if nothing else uses it).
 
-### Windows (untested)
-
-Mac is the supported path for now. Nobody has tried this on Windows; these
-are the steps we believe are needed.
-
-- **What is most likely to break:** the Black 4 plugin's sign-in. Its bridge
-  is a shell script, which Buzz for Windows cannot start, so step 2 will show
-  *Not connected*, step 3's button never appears, and **Black 4 hardware**
-  never appears either (it waits for a staff sign-in). `install.sh` needs a
-  POSIX shell too.
-- **Step 3 instead:** ask Claude (or any app with the Black 4 MCP) to call
-  `link_agent_owner_key` with your Buzz public key as 64 hex characters.
-- **Step 1 by hand:** Windows ships OpenSSH. Make the key with
-  `ssh-keygen -t ed25519 -C black4-hardware -f %USERPROFILE%\.ssh\black4_hardware`
-  (press Enter twice for no passphrase). Send `black4_hardware.pub` to your
-  admin. Put the `Host commerce` block that `install.sh --hardware` would
-  write at the top of `%USERPROFILE%\.ssh\config`:
-
-  ```
-  Host commerce
-    HostName <address>
-    User <user>
-    IdentityFile ~/.ssh/black4_hardware
-    IdentitiesOnly yes
-    StrictHostKeyChecking accept-new
-  ```
-
-  Install the plugin with
-  `buzz://plugin-install?repository=joeyblack4%2Fblack4-buzz&ref=stable&path=plugins%2Fblack4`.
-  Buzz starts plugin programs by name, so `ssh` should resolve to Windows'
-  own `ssh.exe`; whether it does is the next thing to find out.
+Windows: nothing in the plugin is Mac-specific any more, but nobody has tried
+it on Windows yet.
 
 ## Admin
-
-### Add or remove a teammate
-
-From a computer that already reaches the machine (yours has `commerce`):
-
-```sh
-machine/teammates.sh --host commerce add sam 'ssh-ed25519 AAAA… black4-hardware'
-machine/teammates.sh --host commerce list
-machine/teammates.sh --host commerce remove sam
-```
-
-The label (`sam`) is how the machine records who created each agent. Each
-line it writes forces `agentctl --caller <label>` with `restrict` (no shell,
-no forwarding, no pty), so a teammate's key can only send agentctl one JSON
-request. Your own key stays unrestricted. Removing a key leaves their agents
-running; `agentctl list` still shows them, with `createdBy`.
-
-On the machine, a teammate can see every agent but change, restart or remove
-only the agents they created, and cannot sign the machine out of Claude. They
-can sign the machine in to Claude, Codex or Grok Build while it is signed out,
-which every agent on that harness then uses; only your key can switch a
-working sign-in to another account. Agents made with your own unrestricted key, or before
-labels existed, are yours: teammates can see them but not change them. Your
-key is not limited.
 
 ### Set up a new machine
 
@@ -205,9 +137,12 @@ It installs Node, the ACP adapters, the Black 4 connector and `agentctl` under
 connector, the cron lines and free disk. It fails loudly when the machine cannot
 run agents; Buzz's Create agent form shows the same problem for a harness
 instead of creating an agent that never answers. Then sign the machine in
-to Claude from Buzz (the Create agent dialog offers it). A second machine also
-needs an entry in `MACHINES` in `plugins/black4/plugin.js` (the Black 4
-hardware part) and a matching process in its manifest.
+to Claude from Buzz (the Create agent dialog offers it). The plugin reaches a
+machine only through its public HTTPS door (Tailscale Funnel in front of
+`agentctl`, which checks each request's Platform Control pass). A second
+machine needs an entry in `MACHINES` in `plugins/black4/plugin.js` with its
+door's origin, and that origin in the manifest's `networkOrigins`. Existing
+installs then ask the person to review the update.
 
 Cron runs `agentctl supervise` at boot and every minute; it restarts an agent
 that stops, waiting 5, 10, 20 … up to 300 seconds while it keeps stopping, and
@@ -224,15 +159,48 @@ The [Buzz canary](canary/README.md) checks every day that the latest Buzz still
 offers everything these plugins use; red on the release means do not update
 Buzz yet. Work lands on `main`. People install from `stable`, which only Joey
 moves, to a tested commit on `main`; installed plugins then offer **Update and
-reload**. Until a release, try `main` with `BLACK4_BUZZ_REF=main` before the
-`sh` in the commands above.
+reload**. Until a release, try `main` by installing from GitHub with ref
+`main`.
+
+### Legacy: direct SSH to a machine's agentctl
+
+Before the door, the plugin ran `ssh commerce workforce/bin/agentctl` with a
+teammate's forced-command key. The plugin no longer does that, and teammates
+need no key. These steps remain only for admins who want direct access
+to `agentctl` for debugging, and for machines that do not have a door yet.
+
+On the computer that will connect:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/joeyblack4/black4-buzz/stable/install.sh | sh -s -- --hardware <user>@<address>
+curl -fsSL https://raw.githubusercontent.com/joeyblack4/black4-buzz/stable/install.sh | sh -s -- --check-hardware
+```
+
+`--hardware` makes `~/.ssh/black4_hardware`, adds a `commerce` entry to
+`~/.ssh/config` (your own entries are left alone) and prints a public key
+line. Add it from a computer that already reaches the machine:
+
+```sh
+machine/teammates.sh --host commerce add sam 'ssh-ed25519 AAAA… black4-hardware'
+machine/teammates.sh --host commerce list
+machine/teammates.sh --host commerce remove sam
+```
+
+The label (`sam`) is how the machine records who created each agent. Each line
+it writes forces `agentctl --caller <label>` with `restrict` (no shell, no
+forwarding, no pty), so the key can only send agentctl one JSON request.
+Removing a key leaves that person's agents running; `agentctl list` still
+shows them, with `createdBy`. On the machine, a labelled caller can see every
+agent but change, restart or remove only the agents they created. They can
+sign a harness in while it is signed out, but cannot sign it out. Your own key
+is not limited.
 
 ## Black 4 hardware, inside the Black 4 plugin
 
 `plugins/black4/plugin.js` ends with a fenced Black 4 hardware part: the
 hosted agent type and its form, sign-in and Settings tab. It is offered only
 after `whoami` reports a staff account, and withdrawn when a connected account
-is not staff (a dropped connection changes nothing). It registers in its own
+is not staff or the person signs out (a dropped connection changes nothing). It registers in its own
 child scope, because Buzz has no call to remove an agent type: disposing that
 scope withdraws it. While it is withdrawn, an existing hardware agent shows in
 Buzz as *Harness unavailable* with no Delete, and keeps running on the machine;
@@ -272,11 +240,10 @@ yet.
 | --- | --- |
 | `plugins/<name>/` | Each plugin exactly as Buzz installs it: `manifest.json` and `plugin.js`. Buzz never runs a build, so nothing else belongs in these folders. |
 | `subscriptions/` | Source, build and tests for the two subscription plugins. `npm run build --prefix subscriptions` writes their folders under `plugins/`; the check refuses a stale copy. |
-| `bridge/black4-mcp-bridge` | The process the plugin starts: `mcp-remote` in front of the Black 4 MCP. It owns the browser sign-in and token refresh; the plugin never reads credentials. |
 | `bridge/black4-agent-mcp/` | The Black 4 MCP for agents that run on a Black 4 machine. `buzz-acp` starts it as the agent's MCP server; it signs every request with the agent's own Buzz key and owner attestation (`Authorization: Nostr`), so there is no sign-in. One pinned dependency, `@noble/curves`. |
-| `machine/` | The machine side: `agentctl` (what Black 4 hardware in the plugin calls over SSH), `setup.sh` and `deploy.sh <ssh-host>`, which installs both on a machine, and `teammates.sh`, which adds a teammate's forced-command key. |
-| `install.sh` | The install above: the Black 4 plugin, and with `--hardware` only a teammate's machine key and SSH alias. |
-| `tests/` | Unit tests against the plugin file, with a process double and fictional data. No sign-in or network. |
+| `machine/` | The machine side: `agentctl` (what Black 4 hardware in the plugin calls through the machine's door), `setup.sh` and `deploy.sh <ssh-host>`, which installs it on a machine, and `teammates.sh`, legacy forced-command keys. |
+| `install.sh` | Optional: opens Buzz's install review for the plugin, and with `--hardware` / `--check-hardware` sets up legacy direct SSH access for admins. |
+| `tests/` | Unit tests against the plugin file: fake AuthKit, MCP and door servers behind `host.request` (`tests/fakes.mjs`), and fictional data. No real sign-in or network. |
 | `scripts/check-build-folder.mjs` | Refuses anything in a plugin folder that Buzz would not read. |
 | `canary/` | The Buzz canary: the Buzz API each plugin uses (`contract.json`), checked against Buzz's source by `check.mjs` and by starting the plugins in Buzz's real services (`load.mjs`). |
 | `machine/pins.json`, `scripts/check-machine-pins.mjs` | The buzz-acp harness and ACP adapter versions an agent machine runs together, and the check that `machine/setup.sh` agrees. |
@@ -341,10 +308,12 @@ execution are not built.
 
 ## Lifecycle and authority
 
-Buzz's `host.spawn` and process `write` are asynchronous. Initialization waits
-for both. Reconnect and disable invalidate an older attempt and kill a process
-that finishes spawning after it was superseded. Completed and cancelled calls
-remove their abort listeners; write failures reject immediately.
+Everything goes through Buzz's `host.request` to the three declared origins;
+the plugin starts no process. Reconnect, sign-out and disable invalidate an
+older attempt, so a late answer is dropped. `host.request` has no cancel and
+a 180-second ceiling: an agent's Stop ends its wait at once, and a call longer
+than three minutes times out. A lost MCP session is opened again; a 401
+refreshes the sign-in and asks once more.
 
 When the MCP lists `resolve_channel_business`, the plugin fills in the calling
 agent's exact channel and community. A channel name never selects a business,
@@ -363,9 +332,8 @@ npm run check
 
 That checks the plugin parses, each plugin folder holds only what Buzz reads,
 the subscription plugins match their source, and the tests pass.
-`npm run test:subscriptions` runs the subscription plugins' own tests. To try a change in your own Buzz, copy
-`plugins/black4/plugin.js` over the installed folder plugin, or install from
-your branch, then use Buzz's `plugin_reload` tool and confirm with
+`npm run test:subscriptions` runs the subscription plugins' own tests. To try a change in your own Buzz, install from
+your branch (or install the folder again: a folder install is a copy), then use Buzz's `plugin_reload` tool and confirm with
 `plugin_status` that it is active and its tools are registered. Unit tests do
 not prove the live connection, the embedded sign-in or a relayed mention: check
 those in the app.

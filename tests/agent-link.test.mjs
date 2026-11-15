@@ -1,14 +1,12 @@
-// The one-click agent link in the Black 4 Settings card, and the Black 4
-// hardware agent type it leads to (staff only, isolated): a process double for
-// the bridge, fictional keys and people, no network.
+// The agent link in the Black 4 Settings card (made at sign-in, or with one
+// click), and the Black 4 hardware agent type it leads to (staff only,
+// isolated): fake AuthKit, MCP and door behind host.request, fictional keys
+// and people, no network.
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { fakeAuthKit, fakeMcp, fakeDoor, https, freshPlugin, settle, until } from "./fakes.mjs";
 
-const source = await readFile(new URL("../plugins/black4/plugin.js", import.meta.url), "utf8");
-const { apply, readAnswer, linkLabel } = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
-const tick = () => new Promise((resolve) => setImmediate(resolve));
-async function settle() { for (let i = 0; i < 16; i++) await tick(); }
+const { readAnswer, linkLabel } = await freshPlugin();
 
 const VIEWER = "a".repeat(64);
 const OTHER = "b".repeat(64);
@@ -57,8 +55,15 @@ function server({ listed = ["whoami", "find_tools", "call_tool"], links = [], re
 }
 
 /** `plugin: false` is a host without ctx.plugin; `register` replaces Buzz's
- * agents.register (to make it throw). `types` holds the registered agent types. */
-function harness(t, black4, { viewer = VIEWER, plugin = true, register } = {}) {
+ * agents.register (to make it throw). `types` holds the registered agent types.
+ * By default the person signed in earlier in this Buzz run (no automatic
+ * link); `signedIn: false` starts signed out, to click Sign in. */
+async function harness(t, black4, { viewer = VIEWER, plugin = true, register, signedIn = true, authkit = fakeAuthKit(), agentctl } = {}) {
+  const { apply, signInMemory } = await freshPlugin();
+  const mcp = fakeMcp(authkit, { answer: (message) => black4.answer(message) });
+  const door = fakeDoor(mcp, agentctl);
+  const net = https({ authkit, mcp, door });
+  if (signedIn) await signInMemory.save(authkit.issue().refresh_token);
   let card;
   const types = new Set();
   const tools = new Set();
@@ -79,21 +84,7 @@ function harness(t, black4, { viewer = VIEWER, plugin = true, register } = {}) {
       subscribe: (listener) => { relayListeners.add(listener); return () => relayListeners.delete(listener); },
     },
     effect: (fn) => { const off = fn(); if (off) cleanups.push(off); },
-    host: { spawn: async (_, callbacks) => {
-      let exit;
-      const child = {
-        exited: new Promise((resolve) => { exit = resolve; }),
-        kill: async () => exit(0),
-        write: async (line) => {
-          const message = JSON.parse(line);
-          const answer = message.id == null ? null : black4.answer(message);
-          if (!answer) return;
-          const reply = JSON.stringify({ jsonrpc: "2.0", id: message.id, ...answer }) + "\n";
-          queueMicrotask(() => callbacks.onStdout(reply));
-        },
-      };
-      return child;
-    } },
+    host: { request: net.request },
   };
   if (plugin) {
     // A child scope, as cordis gives one: its registrations end with it.
@@ -115,10 +106,21 @@ function harness(t, black4, { viewer = VIEWER, plugin = true, register } = {}) {
     whole,
     types,
     tools,
+    authkit,
+    mcp,
+    net,
+    door,
     wholeText: () => texts(whole()).join(" "),
     clickAnywhere: async (label) => { const found = find(whole(), label); assert.ok(found, `no "${label}" button`); found.props.onClick(); await settle(); },
     text: () => texts(view()).join(" "),
     click: async (label) => { const found = find(view(), label); assert.ok(found, `no "${label}" button in: ${texts(view()).join(" ")}`); assert.ok(!found.props.disabled, `"${label}" is disabled`); found.props.onClick(); await settle(); },
+    /** Settings → Black 4 → Sign in, until connected and Agent access settled. */
+    signIn: async () => {
+      const found = find(whole(), "Sign in");
+      assert.ok(found, "no Sign in button");
+      found.props.onClick();
+      await until(() => /Status Connected/.test(texts(whole()).join(" ")) && !/Checking…|Linking…/.test(texts(view()).join(" ")), { what: "the sign-in" });
+    },
     switchViewer: async (key) => { relay.viewer = key; for (const listener of relayListeners) listener(); await settle(); },
   };
 }
@@ -145,7 +147,7 @@ const find = (node, label) => {
 
 test("an unlinked key gets one prompt, and one click links it with the viewer's key", async (t) => {
   const black4 = server();
-  const ui = harness(t, black4);
+  const ui = await harness(t, black4);
   await settle();
   assert.match(ui.text(), /need this to use Black 4 as you/);
   assert.deepEqual(black4.calls.map((call) => call.name), ["list_agent_owner_keys"], "checking never links");
@@ -160,7 +162,7 @@ test("an unlinked key gets one prompt, and one click links it with the viewer's 
 
 test("a key that is already linked shows when and how many agents used it", async (t) => {
   const black4 = server({ links: [link(VIEWER, { agents: [{ agentKey: "c".repeat(64) }, { agentKey: "d".repeat(64) }] }), link(OTHER)] });
-  const ui = harness(t, black4);
+  const ui = await harness(t, black4);
   await settle();
   assert.match(ui.text(), /Linked Nov 14, 2026 · 2 agents used it/);
   assert.equal(find(ui.view(), "Link my agents"), null);
@@ -168,7 +170,7 @@ test("a key that is already linked shows when and how many agents used it", asyn
 
 test("tools in the listed set are called directly", async (t) => {
   const black4 = server({ listed: ["whoami", "list_agent_owner_keys", "link_agent_owner_key", "revoke_agent_access"] });
-  const ui = harness(t, black4);
+  const ui = await harness(t, black4);
   await settle();
   await ui.click("Link my agents");
   assert.deepEqual(black4.calls.map((call) => call.via), ["list_agent_owner_keys", "link_agent_owner_key"]);
@@ -176,7 +178,7 @@ test("tools in the listed set are called directly", async (t) => {
 
 test("removing asks once, revokes the link by id and offers the link again", async (t) => {
   const black4 = server({ links: [link(VIEWER)] });
-  const ui = harness(t, black4);
+  const ui = await harness(t, black4);
   await settle();
   await ui.click("Remove…");
   assert.match(ui.text(), /lose Black 4 access/);
@@ -196,7 +198,7 @@ test("the server's own sentence is shown when the key is someone else's or the p
     ["forbidden", "Linking an agent owner key needs Black 4 staff access."],
   ]) {
     const black4 = server({ refuseLink: [code, message] });
-    const ui = harness(t, black4);
+    const ui = await harness(t, black4);
     await settle();
     await ui.click("Link my agents");
     assert.equal(section(ui.view()).children[1].props.role, "alert");
@@ -206,17 +208,17 @@ test("the server's own sentence is shown when the key is someone else's or the p
 });
 
 test("a server without the link tools says so, without a button", async (t) => {
-  const ui = harness(t, server({ listed: ["whoami"] }));
+  const ui = await harness(t, server({ listed: ["whoami"] }));
   await settle();
   assert.match(ui.text(), /can't link agents yet/);
   assert.equal(find(ui.view(), "Try again"), null);
-  const viaGateway = harness(t, server({ listed: ["whoami", "call_tool"], links: [] }));
+  const viaGateway = await harness(t, server({ listed: ["whoami", "call_tool"], links: [] }));
   await settle();
   assert.match(viaGateway.text(), /need this/);
 });
 
 test("offline is a retryable message, not a link state", async (t) => {
-  const ui = harness(t, server({ offline: true }));
+  const ui = await harness(t, server({ offline: true }));
   await settle();
   assert.match(ui.text(), /Couldn't reach Black 4/);
   assert.ok(find(ui.view(), "Try again"));
@@ -224,7 +226,7 @@ test("offline is a retryable message, not a link state", async (t) => {
 
 test("no Buzz identity yet asks for a community, and a new viewer is checked again", async (t) => {
   const black4 = server({ links: [link(OTHER)] });
-  const ui = harness(t, black4, { viewer: null });
+  const ui = await harness(t, black4, { viewer: null });
   await settle();
   assert.match(ui.text(), /Open a community/);
   assert.equal(black4.calls.length, 0);
@@ -236,11 +238,67 @@ test("no Buzz identity yet asks for a community, and a new viewer is checked aga
 
 test("before the Black 4 sign-in finishes there is nothing to click", async (t) => {
   const black4 = server();
-  black4.answer = () => null; // never answers initialize: still signing in
-  const ui = harness(t, black4);
+  const ui = await harness(t, black4, { signedIn: false });
   await settle();
-  assert.match(ui.text(), /Connect Black 4 first/);
+  assert.match(ui.text(), /Sign in to Black 4 first/);
   assert.equal(find(ui.view(), "Link my agents"), null);
+  assert.equal(black4.calls.length, 0);
+});
+
+// ---- linking at sign-in (approved 2026-11-15) ----
+
+test("signing in links this Buzz's key when it is not linked yet", async (t) => {
+  const black4 = server();
+  const ui = await harness(t, black4, { signedIn: false });
+  await settle();
+  await ui.signIn();
+  assert.deepEqual(black4.calls.map((call) => call.name), ["list_agent_owner_keys", "link_agent_owner_key"]);
+  assert.equal(black4.calls[1].args.ownerKey, VIEWER);
+  assert.match(ui.text(), /^Agent access Linked/);
+  assert.match(ui.wholeText(), /Signed in as person@example\.test \(staff\)/);
+});
+
+test("signing in with the key already linked to me changes nothing", async (t) => {
+  const black4 = server({ links: [link(VIEWER)] });
+  const ui = await harness(t, black4, { signedIn: false });
+  await settle();
+  await ui.signIn();
+  assert.deepEqual(black4.calls.map((call) => call.name), ["list_agent_owner_keys"]);
+  assert.match(ui.text(), /^Agent access Linked/);
+});
+
+test("signing in with the key linked to someone else says so plainly, once", async (t) => {
+  const sentence = "This owner key is linked to another person. A key acts for one person at a time.";
+  const black4 = server({ refuseLink: ["owner_key_taken", sentence] });
+  const ui = await harness(t, black4, { signedIn: false });
+  await settle();
+  await ui.signIn();
+  assert.equal(section(ui.view()).children[1].props.role, "alert");
+  assert.match(ui.text(), /Your agents are not linked\. This owner key is linked to another person\./);
+  assert.equal(black4.calls.filter((call) => call.name === "link_agent_owner_key").length, 1, "never retried on its own");
+  await ui.click("Try again");
+  assert.equal(black4.calls.filter((call) => call.name === "link_agent_owner_key").length, 1, "Try again checks; it does not link");
+});
+
+test("after Remove…, a reconnect or a fresh check does not link again", async (t) => {
+  const black4 = server();
+  const ui = await harness(t, black4, { signedIn: false });
+  await settle();
+  await ui.signIn();
+  await ui.click("Remove…");
+  await ui.click("Remove access");
+  await ui.clickAnywhere("Reconnect");
+  await settle();
+  assert.equal(black4.calls.filter((call) => call.name === "link_agent_owner_key").length, 1);
+  assert.ok(find(ui.view(), "Link my agents"));
+});
+
+test("a session restored from earlier in this run never links on its own", async (t) => {
+  const black4 = server();
+  const ui = await harness(t, black4);
+  await settle();
+  assert.deepEqual(black4.calls.map((call) => call.name), ["list_agent_owner_keys"]);
+  assert.ok(find(ui.view(), "Link my agents"));
 });
 
 test("readAnswer returns data and turns a refusal into the server's sentence", () => {
@@ -259,7 +317,7 @@ const hardwareType = (ui) => [...ui.types].find((type) => type.id === "hardware"
 
 test("staff get the Black 4 hardware type once signed in, and linking points to it", async (t) => {
   const black4 = server();
-  const ui = harness(t, black4);
+  const ui = await harness(t, black4);
   assert.equal(ui.types.size, 0, "not before the sign-in answers");
   await settle();
   const type = hardwareType(ui);
@@ -272,7 +330,7 @@ test("staff get the Black 4 hardware type once signed in, and linking points to 
 });
 
 test("the hardware form offers the link in place while it is missing", async (t) => {
-  const ui = harness(t, server());
+  const ui = await harness(t, server());
   await settle();
   const Configuration = hardwareType(ui).CreateConfiguration;
   const form = expand({ type: Configuration, props: { config: {}, onChange() {}, disabled: false, onReadyChange() {} }, children: [] });
@@ -284,20 +342,20 @@ test("the hardware form offers the link in place while it is missing", async (t)
 });
 
 test("whoami's real answer ({ data: { kind } } as text) is read", async (t) => {
-  const ui = harness(t, server({ wire: true }));
+  const ui = await harness(t, server({ wire: true }));
   await settle();
   assert.ok(hardwareType(ui));
   assert.match(ui.wholeText(), /person@example\.test \(staff\)/);
 });
 
 test("a non-staff account never gets the hardware type, and a switch to one takes it back", async (t) => {
-  const member = harness(t, server({ kind: "customer" }));
+  const member = await harness(t, server({ kind: "customer" }));
   await settle();
   assert.equal(hardwareType(member), undefined);
   assert.ok(member.tools.size > 0, "the MCP tools are there all the same");
 
   const black4 = server();
-  const ui = harness(t, black4);
+  const ui = await harness(t, black4);
   await settle();
   assert.ok(hardwareType(ui));
   black4.kind = "customer";
@@ -312,7 +370,7 @@ test("if registering the hardware type throws, MCP tools, Reviews and Agent acce
   for (const plugin of [true, false]) {
     const warn = t.mock.method(console, "warn", () => {});
     const black4 = server();
-    const ui = harness(t, black4, { plugin, register: (type) => { if (type.id === "hardware") throw new Error("Agent types need an id, a title and defaults"); } });
+    const ui = await harness(t, black4, { plugin, register: (type) => { if (type.id === "hardware") throw new Error("Agent types need an id, a title and defaults"); } });
     await settle();
     assert.ok(ui.tools.size > 0, "agent tools registered");
     assert.ok(ui.tools.has("black4_whoami"));
@@ -328,7 +386,7 @@ test("if registering the hardware type throws, MCP tools, Reviews and Agent acce
 
 test("a hardware component that throws while rendering shows one sentence and is reported", async (t) => {
   const warn = t.mock.method(console, "warn", () => {});
-  const ui = harness(t, server());
+  const ui = await harness(t, server());
   await settle();
   const Guarded = hardwareType(ui).CreateConfiguration;
   const boundary = new Guarded({ config: {} });
@@ -337,4 +395,18 @@ test("a hardware component that throws while rendering shows one sentence and is
   assert.match(texts(boundary.render()).join(""), /Black 4 hardware could not show its form\. See Settings → Black 4\./);
   assert.match(ui.wholeText(), /Black 4 hardware is unavailable in this Buzz: useSyncExternalStore is not a function/);
   warn.mock.restore();
+});
+
+test("the hardware type reaches the Commerce Mac through its door, with a pass minted as the signed-in person", async (t) => {
+  const AGENT = "e".repeat(64);
+  const ui = await harness(t, server(), { agentctl: (request) => (request.op === "provision" ? { ok: true, pubkey: AGENT } : request.op === "list" ? { ok: true, agents: [] } : { ok: true }) });
+  await settle();
+  const { remote } = hardwareType(ui);
+  const made = await remote.provision({ name: "Rock", community: "wss://example.test", config: { harness: "claude" }, signal: new AbortController().signal });
+  assert.equal(made.pubkey, AGENT);
+  assert.ok(ui.door.seen.some((request) => request.op === "provision" && request.name === "Rock"));
+  const signed = ui.mcp.signed.find((entry) => entry.op === "provision");
+  assert.equal(signed.machine, "commerce");
+  assert.match(signed.bodySha256, /^[A-Za-z0-9_-]{43}$/);
+  assert.equal(ui.door.refused.length, 0);
 });

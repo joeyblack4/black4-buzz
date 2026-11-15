@@ -79,7 +79,8 @@ test("install.sh --hardware makes a dedicated key, the alias, and prints the one
   const pub = readFileSync(join(ssh, "black4_hardware.pub"), "utf8").trim();
   assert.match(pub, /^ssh-ed25519 \S+ black4-hardware$/);
   assert.ok(first.stdout.includes(pub));
-  assert.match(first.stdout, /path=plugins%2Fhardware/);
+  assert.doesNotMatch(first.stdout, /plugin-install/, "machine access only: the one Black 4 plugin carries hardware");
+  assert.match(first.stdout, /again with --check-hardware/);
   const config = readFileSync(join(ssh, "config"), "utf8");
   assert.ok(config.startsWith("# >>> black4-hardware"), "first, so a later Host * cannot override it");
   assert.ok(config.endsWith("\n\nHost other\n  HostName other.example.test\n"), "existing config is kept as it was");

@@ -14,7 +14,7 @@ or `canary/`.
 ## What is checked
 
 1. **The contract** (`check.mjs`, about 1 second). [`contract.json`](contract.json)
-   lists, for each of the four plugins, every Buzz API it relies on: the
+   lists, for each of the three plugins, every Buzz API it relies on: the
    services it injects, each `ctx.*` call, the fields it reads from what Buzz
    passes it (delivery, create and settings props, hosted-agent inputs), the
    keys of every object it hands to Buzz (agent types, the `remote` provider,
@@ -23,7 +23,7 @@ or `canary/`.
    `check.mjs` reads Buzz's own TypeScript types with the TypeScript compiler
    and Buzz's Rust manifest schema (`crates/plugin-manager`, which refuses
    unknown keys), and fails with one sentence per problem, for example:
-   > Black 4 Hardware (black4.hardware): it gives Buzz ctx.agents.register(…).remote with "provision", "activate", "profile", "instructions", "remove", but Buzz v1.0.4 now also requires "restart", which the plugin does not give.
+   > Black 4 (MCP bridge, Reviews, Agent access, Black 4 hardware) (ai.black4): it gives Buzz ctx.agents.register(…).remote with "provision", "activate", "profile", "instructions", "remove", but Buzz v1.0.4 now also requires "restart", which the plugin does not give.
 
    It also fails when Buzz moves to another version of cordis or React, the
    libraries the plugin envelope is typed with.
@@ -34,6 +34,11 @@ or `canary/`.
    component it registers once. This catches what types cannot show: a plugin
    that throws at start, or a Buzz check that refuses a registration at run
    time (for example "a hosted agent type has no run, models or timeoutMs").
+   Black 4 hardware is offered only to a staff sign-in, which the canary never
+   has, so it also starts that part on its own: it must register in its own
+   scope, render, withdraw and register again; and with Buzz's
+   `agents.register` made to throw, the rest of the Black 4 plugin must still
+   start (settings card, Reviews page and panel) and the failure be reported.
 3. **The machine pairing** (`scripts/check-machine-pins.mjs`, in `npm run check`).
    [`machine/pins.json`](../machine/pins.json) declares the buzz-acp harness
    release and the ACP adapter and SDK versions that must go together. The

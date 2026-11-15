@@ -8,13 +8,21 @@
   },
   "plugins": {
     "ai.black4": {
-      "title": "Black 4 (MCP bridge, Reviews)",
+      "title": "Black 4 (MCP bridge, Reviews, Agent access, Black 4 hardware)",
       "dir": "plugins/black4",
       "inject": ["react", "host", "agents", "settingsCards", "panels", "browser", "conversation", "pages", "relay"],
       "aliases": {},
       "manifest": [
-        "id", "name", "apiVersion", "description", "discovery.category", "discovery.tags", "updates.defaultEnabled",
-        "host.processes[].id", "host.processes[].program"
+        "id",
+        "name",
+        "apiVersion",
+        "description",
+        "discovery.category",
+        "discovery.tags",
+        "updates.defaultEnabled",
+        "host.processes[].id",
+        "host.processes[].program",
+        "host.processes[].args"
       ],
       "uses": [
         "effect",
@@ -71,7 +79,51 @@
         "relay.snapshot=>.session.observe=>.dispose",
         "relay.snapshot=>.session.profiles",
         "relay.snapshot=>.session.profiles.snapshot",
-        "relay.snapshot=>.session.profiles.ensure"
+        "relay.snapshot=>.session.profiles.ensure",
+        "plugin",
+        "plugin(0).name",
+        "plugin(0).inject",
+        "plugin(0).apply",
+        "plugin=>.dispose",
+        "host.spawn=>.end",
+        "agents.register",
+        "agents.register(0).adopt(0).instructions",
+        "agents.register(0).summary(0).pubkey",
+        "agents.register(0).summary(0).config",
+        "agents.register(0).Create(0).config",
+        "agents.register(0).Create(0).onChange",
+        "agents.register(0).Create(0).disabled",
+        "agents.register(0).CreateConfiguration(0).config",
+        "agents.register(0).CreateConfiguration(0).onChange",
+        "agents.register(0).CreateConfiguration(0).onChange(1).suggested",
+        "agents.register(0).CreateConfiguration(0).disabled",
+        "agents.register(0).CreateConfiguration(0).harnessControl",
+        "agents.register(0).CreateConfiguration(0).onReadyChange",
+        "agents.register(0).tabs[].component(0).agent.pubkey",
+        "agents.register(0).tabs[].component(0).settingsHost.typeControl",
+        "agents.register(0).tabs[].component(0).settingsContent",
+        "agents.register(0).remote.provision(0).name",
+        "agents.register(0).remote.provision(0).picture",
+        "agents.register(0).remote.provision(0).community",
+        "agents.register(0).remote.provision(0).config",
+        "agents.register(0).remote.provision(0).signal",
+        "agents.register(0).remote.activate(0).pubkey",
+        "agents.register(0).remote.activate(0).name",
+        "agents.register(0).remote.activate(0).community",
+        "agents.register(0).remote.activate(0).auth",
+        "agents.register(0).remote.activate(0).config",
+        "agents.register(0).remote.activate(0).signal",
+        "agents.register(0).remote.profile(0).pubkey",
+        "agents.register(0).remote.profile(0).name",
+        "agents.register(0).remote.profile(0).picture",
+        "agents.register(0).remote.profile(0).signal",
+        "agents.register(0).remote.instructions.get(0).pubkey",
+        "agents.register(0).remote.instructions.get(0).signal",
+        "agents.register(0).remote.instructions.set(0).pubkey",
+        "agents.register(0).remote.instructions.set(0).instructions",
+        "agents.register(0).remote.instructions.set(0).signal",
+        "agents.register(0).remote.remove(0).pubkey",
+        "agents.register(0).remote.remove(0).signal"
       ],
       "provides": {
         "agents.addTool(0)": ["name", "description", "inputSchema", "call"],
@@ -80,23 +132,53 @@
         "panels.register(0)": ["id", "title", "order", "matches", "component", "channelPlacement", "channelLauncher"],
         "conversation.registerLink(0)": ["id", "title", "order", "matches", "component"],
         "conversation.registerLinkPreview(0)": ["id", "title", "order", "matches", "component"],
-        "settingsCards.register(0)": ["id", "title", "component"]
+        "settingsCards.register(0)": ["id", "title", "component"],
+        "agents.register(0)": [
+          "id",
+          "title",
+          "description",
+          "defaults",
+          "adopt",
+          "summary",
+          "Create",
+          "CreateConfiguration",
+          "tabs",
+          "remote"
+        ],
+        "agents.register(0).tabs[]": ["id", "title", "role", "component"],
+        "agents.register(0).defaults=>": ["config"],
+        "agents.register(0).remote": ["provision", "activate", "profile", "instructions", "remove"],
+        "agents.register(0).remote.instructions": ["get", "set"],
+        "agents.register(0).remote.provision=>": ["pubkey", "picture"]
       },
       "accepts": {
         "pages.register(0).placement": "dock",
         "pages.register(0).layout": "workspace",
         "panels.register(0).channelPlacement": "side",
-        "relay.snapshot=>.status": "ready"
+        "relay.snapshot=>.status": "ready",
+        "agents.register(0).tabs[].role": "settings"
       }
     },
     "black4.claude-subscription": {
       "title": "Claude Sub Plugin",
       "dir": "plugins/claude-subscription",
       "inject": ["agents", "host", "react"],
-      "aliases": { "agents": "agents", "host": "host", "kit": "agents.harness" },
+      "aliases": {
+        "agents": "agents",
+        "host": "host",
+        "kit": "agents.harness"
+      },
       "manifest": [
-        "id", "name", "apiVersion", "description", "updates.defaultEnabled",
-        "host.processes[].id", "host.processes[].program", "host.processes[].args", "host.mcp", "host.files"
+        "id",
+        "name",
+        "apiVersion",
+        "description",
+        "updates.defaultEnabled",
+        "host.processes[].id",
+        "host.processes[].program",
+        "host.processes[].args",
+        "host.mcp",
+        "host.files"
       ],
       "uses": [
         "effect",
@@ -163,8 +245,21 @@
       ],
       "provides": {
         "agents.register(0)": [
-          "id", "title", "description", "Create", "CreateConfiguration", "CreateModel", "createModelReportsReadiness",
-          "CreateThinking", "tabs", "defaults", "models", "summary", "timeoutMs", "protectionUnavailable", "run"
+          "id",
+          "title",
+          "description",
+          "Create",
+          "CreateConfiguration",
+          "CreateModel",
+          "createModelReportsReadiness",
+          "CreateThinking",
+          "tabs",
+          "defaults",
+          "models",
+          "summary",
+          "timeoutMs",
+          "protectionUnavailable",
+          "run"
         ],
         "agents.register(0).tabs[]": ["id", "title", "role", "component"],
         "agents.register(0).defaults=>": ["config"],
@@ -182,78 +277,17 @@
       "sameAs": "black4.claude-subscription",
       "$comment": "Built from the same subscriptions/src/common.js as the Claude plugin; only the provider file differs, and that file uses no further Buzz API.",
       "manifest": [
-        "id", "name", "apiVersion", "description", "updates.defaultEnabled",
-        "host.processes[].id", "host.processes[].program", "host.processes[].args", "host.mcp", "host.files"
+        "id",
+        "name",
+        "apiVersion",
+        "description",
+        "updates.defaultEnabled",
+        "host.processes[].id",
+        "host.processes[].program",
+        "host.processes[].args",
+        "host.mcp",
+        "host.files"
       ]
-    },
-    "black4.hardware": {
-      "title": "Black 4 Hardware",
-      "dir": "plugins/hardware",
-      "inject": ["react", "host", "agents"],
-      "aliases": {},
-      "manifest": [
-        "id", "name", "apiVersion", "description", "discovery.category", "discovery.tags", "updates.defaultEnabled",
-        "host.processes[].id", "host.processes[].program", "host.processes[].args"
-      ],
-      "uses": [
-        "react",
-        "host.spawn",
-        "host.spawn(1).onStdout",
-        "host.spawn(1).onStderr",
-        "host.spawn=>.write",
-        "host.spawn=>.end",
-        "host.spawn=>.kill",
-        "host.spawn=>.exited",
-        "agents.register",
-        "agents.register(0).adopt(0).instructions",
-        "agents.register(0).summary(0).pubkey",
-        "agents.register(0).summary(0).config",
-        "agents.register(0).Create(0).config",
-        "agents.register(0).Create(0).onChange",
-        "agents.register(0).Create(0).disabled",
-        "agents.register(0).CreateConfiguration(0).config",
-        "agents.register(0).CreateConfiguration(0).onChange",
-        "agents.register(0).CreateConfiguration(0).onChange(1).suggested",
-        "agents.register(0).CreateConfiguration(0).disabled",
-        "agents.register(0).CreateConfiguration(0).harnessControl",
-        "agents.register(0).CreateConfiguration(0).onReadyChange",
-        "agents.register(0).tabs[].component(0).agent.pubkey",
-        "agents.register(0).tabs[].component(0).settingsHost.typeControl",
-        "agents.register(0).tabs[].component(0).settingsContent",
-        "agents.register(0).remote.provision(0).name",
-        "agents.register(0).remote.provision(0).picture",
-        "agents.register(0).remote.provision(0).community",
-        "agents.register(0).remote.provision(0).config",
-        "agents.register(0).remote.provision(0).signal",
-        "agents.register(0).remote.activate(0).pubkey",
-        "agents.register(0).remote.activate(0).name",
-        "agents.register(0).remote.activate(0).community",
-        "agents.register(0).remote.activate(0).auth",
-        "agents.register(0).remote.activate(0).config",
-        "agents.register(0).remote.activate(0).signal",
-        "agents.register(0).remote.profile(0).pubkey",
-        "agents.register(0).remote.profile(0).name",
-        "agents.register(0).remote.profile(0).picture",
-        "agents.register(0).remote.profile(0).signal",
-        "agents.register(0).remote.instructions.get(0).pubkey",
-        "agents.register(0).remote.instructions.get(0).signal",
-        "agents.register(0).remote.instructions.set(0).pubkey",
-        "agents.register(0).remote.instructions.set(0).instructions",
-        "agents.register(0).remote.instructions.set(0).signal",
-        "agents.register(0).remote.remove(0).pubkey",
-        "agents.register(0).remote.remove(0).signal"
-      ],
-      "provides": {
-        "agents.register(0)": ["id", "title", "description", "defaults", "adopt", "summary", "Create", "CreateConfiguration", "tabs", "remote"],
-        "agents.register(0).tabs[]": ["id", "title", "role", "component"],
-        "agents.register(0).defaults=>": ["config"],
-        "agents.register(0).remote": ["provision", "activate", "profile", "instructions", "remove"],
-        "agents.register(0).remote.instructions": ["get", "set"],
-        "agents.register(0).remote.provision=>": ["pubkey", "picture"]
-      },
-      "accepts": {
-        "agents.register(0).tabs[].role": "settings"
-      }
     }
   }
 }

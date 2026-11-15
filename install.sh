@@ -4,14 +4,15 @@
 #   install.sh                          the Black 4 plugin: installs the sign-in
 #                                       bridge, then opens Buzz's install review
 #   install.sh --hardware <user>@<address>
-#                                       Black 4 hardware: makes this computer's
-#                                       key for the machines, the `commerce` SSH
-#                                       alias, prints the line to send an admin,
-#                                       and opens the hardware plugin's review
+#                                       machine access for Black 4 hardware:
+#                                       makes this computer's key for the
+#                                       machines and the `commerce` SSH alias,
+#                                       and prints the line to send an admin
 #   install.sh --check-hardware         after the admin added you: asks the
 #                                       machine what it can run
 #   install.sh --bridge-only            repairs the bridge, opens nothing
 #
+# One plugin, Black 4, holds everything; Black 4 hardware is part of it.
 # Buzz shows what each plugin may do, and nothing is installed until you choose
 # Install. Run it again any time: it only repairs what is missing. The admin
 # gives you <user>@<address>; neither is written in this repository.
@@ -23,7 +24,7 @@ BIN="$HOME/.local/bin"
 REPOSITORY="${BLACK4_BUZZ_REPOSITORY:-joeyblack4/black4-buzz}"
 REF="${BLACK4_BUZZ_REF:-stable}"
 SSH_DIR="${BLACK4_SSH_DIR:-$HOME/.ssh}"
-ALIAS=commerce                       # what plugins/hardware/manifest.json runs: ssh ... commerce
+ALIAS=commerce                       # what plugins/black4/manifest.json runs: ssh ... commerce
 KEY="$SSH_DIR/black4_hardware"
 BEGIN="# >>> black4-hardware (install.sh; edits inside are replaced) >>>"
 END="# <<< black4-hardware <<<"
@@ -92,8 +93,7 @@ hardware() {
   echo
   cat "$KEY.pub"
   echo
-  open_review hardware
-  echo "Once the admin says you are added, run: sh install.sh --check-hardware"
+  echo "Once the admin says you are added, run this again with --check-hardware."
 }
 
 check_hardware() {
@@ -145,4 +145,4 @@ fi
 
 open_review black4
 echo "After you choose Install, turn the plugin on and finish the Black 4 sign-in in your browser."
-echo "Then in Settings > Black 4, choose Link my agents."
+echo "Then in Settings > Black 4, choose Link my agents, and create agents in Agents > New agent > Black 4 hardware."

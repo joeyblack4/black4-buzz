@@ -21,10 +21,11 @@ function harness(t, options = {}) {
   let preview;
   const h = (type, props, ...children) => ({ type, props: props ?? {}, children });
   const ctx = {
-    react: { createElement: h, useState: (v) => [v, () => {}], useEffect: () => {} },
+    react: { createElement: h, useState: (v) => [v, () => {}], useEffect: () => {}, useRef: (v) => ({ current: v }), Component: class {} },
     agents: {
       snapshot: () => ({ running: [{ key: "agent", relay: "wss://example.test" }] }),
       addTool: (tool) => { registered.set(tool.name, tool); return () => registered.delete(tool.name); },
+      register: () => {},
     },
     settingsCards: { register: (value) => { card = value; } },
     pages: { register: value => { page = value; } },
@@ -32,7 +33,8 @@ function harness(t, options = {}) {
     conversation: { registerLink: (value) => { link = value; }, registerLinkPreview: (value) => { preview = value; } },
     browser: { available: options.browserAvailable ?? true, View: "browser-view" },
     effect: (fn) => { cleanup = fn(); },
-    host: { spawn: async (_, callbacks) => {
+    host: { spawn: async (id, callbacks) => {
+      if (id !== "bridge") throw new Error("No Black 4 machine in this test."); // Black 4 hardware asks one; only the bridge is doubled
       let exit;
       const child = {
         callbacks, calls: [], killed: false,

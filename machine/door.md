@@ -39,7 +39,7 @@ Each failure gets one status:
 | 413 | The body is over 64 KiB, by `Content-Length` or by the bytes that actually arrive. |
 | 404 | Any other path. |
 | 405 | Any other method. |
-| 503 | The keys can't be fetched, or 16 requests are already running. |
+| 503 | The keys can't be fetched, or 16 requests are already running. The busy check comes before the pass is checked, so a busy machine doesn't spend the pass. |
 | 502 | agentctl crashed or gave no JSON. |
 
 `GET /health` returns `{ok:true, machine}` without a pass.
@@ -73,4 +73,4 @@ $TS funnel --bg 8411     # dev door; the released door is 8410
 $TS funnel status
 ```
 
-To move from the dev door to the released one, run `$TS funnel --bg 8410` and then `$TS funnel --https=443 off` for the old mapping if it remains. Funnel must be enabled once for the tailnet in the Tailscale admin console; the command prints the link when it isn't.
+To move from the dev door to the released one, run `$TS funnel --bg 8410` and then `$TS funnel --https=443 off` for the old mapping if it remains. These two release commands haven't been run yet, because Funnel isn't enabled. Check `funnel status` after each one. Funnel must be enabled once for the tailnet in the Tailscale admin console; the command prints the link when it isn't.

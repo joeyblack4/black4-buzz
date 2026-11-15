@@ -326,3 +326,39 @@ test("end to end: a fixture-signed list runs the real agentctl as the email call
   assert.match(other.json.error, /belongs to annabelle@black4.ai/);
   assert.equal((await d.post(remove, auth(pass(remove)))).json.ok, true);
 });
+
+test("agentctl answers even when a child it leaves running holds its stdout", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "door-child-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const script = path.join(dir, "agentctl");
+  // Like start or login.start: a detached child inherits stdout and outlives agentctl.
+  fs.writeFileSync(script, [
+    "import json, subprocess, sys",
+    "p = subprocess.Popen(['/bin/sleep', '30'], start_new_session=True)",
+    "open(sys.argv[0] + '.pid', 'w').write(str(p.pid))",
+    "print(json.dumps({'ok': True, 'caller': sys.argv[2]}))",
+  ].join("\n"));
+  t.after(() => { try { process.kill(Number(fs.readFileSync(`${script}.pid`, "utf8")), "SIGKILL"); } catch {} });
+  const python = fs.existsSync("/usr/bin/python3") ? "/usr/bin/python3" : "python3";
+  const run = agentctlRunner({ python, agentctl: script, env: { PATH: process.env.PATH }, timeout: 10 });
+  const started = Date.now();
+  assert.equal(await run("annabelle@black4.ai", LIST), JSON.stringify({ ok: true, caller: "annabelle@black4.ai" }));
+  assert.ok(Date.now() - started < 5000, "did not wait for the child");
+  const hung = path.join(dir, "hung");
+  fs.writeFileSync(hung, "import time\ntime.sleep(30)\n");
+  await assert.rejects(agentctlRunner({ python, agentctl: hung, env: { PATH: process.env.PATH }, timeout: 1 })("a@black4.ai", LIST), /took over 1 s/);
+});
+
+test("a busy machine answers 503 without spending the pass", async (t) => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const d = await door(t, { run: async () => { await gate; return JSON.stringify({ ok: true }); } });
+  const running = Array.from({ length: 16 }, () => d.post(LIST, auth(pass(LIST))));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const token = pass(LIST);
+  const busy = await d.post(LIST, auth(token));
+  assert.equal(busy.status, 503);
+  release();
+  await Promise.all(running);
+  assert.equal((await d.post(LIST, auth(token))).status, 200, "the same pass works once there is room");
+});

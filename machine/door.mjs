@@ -196,24 +196,31 @@ export async function checkPass({ authorization, body, machine, keys, replay, no
 export function agentctlRunner({ python = "/usr/bin/python3", agentctl, env = {}, timeout = AGENTCTL_TIMEOUT }) {
   return (caller, body) => new Promise((resolve, reject) => {
     if (!EMAIL.test(caller)) return reject(new Error("caller is not an email"));
+    // The environment cron gives agentctl, so agents started from here match
+    // the ones the supervisor starts.
+    const me = os.userInfo();
     const child = spawn(python, [agentctl, "--caller", caller], {
-      stdio: ["pipe", "pipe", "pipe"],
-      env: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin", HOME: os.homedir(), ...env },
+      stdio: ["pipe", "pipe", "ignore"],
+      env: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin", HOME: os.homedir(), USER: me.username, LOGNAME: me.username, SHELL: me.shell || "/bin/sh", ...env },
     });
-    let out = "";
+    let out = "", settled = false;
+    const settle = (fn, value) => { if (!settled) { settled = true; clearTimeout(timer); fn(value); } };
     child.stdout.setEncoding("utf8").on("data", (s) => { if (out.length < 4 << 20) out += s; });
-    child.stderr.resume();
-    const timer = setTimeout(() => child.kill("SIGKILL"), timeout * 1000);
-    child.on("error", (e) => { clearTimeout(timer); reject(e); });
-    child.on("close", (code, signal) => {
-      clearTimeout(timer);
+    // Settle on its own: a child agentctl leaves running (an agent, a sign-in
+    // helper) may hold stdout open long after agentctl itself has exited.
+    const timer = setTimeout(() => { child.kill("SIGKILL"); settle(reject, new Error(`agentctl took over ${timeout} s`)); }, timeout * 1000);
+    child.on("error", (e) => settle(reject, e));
+    const finish = (code, signal) => {
       const line = out.trim().split("\n").pop() || "";
       try {
         const reply = JSON.parse(line);
-        if (reply && typeof reply === "object") return resolve(JSON.stringify(reply));
+        if (reply && typeof reply === "object") return settle(resolve, JSON.stringify(reply));
       } catch {}
-      reject(new Error(signal ? `agentctl was stopped (${signal})` : `agentctl gave no JSON reply (exit ${code})`));
-    });
+      settle(reject, new Error(signal ? `agentctl was stopped (${signal})` : `agentctl gave no JSON reply (exit ${code})`));
+    };
+    child.on("close", finish);
+    // After exit, give stdout a moment to drain, then answer with what came.
+    child.on("exit", (code, signal) => setTimeout(() => { child.stdout.destroy(); finish(code, signal); }, 200));
     child.stdin.on("error", () => {});
     child.stdin.end(body);
   });
@@ -245,6 +252,12 @@ export function createDoor({ machine, keys, replay, run, now = () => Date.now() 
       req.resume();
       return send(res, 413, { error: `the body is over ${MAX_BODY} bytes` });
     }
+    // Before the pass is checked, so a busy machine does not spend its jti.
+    if (inFlight >= MAX_IN_FLIGHT) { req.resume(); return send(res, 503, { error: "this machine is busy; try again" }); }
+    inFlight++;
+    try { await admitted(req, res); } finally { inFlight--; }
+  };
+  const admitted = async (req, res) => {
     const body = await new Promise((resolve) => {
       const chunks = [];
       let size = 0;
@@ -270,8 +283,6 @@ export function createDoor({ machine, keys, replay, run, now = () => Date.now() 
       log(`refused ${e.status}: ${e.message}`);
       return send(res, e.status, { error: e.message });
     }
-    if (inFlight >= MAX_IN_FLIGHT) return send(res, 503, { error: "this machine is busy; try again" });
-    inFlight++;
     const started = Date.now();
     try {
       const reply = await run(claims.email, body);
@@ -280,7 +291,7 @@ export function createDoor({ machine, keys, replay, run, now = () => Date.now() 
     } catch (e) {
       log(`agentctl ${claims.op} for ${claims.email} failed: ${e.message}`);
       send(res, 502, { error: `agentctl failed: ${e.message}` });
-    } finally { inFlight--; }
+    }
   };
   return Object.assign(handler, { inFlight: () => inFlight });
 }

@@ -25,7 +25,13 @@ unrestricted key, or cron) may do everything; agents made before labels
 existed are open to every caller.
 
 Secrets: agent keys live in agents/<pubkey>/key, the Claude subscription token
-in secrets/claude. Neither is ever printed, logged or put in a reply.
+in secrets/claude, the Codex and Grok subscription sign-ins in
+homes/codex/auth.json and homes/grok/auth.json (each CLI's own file, in a
+private home passed as CODEX_HOME / GROK_HOME). None is ever printed, logged or
+put in a reply.
+
+Root: ~/workforce, or BLACK4_WORKFORCE_ROOT for a second runner beside it (its
+own agents, sign-ins and cron lines).
 
 Black 4 MCP: when setup.sh has installed the connector (mcp/black4), every agent
 gets it as buzz-acp's MCP server. It signs each request with the agent's own key
@@ -38,19 +44,28 @@ HEX64 = re.compile(r"^[0-9a-f]{64}$")
 CALLER_LABEL = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
 CALLER = None  # set from --caller by main(); None is the admin
 LOGIN_ID = re.compile(r"^[0-9a-f]{16}$")
-CRON_MARK = "# black4-workforce"
-LOGIN_TTL = 15 * 60          # a sign-in left open longer than this is dropped
+LOGIN_TTL = int(os.environ.get("AGENTCTL_LOGIN_TTL") or 15 * 60)  # a sign-in left open longer is dropped
+FINISH_WAIT = float(os.environ.get("AGENTCTL_FINISH_WAIT") or 85)  # login.finish waits this long for a device approval
 CHECK_OK_TTL = 10 * 60       # how long a verified Claude credential is trusted
 CHECK_FAIL_TTL = 60          # how long a failed check is remembered
 SUPERVISE_EVERY = 5          # seconds between supervisor passes
 START_GRACE = 2.0            # an agent must stay up this long for start to succeed
 
 
-def set_root(home):
-    """Point every path at <home>/workforce (tests use a temporary home)."""
-    global HOME, ROOT, AGENTS, BIN, LOGINS, SECRETS, RUN, VENDOR, BLACK4_MCP
+def set_root(home, root=None):
+    """Point every path at the runner's root: <home>/workforce, or `root`
+    (BLACK4_WORKFORCE_ROOT) for a second runner beside it, e.g. a dev copy.
+    Tests use a temporary home."""
+    global HOME, ROOT, AGENTS, BIN, LOGINS, SECRETS, RUN, VENDOR, BLACK4_MCP, HOMES, CRON_MARK
     HOME = Path(home)
-    ROOT = HOME / "workforce"
+    ROOT = (HOME / Path(root).expanduser()) if root else HOME / "workforce"
+    # Each root has its own cron lines. The default root keeps the released
+    # mark; another root's mark must not contain it (released runners drop
+    # every line that does).
+    CRON_MARK = "# black4-workforce" if ROOT == HOME / "workforce" else f"# black4-runner:{ROOT}"
+    # Private config homes for the CLIs that keep a sign-in on disk (Codex,
+    # Grok); never the machine user's own ~/.codex or ~/.grok.
+    HOMES = ROOT / "homes"
     AGENTS, BIN, LOGINS = ROOT / "agents", ROOT / "bin", ROOT / "logins"
     SECRETS, RUN, VENDOR = ROOT / "secrets", ROOT / "run", ROOT / "vendor"
     # buzz-acp names the MCP server after this file's stem, so the agent's
@@ -58,7 +73,7 @@ def set_root(home):
     BLACK4_MCP = ROOT / "mcp" / "black4"
 
 
-set_root(os.environ.get("AGENTCTL_HOME") or Path.home())
+set_root(os.environ.get("AGENTCTL_HOME") or Path.home(), os.environ.get("BLACK4_WORKFORCE_ROOT") or None)
 SELF = Path(os.path.abspath(__file__))
 PYTHON = "/usr/bin/python3" if os.path.exists("/usr/bin/python3") else sys.executable
 
@@ -208,9 +223,10 @@ HARNESS = {  # the model CLI each choice runs, as buzz-acp's agent command
     "claude": ("claude-agent-acp", ""),
     "codex": ("codex-acp", ""),
     "goose": ("goose", "acp"),
-    "grok": ("grok", "agent,stdio"),
+    # Buzz 0.5.30's own "Grok Build" preset runs exactly this.
+    "grok": ("grok", "agent,--always-approve,stdio"),
 }
-LABEL = {"claude": "Claude Code", "codex": "Codex", "grok": "Grok", "goose": "Goose"}
+LABEL = {"claude": "Claude Code", "codex": "Codex", "grok": "Grok Build", "goose": "Goose"}
 
 
 def agent_path():
@@ -324,13 +340,204 @@ def forget_claude_token():
     (RUN / "claude-check.json").unlink(missing_ok=True)
 
 
+# ---------------------------------------------------------------- Codex and Grok credentials
+# Both CLIs keep a subscription sign-in (ChatGPT for Codex, SuperGrok/grok.com
+# for Grok) as an auth.json in their config home, refresh it themselves, and
+# sign in over SSH with a device code: the CLI prints a link and a short code,
+# the person approves the code in their own browser, and the CLI finishes by
+# itself. Each gets a private home under the runner's root (homes/<harness>,
+# mode 700) passed as CODEX_HOME / GROK_HOME, never the machine user's own
+# ~/.codex or ~/.grok, and set to keep the sign-in in that file (not the macOS
+# keychain) and, for Grok, never to update itself. Agents get that home and
+# nothing else: no API key is ever set, so the subscription is what pays.
+
+SIGN_IN = {"claude": "code", "codex": "device", "grok": "device"}
+NO_SIGN_IN = {"goose": "Goose takes its model settings from the machine itself; Buzz cannot sign it in."}
+DEVICE = {
+    "codex": {"cli": "codex", "home_env": "CODEX_HOME",
+              # keyring would put the sign-in in the login keychain, which a
+              # machine nobody is logged in to cannot unlock.
+              "config": 'cli_auth_credentials_store = "file"\n',
+              "login": ["login", "--device-auth"], "service": "ChatGPT"},
+    "grok": {"cli": "grok", "home_env": "GROK_HOME",
+             "config": "[cli]\nauto_update = false\n",
+             "login": ["login", "--device-auth"], "service": "Grok"},
+}
+CRED_FILE = "auth.json"
+DEVICE_URL_RE = re.compile(r"https://[^\s\"'<>]*device[^\s\"'<>]*")
+USER_CODE_RE = re.compile(r"\b[A-Z0-9]{4}-[A-Z0-9]{4,5}\b")
+
+
+def cli_home(harness, base=None):
+    """A private config home for this harness, with its settings file written."""
+    home = private_dir(base or HOMES / harness)
+    private_dir(home.parent)
+    write_private(home / "config.toml", DEVICE[harness]["config"])
+    return home
+
+
+def device_cli(harness):
+    return shutil.which(DEVICE[harness]["cli"], path=agent_path())
+
+
+def device_env(harness, home=None):
+    env = base_env()
+    env[DEVICE[harness]["home_env"]] = str(home or cli_home(harness))
+    env["NO_BROWSER"] = "1"         # codex-acp: no browser sign-in offer
+    env["BROWSER"] = "/usr/bin/true"  # never try to open one
+    return env
+
+
+def device_cred(harness):
+    """The stored sign-in file's fingerprint (never its content), or None."""
+    try: data = (HOMES / harness / CRED_FILE).read_bytes()
+    except FileNotFoundError: return None
+    return hashlib.sha256(data).hexdigest()[:16] if data.strip() else None
+
+
+def run_codex_check():
+    """Ask Codex's own app-server (what codex-acp runs) for the account, then
+    for its rate limits, which OpenAI answers only for a working sign-in. No
+    model is called. Returns (True/False/None, account)."""
+    cli = device_cli("codex")
+    if not cli: return None, None
+    try:
+        proc = subprocess.Popen([cli, "app-server"], cwd=private_dir(RUN / "check"), env=device_env("codex"),
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    except OSError:
+        return None, None
+    import select
+    deadline = time.time() + 45
+
+    def call(i, method, params):
+        proc.stdin.write(json.dumps({"id": i, "method": method, "params": params}) + "\n"); proc.stdin.flush()
+        while time.time() < deadline:
+            r, _, _ = select.select([proc.stdout], [], [], 0.5)
+            if not r: continue
+            line = proc.stdout.readline()
+            if not line: return None
+            try: msg = json.loads(line)
+            except ValueError: continue
+            if msg.get("id") == i: return msg
+        return None
+    try:
+        if not call(0, "initialize", {"clientInfo": {"name": "agentctl", "version": "1"}}): return None, None
+        proc.stdin.write(json.dumps({"method": "initialized"}) + "\n"); proc.stdin.flush()
+        read = call(1, "account/read", {"refreshToken": False})
+        if not read or "result" not in read: return None, None
+        account = (read["result"] or {}).get("account")
+        if not account: return False, None
+        if account.get("type") != "chatgpt": return False, None  # an API key is not a subscription
+        email = account.get("email") or None
+        limits = call(2, "account/rateLimits/read", None)
+        if not limits: return None, email
+        if "result" in limits: return True, email
+        text = str((limits.get("error") or {}).get("message") or "")
+        if re.search(r"authenticat|log ?in|401|403|expired|revoked|token", text, re.I): return False, email
+        return None, email
+    except (OSError, ValueError):
+        return None, None
+    finally:
+        try: proc.kill(); proc.wait(5)
+        except Exception: pass
+        for f in (proc.stdin, proc.stdout):
+            try: f.close()
+            except Exception: pass
+
+
+def run_grok_check():
+    """One tiny Grok reply on the stored sign-in. Returns (True/False/None, None):
+    Grok does not report the account."""
+    cli = device_cli("grok")
+    if not cli: return None, None
+    try:
+        done = subprocess.run([cli, "-p", "Reply with the single word OK.", "--max-turns", "1", "--output-format", "json"],
+                              cwd=private_dir(RUN / "check"), env=device_env("grok"), stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, timeout=90)
+    except (subprocess.TimeoutExpired, OSError):
+        return None, None
+    return judge_grok_check(done.returncode, done.stdout, done.stderr), None
+
+
+def judge_grok_check(code, stdout, stderr):
+    result = None
+    for line in reversed(stdout.strip().splitlines()):
+        try: result = json.loads(line); break
+        except ValueError: continue
+    text = (json.dumps(result) if result is not None else "") + " " + (stderr or "")
+    if code == 0 and isinstance(result, dict) and result.get("type") != "error" and not result.get("is_error"):
+        return True
+    if re.search(r"Not signed in|not authenticated|sign in|log ?in|unauthori[sz]ed|401|403|expired|revoked", text, re.I):
+        return False
+    return None
+
+
+DEVICE_CHECK = {"codex": run_codex_check, "grok": run_grok_check}
+
+
+def device_signed_in(harness, force=False):
+    """(signedIn, account) for a Codex or Grok sign-in, verified for real and
+    cached like Claude's (10 minutes when good, 1 minute when rejected)."""
+    cred = device_cred(harness)
+    if not cred: return False, None
+    cache_file = RUN / f"{harness}-check.json"
+    cache = read_json(cache_file, {})
+    now = time.time()
+    if not force and cache.get("hash") == cred:
+        age = now - cache.get("at", 0)
+        if cache.get("ok") is True and age < CHECK_OK_TTL: return True, cache.get("account")
+        if cache.get("ok") is False and age < CHECK_FAIL_TTL: return False, cache.get("account")
+    ok, account = DEVICE_CHECK[harness]()
+    account = account or cache.get("account")
+    if ok is None:  # offline or CLI trouble: keep the last answer for this sign-in
+        return (cache.get("hash") == cred and cache.get("ok") is True), account
+    write_private(private_dir(RUN) / f"{harness}-check.json",
+                  json.dumps({"hash": device_cred(harness) or cred, "ok": ok, "at": now, "account": account}))
+    return ok, account
+
+
+def device_known_bad(harness):
+    """Cheap (never runs the CLI): no sign-in, or this one was recently rejected."""
+    cred = device_cred(harness)
+    if not cred: return True
+    cache = read_json(RUN / f"{harness}-check.json", {})
+    return cache.get("hash") == cred and cache.get("ok") is False
+
+
+def known_bad(harness):
+    if harness == "claude": return claude_known_bad()
+    if harness in DEVICE: return device_known_bad(harness)
+    return False
+
+
+def forget_device(harness):
+    (HOMES / harness / CRED_FILE).unlink(missing_ok=True)
+    (RUN / f"{harness}-check.json").unlink(missing_ok=True)
+
+
 def machine_status():
+    """What this machine can run. Each row: installed, signedIn (true, false, or
+    null when this machine cannot tell), account, and signIn: how Buzz signs it
+    in ("code": open a link, paste the code back; "device": open a link, approve
+    the code shown, nothing to paste) or null with `note`, one sentence why not.
+    The sign-in checks run side by side so the reply stays quick."""
+    import threading
     rows = []
     for hid in ("claude", "codex", "grok", "goose"):
-        row = {"id": hid, "label": LABEL[hid], "installed": installed(hid), "signedIn": None, "account": None}
-        if hid == "claude":
-            row["signedIn"], row["account"] = claude_signed_in()
+        row = {"id": hid, "label": LABEL[hid], "installed": installed(hid), "signedIn": None,
+               "account": None, "signIn": SIGN_IN.get(hid)}
+        if not row["signIn"]: row["note"] = NO_SIGN_IN[hid]
         rows.append(row)
+
+    def check(row):
+        try:
+            if row["id"] == "claude": row["signedIn"], row["account"] = claude_signed_in()
+            elif row["id"] in DEVICE: row["signedIn"], row["account"] = device_signed_in(row["id"])
+        except Exception as e:  # one harness's trouble must not hide the others
+            log_line("status", f"{row['id']} check failed: {type(e).__name__}")
+    threads = [threading.Thread(target=check, args=(row,)) for row in rows if row["installed"]]
+    for t in threads: t.start()
+    for t in threads: t.join(100)
     return {"ok": True, "machine": machine_name(), "harnesses": rows}
 
 
@@ -359,6 +566,10 @@ def _start(d):
         if not token or claude_known_bad():
             fail("Claude Code is not signed in on this machine. Sign in to Claude from Buzz first.")
         env["CLAUDE_CODE_OAUTH_TOKEN"] = token
+    elif harness in DEVICE:
+        if device_known_bad(harness):
+            fail(f"{LABEL[harness]} is not signed in on this machine. Sign in to {LABEL[harness]} from Buzz first.")
+        env = device_env(harness)
     stop(d)
     command, args = HARNESS[harness]
     env.update({
@@ -417,8 +628,14 @@ def stop_harness_agents(harness):
 # and an every-minute line both run `agentctl supervise`, which takes a lock and
 # then loops, restarting any activated agent that is not running.
 
+def root_env():
+    """The environment a second runner's own processes need to find their root."""
+    return {} if ROOT == HOME / "workforce" else {"BLACK4_WORKFORCE_ROOT": str(ROOT)}
+
+
 def cron_lines():
-    cmd = f"{PYTHON} {BIN / 'agentctl'} supervise >/dev/null 2>&1"
+    prefix = "".join(f"{k}={v} " for k, v in root_env().items())
+    cmd = f"{prefix}{PYTHON} {BIN / 'agentctl'} supervise >/dev/null 2>&1"
     return [f"@reboot {cmd} {CRON_MARK}", f"* * * * * {cmd} {CRON_MARK}"]
 
 
@@ -435,7 +652,7 @@ def write_crontab(text):
 
 
 def merged_crontab(current, install):
-    keep = [line for line in current.splitlines() if CRON_MARK not in line]
+    keep = [line for line in current.splitlines() if not line.rstrip().endswith(CRON_MARK)]
     if install: keep += cron_lines()
     return "\n".join(keep) + ("\n" if keep else "")
 
@@ -497,7 +714,7 @@ def supervise_pass(backoff, now=None):
         next_try, delay = backoff.get(d.name, (0, 0))
         if now < next_try: continue
         harness = s.get("harness") or "claude"
-        if harness == "claude" and claude_known_bad(): continue  # waits for a sign-in
+        if known_bad(harness): continue  # waits for a sign-in
         try:
             pid = start(d)
             log_line("supervisor", f"started {d.name[:8]} pid {pid}")
@@ -561,37 +778,54 @@ def cleanup_logins(now=None):
             kill_login(d)
 
 
-def login_start(harness):
-    if harness != "claude":
-        fail("Signing in from Buzz is only available for Claude Code on this machine.")
-    if not claude_cli():
+def login_start(harness, flows=None):
+    """Opens one sign-in. Claude: a link whose page shows a code to paste back
+    (needsCode true). Codex and Grok: a link and a short userCode the person
+    approves there (needsCode false); the plugin then calls login.finish with
+    no code, which waits for that approval. A plugin says it can show a device
+    sign-in by sending flows: ["device"]; an older one cannot show the code,
+    so it gets a sentence instead of a sign-in it could not finish."""
+    if harness not in SIGN_IN:
+        if harness in NO_SIGN_IN: fail(NO_SIGN_IN[harness])
+        fail("Buzz cannot sign in that harness on this machine.")
+    label = LABEL[harness]
+    if harness == "claude" and not claude_cli():
         fail("Claude Code is not installed on this machine.")
+    if harness in DEVICE:
+        if not device_cli(harness): fail(f"{label} is not installed on this machine.")
+        if "device" not in (flows if isinstance(flows, list) else []):
+            fail(f"Update the Black 4 plugin in Buzz to sign in to {label} from it.")
     cleanup_logins()
     if LOGINS.exists():  # one sign-in at a time: a new one replaces the old
         for old in LOGINS.iterdir():
             if old.is_dir(): kill_login(old)
     login_id = secrets.token_hex(8)
     d = private_dir(private_dir(LOGINS) / login_id)
-    write_private(d / "helper.json", json.dumps({"startedAt": time.time(), "harness": harness}))
-    subprocess.Popen([PYTHON, str(SELF), "login-helper", login_id], env=base_env(), cwd=str(d),
+    write_private(d / "helper.json", json.dumps({"startedAt": time.time(), "harness": harness, "ttl": LOGIN_TTL}))
+    subprocess.Popen([PYTHON, str(SELF), "login-helper", login_id], env={**base_env(), **root_env()}, cwd=str(d),
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      start_new_session=True)
     deadline = time.time() + 40
     while time.time() < deadline:
         state = read_json(d / "state.json")
         if state and state.get("url"):
-            return {"ok": True, "loginId": login_id, "url": state["url"], "needsCode": True}
+            if harness == "claude":
+                return {"ok": True, "loginId": login_id, "url": state["url"], "needsCode": True}
+            return {"ok": True, "loginId": login_id, "url": state["url"], "needsCode": False,
+                    "userCode": state.get("userCode"), "expiresAt": int(state.get("expiresAt") or 0) or None}
         if state and state.get("error"):
             kill_login(d); fail(state["error"])
         time.sleep(0.2)
     kill_login(d)
-    fail("Claude Code did not give a sign-in link in time. Try again.")
+    fail(f"{label} did not give a sign-in link in time. Try again.")
 
 
 def login_finish(login_id, code):
     d = login_dir(login_id)
     if not d.exists():
         fail("This sign-in has expired or was cancelled. Start the sign-in again.")
+    harness = read_json(d / "helper.json", {}).get("harness") or "claude"
+    if harness in DEVICE: return device_finish(d, harness)
     code = (code or "").strip() if isinstance(code, str) else ""
     if not CODE_RE.match(code):
         fail("That does not look like a sign-in code. Copy the whole code from the Anthropic page and paste it again.")
@@ -613,12 +847,128 @@ def login_finish(login_id, code):
     fail("Claude Code did not answer after the code was entered. Start the sign-in again.")
 
 
+def device_finish(d, harness):
+    """Waits up to FINISH_WAIT seconds for the person to approve the code. Not
+    yet: {"ok": true, "signedIn": false, "pending": true}, and the sign-in stays
+    open for the next call. Approved: the agents on this harness restart."""
+    deadline = time.time() + FINISH_WAIT
+    while time.time() < deadline:
+        result = read_json(d / "result.json")
+        if result is not None:
+            kill_login(d)
+            if not result.get("ok"): fail(result.get("error") or "The sign-in did not finish.")
+            restart_harness_agents(harness)
+            return {"ok": True, "signedIn": True, "account": result.get("account")}
+        if not d.exists():
+            fail("This sign-in has expired or was cancelled. Start the sign-in again.")
+        time.sleep(0.3)
+    return {"ok": True, "signedIn": False, "pending": True}
+
+
+def run_in_pty(argv, env, cwd):
+    """Starts argv on a wide pty; returns (pid, fd)."""
+    import pty, struct, termios
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.chdir(str(cwd))
+        os.execve(argv[0], argv, env)
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 1000, 0, 0))
+    return pid, fd
+
+
+def device_helper(login_id, d, info):
+    """Runs detached. Drives `<cli> login --device-auth` in a pty, in a fresh
+    home inside the login folder, so a sign-in that is abandoned or refused
+    never touches the one agents use. Once the CLI exits signed in, its
+    auth.json is moved into homes/<harness> and checked for real."""
+    import select
+    harness = info["harness"]
+    label = LABEL[harness]
+    started = info.get("startedAt") or time.time()
+    ttl = info.get("ttl") or LOGIN_TTL
+    home = cli_home(harness, d / "home")
+    pid, fd = run_in_pty([device_cli(harness), *DEVICE[harness]["login"]], device_env(harness, home), d)
+    info.update({"pid": os.getpid(), "child": pid})
+    write_private(d / "helper.json", json.dumps(info))
+    raw = b""  # a device sign-in prints no secret, but keep it in memory only
+
+    def pump(seconds):
+        nonlocal raw
+        end = time.time() + seconds
+        while time.time() < end:
+            r, _, _ = select.select([fd], [], [], 0.2)
+            if r:
+                try: chunk = os.read(fd, 65536)
+                except OSError: return False
+                if not chunk: return False
+                raw += chunk
+        return True
+
+    def exit_code():
+        try:
+            done, status = os.waitpid(pid, os.WNOHANG)
+            return os.waitstatus_to_exitcode(status) if done else None
+        except ChildProcessError:
+            return -1
+
+    def finish(result):
+        if d.exists(): write_private(d / "result.json", json.dumps(result))
+        try: os.kill(pid, signal.SIGKILL)
+        except OSError: pass
+
+    try:
+        url = code = None
+        while not (url and code):
+            alive = pump(0.5)
+            text = screen_text(raw)
+            url = url or (DEVICE_URL_RE.search(text) or [None])[0]
+            code = code or (USER_CODE_RE.search(text) or [None])[0]
+            if url and code: break
+            if not alive or exit_code() is not None or time.time() - started > 45:
+                write_private(d / "state.json", json.dumps({"error": f"{label} did not give a sign-in code. Try again."}))
+                return finish({"ok": False, "error": "no code"})
+        write_private(d / "state.json", json.dumps({"url": url, "userCode": code, "expiresAt": started + ttl}))
+        while True:
+            alive = pump(0.5)
+            status = exit_code()
+            if status is None and alive:
+                if not d.exists(): return finish({"ok": False, "error": "cancelled"})
+                if time.time() - started > ttl:
+                    return finish({"ok": False, "error": "This sign-in code expired. Start the sign-in again."})
+                continue
+            if status is None:  # pty closed: give the CLI a moment to exit
+                for _ in range(20):
+                    status = exit_code()
+                    if status is not None: break
+                    time.sleep(0.25)
+            text = screen_text(raw)
+            new = home / CRED_FILE
+            if status == 0 and new.exists() and new.read_bytes().strip():
+                write_private(private_dir(cli_home(harness)) / CRED_FILE, new.read_text())
+                new.unlink(missing_ok=True)
+                ok, account = device_signed_in(harness, force=True)
+                if ok is False:
+                    return finish({"ok": False, "error": f"{label} signed in, but {DEVICE[harness]['service']} refused the sign-in. Check the subscription and start the sign-in again."})
+                return finish({"ok": True, "account": account})
+            if re.search(r"expired|timed? ?out", text, re.I):
+                return finish({"ok": False, "error": "This sign-in code expired. Start the sign-in again."})
+            if re.search(r"denied|declined|rejected|cancel", text, re.I):
+                return finish({"ok": False, "error": "The sign-in was not approved. Start the sign-in again."})
+            return finish({"ok": False, "error": f"{label} did not finish the sign-in. Start the sign-in again."})
+    finally:
+        raw = b""
+        try: os.close(fd)
+        except OSError: pass
+        shutil.rmtree(d / "home", ignore_errors=True)
+
+
 def login_helper(login_id):
     """Runs detached. Drives `claude setup-token` in a pty for one sign-in."""
     import pty, select, struct, termios
     d = LOGINS / login_id
     if not LOGIN_ID.match(login_id) or not d.is_dir(): return
     info = read_json(d / "helper.json", {})
+    if info.get("harness") in DEVICE: return device_helper(login_id, d, info)
     started = info.get("startedAt") or time.time()
     env = base_env()
     env.update({"TERM": "xterm-256color", "BROWSER": "/usr/bin/true", "COLUMNS": "1000", "LINES": "50"})
@@ -704,10 +1054,10 @@ def login_helper(login_id):
 
 
 def logout(harness):
-    if harness != "claude":
-        fail("Signing out from Buzz is only available for Claude Code on this machine.")
-    forget_claude_token()
-    stop_harness_agents("claude")
+    if harness == "claude": forget_claude_token()
+    elif harness in DEVICE: forget_device(harness)
+    else: fail("Buzz cannot sign that harness out on this machine.")
+    stop_harness_agents(harness)
     return {"ok": True}
 
 
@@ -757,7 +1107,7 @@ def handle(req):
     private_dir(AGENTS)
 
     if op == "machine.status": return machine_status()
-    if op == "login.start": return login_start(req.get("harness"))
+    if op == "login.start": return login_start(req.get("harness"), req.get("flows"))
     if op == "login.finish": return login_finish(req.get("loginId"), req.get("code"))
     if op == "login.cancel":
         d = login_dir(req.get("loginId"))

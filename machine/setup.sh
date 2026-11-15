@@ -22,8 +22,20 @@ CLAUDE_ACP_VERSION=0.94.0   # @agentclientprotocol/claude-agent-acp (SDK 2.0.0)
 CLAUDE_ACP_SDK=2.0.0
 CODEX_ACP_VERSION=2.2.2     # @agentclientprotocol/codex-acp (SDK ^1.5.0)
 CODEX_ACP_SDK=1.9.0
+# codex-acp runs the Codex CLI's app-server; it depends on @openai/codex
+# ^0.160.1, held here to the exact build it was tested with. agentctl runs the
+# same CLI for sign-in (codex login --device-auth) and the sign-in check.
+CODEX_CLI_VERSION=0.160.1   # @openai/codex
+# Grok Build is xAI's own CLI and ACP agent (grok agent stdio). xAI publishes
+# no checksums, so this is the SHA-256 of the gzip from x.ai/cli that was
+# checked against buzz-acp (Apple-signed, team 5Y6N3AJ54S).
+GROK_VERSION=1.0.70
+GROK_SHA256=9c83a2b8b28064574b65e1fa50e8342dd5d797d81c5c724c1d60bb0ad35e3199  # grok-1.0.70-macos-aarch64.gz
 
-ROOT="$HOME/workforce"
+# BLACK4_WORKFORCE_ROOT puts a second runner beside the real one (for example
+# $HOME/workforce-dev), with its own agents, sign-ins and cron lines.
+ROOT="${BLACK4_WORKFORCE_ROOT:-$HOME/workforce}"
+case "$ROOT" in /*) ;; *) ROOT="$HOME/$ROOT" ;; esac
 # Files shipped with this script by deploy.sh (absent when piped to sh -s).
 case "$0" in
   */setup.sh) SRC=$(cd "$(dirname "$0")/.." && pwd) ;;
@@ -35,8 +47,8 @@ NODE_DIR="$VENDOR/node-v$NODE_VERSION-darwin-arm64"
 ACP_DIR="$VENDOR/acp"
 
 [ "$(uname -s)-$(uname -m)" = "Darwin-arm64" ] || { echo "this script is for Apple Silicon Macs" >&2; exit 1; }
-mkdir -p "$VENDOR" "$BIN" "$ROOT/logins" "$ROOT/secrets" "$ROOT/run"
-chmod 700 "$ROOT/logins" "$ROOT/secrets" "$ROOT/run"
+mkdir -p "$VENDOR" "$BIN" "$ROOT/logins" "$ROOT/secrets" "$ROOT/run" "$ROOT/homes"
+chmod 700 "$ROOT/logins" "$ROOT/secrets" "$ROOT/run" "$ROOT/homes"
 
 if [ ! -x "$NODE_DIR/bin/node" ]; then
   tmp=$(mktemp -d "$VENDOR/.node.XXXXXX")
@@ -54,7 +66,7 @@ fi
 for tool in node npm npx; do ln -sfn "$NODE_DIR/bin/$tool" "$BIN/$tool"; done
 export PATH="$NODE_DIR/bin:/usr/bin:/bin"
 
-want="@agentclientprotocol/claude-agent-acp@$CLAUDE_ACP_VERSION (sdk $CLAUDE_ACP_SDK) @agentclientprotocol/codex-acp@$CODEX_ACP_VERSION (sdk $CODEX_ACP_SDK)"
+want="@agentclientprotocol/claude-agent-acp@$CLAUDE_ACP_VERSION (sdk $CLAUDE_ACP_SDK) @agentclientprotocol/codex-acp@$CODEX_ACP_VERSION (sdk $CODEX_ACP_SDK, codex $CODEX_CLI_VERSION)"
 have=$(cat "$ACP_DIR/.installed" 2>/dev/null || true)
 if [ "$have" != "$want" ]; then
   echo "installing $want"
@@ -70,7 +82,7 @@ if [ "$have" != "$want" ]; then
   },
   "overrides": {
     "@agentclientprotocol/claude-agent-acp": { "@agentclientprotocol/sdk": "$CLAUDE_ACP_SDK" },
-    "@agentclientprotocol/codex-acp": { "@agentclientprotocol/sdk": "$CODEX_ACP_SDK" }
+    "@agentclientprotocol/codex-acp": { "@agentclientprotocol/sdk": "$CODEX_ACP_SDK", "@openai/codex": "$CODEX_CLI_VERSION" }
   }
 }
 JSON
@@ -81,6 +93,27 @@ for tool in claude-agent-acp codex-acp; do ln -sfn "$ACP_DIR/node_modules/.bin/$
 # The Claude Code binary bundled with the adapter is what agents run; agentctl
 # uses the same one for sign-in and for checking the stored credential.
 ln -sfn "$ACP_DIR/node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64/claude" "$BIN/claude"
+# Likewise the Codex CLI that codex-acp runs.
+ln -sfn "$ACP_DIR/node_modules/.bin/codex" "$BIN/codex"
+
+# Grok Build, one signed binary per version, checked against the pinned hash.
+GROK_DIR="$VENDOR/grok-$GROK_VERSION"
+if [ ! -x "$GROK_DIR/grok" ]; then
+  tmp=$(mktemp -d "$VENDOR/.grok.XXXXXX")
+  trap 'rm -rf "$tmp"' EXIT
+  echo "downloading Grok $GROK_VERSION"
+  /usr/bin/curl -fsSL -o "$tmp/grok.gz" "https://x.ai/cli/grok-$GROK_VERSION-macos-aarch64.gz"
+  got=$(/usr/bin/shasum -a 256 "$tmp/grok.gz" | cut -d' ' -f1)
+  [ "$got" = "$GROK_SHA256" ] || { echo "Grok download checksum mismatch: $got" >&2; exit 1; }
+  /usr/bin/gzip -dc "$tmp/grok.gz" > "$tmp/grok"
+  chmod 755 "$tmp/grok"
+  "$tmp/grok" --version </dev/null >/dev/null
+  rm -f "$tmp/grok.gz"
+  rm -rf "$GROK_DIR"
+  mv "$tmp" "$GROK_DIR"
+  trap - EXIT
+fi
+ln -sfn "$GROK_DIR/grok" "$BIN/grok"
 
 # The Black 4 connector: every agent's MCP server (agentctl passes mcp/black4 to
 # buzz-acp). Its one dependency, @noble/curves, is pinned with integrity hashes
@@ -128,5 +161,5 @@ if [ -n "${MACHINE_NAME:-}" ]; then
   printf '{"name": "%s"}\n' "$MACHINE_NAME" > "$ROOT/machine.json"
 fi
 
-echo "node $("$BIN/node" --version), $want"
+echo "node $("$BIN/node" --version), $want, grok $GROK_VERSION"
 echo "setup done"

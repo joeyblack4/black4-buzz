@@ -1,9 +1,13 @@
 """Tests for machine/agentctl. Run from the repo root:  /usr/bin/python3 -m unittest discover -s machine/tests
 
 Each test gets a temporary home with fake `claude`, `claude-agent-acp`,
-`buzz-acp` and `buzz` programs, so nothing touches the real machine, the
-network or the crontab. The fake `claude setup-token` behaves like the real one
-over a pty: banner, link, "Paste code" prompt, then a token or an OAuth error.
+`buzz-acp` and `buzz` programs (and, where a test needs them, fake `codex`,
+`codex-acp` and `grok`), so nothing touches the real machine, the network or
+the crontab. The fake `claude setup-token` behaves like the real one over a
+pty: banner, link, "Paste code" prompt, then a token or an OAuth error. The fake
+`codex login --device-auth` and `grok login --device-auth` print what the real
+ones printed on the machine (a link and a one-time code), then wait for the
+test to approve or refuse (the file approve.txt in the test home).
 """
 import re, importlib.machinery, importlib.util, json, os, signal, stat, subprocess, sys, tempfile, textwrap, time, unittest
 from pathlib import Path
@@ -55,8 +59,71 @@ if "-p" in args:
 FAKE_BUZZ_ACP = f"""#!{PY}
 import json, os, sys, time
 with open("env.json", "w") as f:
-    json.dump({{k: v for k, v in os.environ.items() if k.startswith(("BUZZ_ACP", "CLAUDE_CODE", "PATH"))}}, f)
+    json.dump({{k: v for k, v in os.environ.items() if k.startswith(("BUZZ_ACP", "CLAUDE_CODE", "PATH", "CODEX", "GROK", "NO_BROWSER", "OPENAI", "XAI"))}}, f)
 while True: time.sleep(1)
+"""
+
+FAKE_CRED = "fake-subscription-credential-" + "C" * 24  # what the fakes store; not a real credential
+
+# What `codex login --device-auth` (0.160.1) and `grok login --device-auth`
+# (1.0.70) printed on the machine, with the codes replaced.
+FAKE_DEVICE_LOGIN = f"""
+import json, os, sys, time
+def device_login(home_env, banner):
+    out = sys.stdout
+    out.write(banner); out.flush()
+    approve = os.path.join(os.environ["HOME"], "approve.txt")
+    ttl = os.path.join(os.environ["HOME"], "device-ttl.txt")
+    end = time.time() + (float(open(ttl).read()) if os.path.exists(ttl) else 600)
+    while time.time() < end:
+        if os.path.exists(approve):
+            answer = open(approve).read().strip()
+            if answer == "ok":
+                with open(os.path.join(os.environ[home_env], "auth.json"), "w") as f:
+                    json.dump({{"tokens": {{"access_token": {FAKE_CRED!r}}}}}, f)
+                out.write("\\r\\nSuccessfully logged in\\r\\n"); out.flush(); sys.exit(0)
+            out.write("\\r\\nError: access_denied: the user denied the request\\r\\n"); out.flush(); sys.exit(1)
+        time.sleep(0.1)
+    out.write("\\r\\nError: device code expired\\r\\n"); out.flush(); sys.exit(1)
+def stored(home_env):
+    try: return open(os.path.join(os.environ[home_env], "auth.json")).read()
+    except FileNotFoundError: return ""
+"""
+
+FAKE_CODEX = f"""#!{PY}
+{FAKE_DEVICE_LOGIN}
+args = sys.argv[1:]
+if args[:2] == ["login", "--device-auth"]:
+    device_login("CODEX_HOME", "\\r\\nWelcome to Codex [v0.160.1]\\r\\n\\r\\n1. Open this link in your browser and sign in to your account\\r\\n   https://auth.openai.com/codex/device\\r\\n\\r\\n2. Enter this one-time code (expires in 15 minutes)\\r\\n   ABCD-12EFG\\r\\n")
+if args[:1] == ["app-server"]:
+    cred = stored("CODEX_HOME")
+    for line in sys.stdin:
+        msg = json.loads(line)
+        if "id" not in msg: continue
+        m, i = msg["method"], msg["id"]
+        if m == "initialize": r = {{"result": {{"codexHome": os.environ["CODEX_HOME"]}}}}
+        elif m == "account/read":
+            acct = None
+            if {FAKE_CRED!r} in cred: acct = {{"type": "chatgpt", "email": "owner@example.com", "planType": "plus"}}
+            elif "apikey" in cred: acct = {{"type": "apiKey"}}
+            r = {{"result": {{"account": acct, "requiresOpenaiAuth": True}}}}
+        elif m == "account/rateLimits/read":
+            if "revoked" in cred: r = {{"error": {{"code": -32600, "message": "codex account authentication required to read rate limits"}}}}
+            else: r = {{"result": {{"rateLimits": {{}}}}}}
+        else: r = {{"error": {{"code": -32601, "message": "unknown"}}}}
+        print(json.dumps({{"id": i, **r}}), flush=True)
+"""
+
+FAKE_GROK = f"""#!{PY}
+{FAKE_DEVICE_LOGIN}
+args = sys.argv[1:]
+if args[:2] == ["login", "--device-auth"]:
+    device_login("GROK_HOME", "\\r\\nTo sign in, open this URL in your browser:\\r\\n\\r\\n  https://accounts.x.ai/oauth2/device?user_code=QRST-UVWX\\r\\n\\r\\nConfirm this code in your browser:\\r\\n\\r\\n  QRST-UVWX\\r\\n\\r\\nWaiting for authorization...\\r\\n")
+if "-p" in args:
+    cred = stored("GROK_HOME")
+    if {FAKE_CRED!r} in cred and "revoked" not in cred:
+        print(json.dumps({{"type": "result", "result": "OK"}})); sys.exit(0)
+    print(json.dumps({{"type": "error", "message": "Not signed in. To authenticate without a browser, run: grok login --device-code"}})); sys.exit(1)
 """
 
 
@@ -208,9 +275,14 @@ class MachineStatus(Base):
         rows = {h["id"]: h for h in r["harnesses"]}
         self.assertEqual(list(rows), ["claude", "codex", "grok", "goose"])
         self.assertEqual(rows["claude"], {"id": "claude", "label": "Claude Code", "installed": True,
-                                          "signedIn": False, "account": None})
+                                          "signedIn": False, "account": None, "signIn": "code"})
         self.assertFalse(rows["goose"]["installed"])
-        self.assertIsNone(rows["codex"]["signedIn"])
+        self.assertIsNone(rows["codex"]["signedIn"])  # not installed here: nothing to check
+        self.assertEqual(rows["codex"]["signIn"], "device")
+        self.assertEqual(rows["grok"]["signIn"], "device")
+        self.assertEqual(rows["grok"]["label"], "Grok Build")
+        self.assertIsNone(rows["goose"]["signIn"])
+        self.assertIn("cannot sign it in", rows["goose"]["note"])
 
     def test_machine_name_from_config(self):
         self.a.ROOT.mkdir(parents=True, exist_ok=True)
@@ -400,9 +472,10 @@ class Login(Base):
         self.assertEqual(stat.S_IMODE(d.stat().st_mode), 0o700)
         return r["loginId"], d
 
-    def test_only_claude(self):
-        self.assertIn("only available for Claude Code", self.req(op="login.start", harness="codex")["error"])
-        self.assertIn("only available for Claude Code", self.req(op="logout", harness="goose")["error"])
+    def test_harnesses_buzz_cannot_sign_in(self):
+        self.assertIn("is not installed", self.req(op="login.start", harness="codex", flows=["device"])["error"])
+        self.assertIn("cannot sign it in", self.req(op="login.start", harness="goose")["error"])
+        self.assertIn("cannot sign that harness out", self.req(op="logout", harness="goose")["error"])
 
     def test_good_code_stores_token_and_restarts_agents(self):
         d_agent = self.make_agent()
@@ -454,6 +527,227 @@ class Login(Base):
         self.assertFalse(d.exists())
 
 
+class DeviceBase(Base):
+    """Codex and Grok, installed as fakes."""
+    def setUp(self):
+        super().setUp()
+        write_exe(self.a.BIN / "codex", FAKE_CODEX)
+        write_exe(self.a.BIN / "codex-acp", "#!/bin/sh\nexit 0\n")
+        write_exe(self.a.BIN / "grok", FAKE_GROK)
+        self.a.FINISH_WAIT = 20
+
+    def approve(self, answer="ok"):
+        (self.home / "approve.txt").write_text(answer)
+
+    def start_device(self, harness):
+        r = self.req(op="login.start", harness=harness, flows=["code", "device"])
+        self.assertTrue(r["ok"], r)
+        self.assertFalse(r["needsCode"])
+        d = self.a.LOGINS / r["loginId"]
+        self.assertEqual(stat.S_IMODE(d.stat().st_mode), 0o700)
+        return r, d
+
+    def sign_in_device(self, harness):
+        r, _ = self.start_device(harness)
+        self.approve()
+        return self.req(op="login.finish", loginId=r["loginId"])
+
+
+class DeviceLogin(DeviceBase):
+    def test_codex_link_and_code_from_the_cli(self):
+        r, _ = self.start_device("codex")
+        self.assertEqual(r["url"], "https://auth.openai.com/codex/device")
+        self.assertEqual(r["userCode"], "ABCD-12EFG")
+        self.assertGreater(r["expiresAt"], time.time())
+
+    def test_grok_link_and_code_from_the_cli(self):
+        r, _ = self.start_device("grok")
+        self.assertEqual(r["url"], "https://accounts.x.ai/oauth2/device?user_code=QRST-UVWX")
+        self.assertEqual(r["userCode"], "QRST-UVWX")
+
+    def test_an_older_plugin_gets_a_sentence_not_a_sign_in_it_cannot_show(self):
+        for harness, label in (("codex", "Codex"), ("grok", "Grok Build")):
+            r = self.req(op="login.start", harness=harness)
+            self.assertEqual(r, {"ok": False, "error": f"Update the Black 4 plugin in Buzz to sign in to {label} from it."})
+        self.assertFalse(any(self.a.LOGINS.iterdir()) if self.a.LOGINS.exists() else False)
+
+    def test_approval_stores_the_sign_in_privately_and_restarts_agents(self):
+        for harness in ("codex", "grok"):
+            with self.subTest(harness=harness):
+                agent = self.make_agent(harness)
+                r, d = self.start_device(harness)
+                self.approve()
+                done = self.req(op="login.finish", loginId=r["loginId"])
+                self.assertEqual(done["ok"], True, done)
+                self.assertEqual(done["signedIn"], True)
+                self.assertEqual(done["account"], "owner@example.com" if harness == "codex" else None)
+                self.assertFalse(d.exists())
+                cred = self.a.HOMES / harness / "auth.json"
+                self.assertIn(FAKE_CRED, cred.read_text())
+                self.assertEqual(stat.S_IMODE(cred.stat().st_mode), 0o600)
+                self.assertEqual(stat.S_IMODE((self.a.HOMES / harness).stat().st_mode), 0o700)
+                self.assertEqual(stat.S_IMODE(self.a.HOMES.stat().st_mode), 0o700)
+                self.assertTrue(self.a.running(agent))
+                env = json.loads((agent / "work" / "env.json").read_text())
+                home_env = "CODEX_HOME" if harness == "codex" else "GROK_HOME"
+                self.assertEqual(env[home_env], str(self.a.HOMES / harness))
+                for key in env:  # the subscription pays: no API key reaches the agent
+                    self.assertNotRegex(key, r"API_KEY")
+                for path in self.a.ROOT.rglob("*"):
+                    if path.is_file() and path.name != "auth.json" and path.parent != self.a.BIN:
+                        self.assertNotIn(FAKE_CRED, path.read_text(errors="replace"), path)
+                (self.home / "approve.txt").unlink()
+
+    def test_not_yet_approved_keeps_the_sign_in_open(self):
+        self.a.FINISH_WAIT = 0.5
+        r, d = self.start_device("codex")
+        self.assertEqual(self.req(op="login.finish", loginId=r["loginId"]), {"ok": True, "signedIn": False, "pending": True})
+        self.assertTrue(d.exists())
+        self.a.FINISH_WAIT = 20
+        self.approve()
+        self.assertTrue(self.req(op="login.finish", loginId=r["loginId"])["signedIn"])
+
+    def test_a_pasted_code_is_ignored_for_a_device_sign_in(self):
+        self.a.FINISH_WAIT = 0.5
+        r, d = self.start_device("grok")
+        self.assertTrue(self.req(op="login.finish", loginId=r["loginId"], code="anything-at-all")["pending"])
+
+    def test_refused_approval_fails_cleanly(self):
+        r, d = self.start_device("grok")
+        self.approve("deny")
+        done = self.req(op="login.finish", loginId=r["loginId"])
+        self.assertEqual(done, {"ok": False, "error": "The sign-in was not approved. Start the sign-in again."})
+        self.assertFalse(d.exists())
+        self.assertFalse((self.a.HOMES / "grok" / "auth.json").exists())
+
+    def test_expired_code_fails_cleanly(self):
+        (self.home / "device-ttl.txt").write_text("1")
+        r, d = self.start_device("codex")
+        done = self.req(op="login.finish", loginId=r["loginId"])
+        self.assertEqual(done, {"ok": False, "error": "This sign-in code expired. Start the sign-in again."})
+        self.assertFalse((self.a.HOMES / "codex" / "auth.json").exists())
+
+    def test_sign_in_left_open_past_its_lifetime_is_dropped(self):
+        self.a.LOGIN_TTL = 2  # passed to the detached helper in helper.json
+        r, d = self.start_device("codex")
+        done = self.req(op="login.finish", loginId=r["loginId"])
+        self.assertEqual(done, {"ok": False, "error": "This sign-in code expired. Start the sign-in again."})
+
+    def test_cancel_stops_the_cli(self):
+        r, d = self.start_device("grok")
+        info = json.loads((d / "helper.json").read_text())
+        self.assertEqual(self.req(op="login.cancel", loginId=r["loginId"]), {"ok": True})
+        self.assertFalse(d.exists())
+        self.assertTrue(gone(info["pid"]) and gone(info["child"]))
+        self.assertIn("expired or was cancelled", self.req(op="login.finish", loginId=r["loginId"])["error"])
+        self.approve()  # approving afterwards signs nothing in
+        time.sleep(0.5)
+        self.assertFalse((self.a.HOMES / "grok" / "auth.json").exists())
+
+    def test_a_new_sign_in_replaces_the_open_one(self):
+        first, d1 = self.start_device("codex")
+        second, d2 = self.start_device("grok")
+        self.assertFalse(d1.exists())
+        self.assertTrue(d2.exists())
+
+    def test_logout_forgets_and_stops(self):
+        agent = self.make_agent("grok")
+        self.assertTrue(self.sign_in_device("grok")["signedIn"])
+        self.assertTrue(self.a.running(agent))
+        self.assertEqual(self.req(op="logout", harness="grok"), {"ok": True})
+        self.assertFalse((self.a.HOMES / "grok" / "auth.json").exists())
+        self.assertIsNone(self.a.running(agent))
+        self.assertIn("not signed in", self.req(op="start", pubkey=agent.name)["error"])
+
+
+class DeviceStatusAndStart(DeviceBase):
+    def rows(self):
+        return {h["id"]: h for h in self.req(op="machine.status")["harnesses"]}
+
+    def test_signed_out_until_a_sign_in(self):
+        rows = self.rows()
+        for harness in ("codex", "grok"):
+            self.assertEqual((rows[harness]["installed"], rows[harness]["signedIn"]), (True, False))
+        self.sign_in_device("codex")
+        self.assertEqual((self.rows()["codex"]["signedIn"], self.rows()["codex"]["account"]), (True, "owner@example.com"))
+
+    def test_signed_in_is_verified_with_the_service_not_just_a_file(self):
+        for harness in ("codex", "grok"):
+            home = self.a.cli_home(harness)
+            (home / "auth.json").write_text(json.dumps({"tokens": FAKE_CRED + "-revoked"}))
+            self.assertFalse(self.rows()[harness]["signedIn"], harness)
+            self.assertTrue(self.a.device_known_bad(harness))
+
+    def test_an_api_key_sign_in_is_not_a_subscription(self):
+        (self.a.cli_home("codex") / "auth.json").write_text(json.dumps({"auth_mode": "apikey"}))
+        self.assertFalse(self.rows()["codex"]["signedIn"])
+
+    def test_check_is_cached(self):
+        self.sign_in_device("grok")
+        self.a.DEVICE_CHECK["grok"] = lambda: self.fail("should use the cache")
+        self.assertTrue(self.rows()["grok"]["signedIn"])
+
+    def test_start_refuses_when_signed_out(self):
+        for harness, label in (("codex", "Codex"), ("grok", "Grok Build")):
+            agent = self.make_agent(harness)
+            self.assertEqual(self.req(op="start", pubkey=agent.name)["error"],
+                             f"{label} is not signed in on this machine. Sign in to {label} from Buzz first.")
+
+    def test_start_passes_the_private_home_and_the_buzz_preset(self):
+        self.sign_in_device("grok")
+        agent = self.make_agent("grok")
+        self.assertTrue(self.req(op="start", pubkey=agent.name)["ok"])
+        env = json.loads((agent / "work" / "env.json").read_text())
+        self.assertEqual(env["BUZZ_ACP_AGENT_COMMAND"], "grok")
+        self.assertEqual(env["BUZZ_ACP_AGENT_ARGS"], "agent,--always-approve,stdio")
+        self.assertEqual(env["GROK_HOME"], str(self.a.HOMES / "grok"))
+        self.assertIn("auto_update = false", (self.a.HOMES / "grok" / "config.toml").read_text())
+        self.sign_in_device("codex")
+        agent = self.make_agent("codex")
+        self.assertTrue(self.req(op="start", pubkey=agent.name)["ok"])
+        env = json.loads((agent / "work" / "env.json").read_text())
+        self.assertEqual(env["CODEX_HOME"], str(self.a.HOMES / "codex"))
+        self.assertEqual(env["NO_BROWSER"], "1")
+        self.assertIn('cli_auth_credentials_store = "file"', (self.a.HOMES / "codex" / "config.toml").read_text())
+
+    def test_supervisor_waits_for_a_sign_in(self):
+        agent = self.make_agent("codex")
+        self.a.supervise_pass({})
+        self.assertIsNone(self.a.running(agent))
+        self.sign_in_device("codex")
+        self.a.stop(agent)
+        self.a.supervise_pass({})
+        self.assertTrue(self.a.running(agent))
+
+
+class SecondRoot(unittest.TestCase):
+    """BLACK4_WORKFORCE_ROOT: a dev runner beside the real one."""
+    def setUp(self):
+        self.a = load()
+
+    def test_paths_and_cron_mark_follow_the_root(self):
+        self.a.set_root("/Users/m", "workforce-dev")
+        self.assertEqual(self.a.ROOT, Path("/Users/m/workforce-dev"))
+        self.assertEqual(self.a.HOMES, Path("/Users/m/workforce-dev/homes"))
+        self.assertEqual(self.a.root_env(), {"BLACK4_WORKFORCE_ROOT": "/Users/m/workforce-dev"})
+        lines = self.a.cron_lines()
+        self.assertTrue(all("BLACK4_WORKFORCE_ROOT=/Users/m/workforce-dev " in line for line in lines))
+        # A released runner drops every crontab line containing its mark.
+        self.assertTrue(all("# black4-workforce" not in line for line in lines))
+
+    def test_each_root_keeps_the_others_cron_lines(self):
+        self.a.set_root("/Users/m")
+        real = self.a.cron_lines()
+        self.assertEqual(self.a.root_env(), {})
+        self.a.set_root("/Users/m", "/Users/m/workforce-dev")
+        dev = self.a.cron_lines()
+        both = self.a.merged_crontab("\n".join(real) + "\n", True)
+        self.assertEqual(both.splitlines(), real + dev)
+        self.assertEqual(self.a.merged_crontab(both, False).splitlines(), real)
+        self.a.set_root("/Users/m")
+        self.assertEqual(self.a.merged_crontab(both, False).splitlines(), dev)
+
+
 class SetupPins(unittest.TestCase):
     """machine/setup.sh must install adapters whose ACP SDK accepts the initialize
     that the vendored buzz-acp (Buzz 0.5.30) sends: protocolVersion 2 with
@@ -462,7 +756,7 @@ class SetupPins(unittest.TestCase):
 
     def setUp(self):
         text = (AGENTCTL.parent / "setup.sh").read_text()
-        self.pins = dict(re.findall(r"^([A-Z_]+)=(\S+)", text, re.M))
+        self.pins = dict(re.findall(r"^([A-Z][A-Z0-9_]*)=(\S+)", text, re.M))
         self.text = text
 
     @staticmethod
@@ -476,6 +770,13 @@ class SetupPins(unittest.TestCase):
     def test_adapters_are_the_known_good_versions(self):
         self.assertEqual(self.pins["CLAUDE_ACP_VERSION"], "0.94.0")
         self.assertEqual(self.pins["CODEX_ACP_VERSION"], "2.2.2")
+        self.assertEqual(self.pins["CODEX_CLI_VERSION"], "0.160.1")
+        self.assertEqual(self.pins["GROK_VERSION"], "1.0.70")
+
+    def test_grok_download_is_checked_and_never_updates_itself(self):
+        self.assertRegex(self.pins["GROK_SHA256"], r"^[0-9a-f]{64}$")
+        self.assertIn('[ "$got" = "$GROK_SHA256" ]', self.text)
+        self.assertIn('"@openai/codex": "$CODEX_CLI_VERSION"', self.text)
 
     def test_sdk_is_forced_with_overrides(self):
         self.assertIn('"overrides"', self.text)

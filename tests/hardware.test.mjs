@@ -3,7 +3,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   askMachine, hardwareProvider, hardwareDefaults, MACHINES, machineOf, statusReader, harnessOptions, signInState, readyToCreate,
-  createLogin, agentDirectory, summaryOf,
+  createLogin, agentDirectory, summaryOf, signInOf,
 } from "../plugins/black4/plugin.js";
 
 /** A spawn double: records each request and answers with `reply(request)`.
@@ -180,7 +180,7 @@ test("readiness for each sign-in state", () => {
     [{ kind: "unsupported" }, "claude", "unsupported", true],
     [ok, "claude", "signed-out", false],
     [ok, "codex", "signed-in", true],
-    [ok, "goose", "unknown", true],
+    [ok, "goose", "unavailable", false], // an older runner: only Claude Code signs in from Buzz
     [ok, "grok", "not-installed", false],
   ];
   for (const [status, harness, kind, isReady] of cases) {
@@ -190,6 +190,111 @@ test("readiness for each sign-in state", () => {
   }
   assert.equal(signInState(ok, "codex").account, "ops@example.com");
   assert.equal(signInState({ kind: "ok", harnesses: harnesses({ signedIn: true, account: null }) }, "claude").account, null);
+});
+
+// What a runner with Codex and Grok sign-in reports (machine/agentctl machine.status).
+const deviceRows = ({ codex = false, grok = false } = {}) => [
+  { id: "claude", label: "Claude Code", installed: true, signedIn: true, account: null, signIn: "code" },
+  { id: "codex", label: "Codex", installed: true, signedIn: codex, account: codex ? "owner@example.com" : null, signIn: "device" },
+  { id: "grok", label: "Grok Build", installed: true, signedIn: grok, account: null, signIn: "device" },
+  { id: "goose", label: "Goose", installed: true, signedIn: null, account: null, signIn: null,
+    note: "Goose takes its model settings from the machine itself; Buzz cannot sign it in." },
+];
+
+test("Codex and Grok sign in from Buzz; an installed harness Buzz cannot sign in is shown unavailable", () => {
+  const ok = { kind: "ok", harnesses: deviceRows() };
+  const options = harnessOptions(ok);
+  assert.deepEqual(options.map((entry) => entry.id), ["claude", "codex", "grok", "goose"]);
+  assert.equal(options.find((entry) => entry.id === "goose").label, "Goose (unavailable)");
+  assert.match(options.find((entry) => entry.id === "goose").unavailable, /cannot sign it in/);
+  assert.ok(!options.find((entry) => entry.id === "codex").unavailable);
+  for (const harness of ["codex", "grok"]) {
+    assert.equal(signInState(ok, harness).kind, "signed-out");
+    assert.equal(readyToCreate(signInState(ok, harness)), false);
+  }
+  assert.deepEqual(signInState({ kind: "ok", harnesses: deviceRows({ codex: true }) }, "codex"), { kind: "signed-in", account: "owner@example.com" });
+  const goose = signInState(ok, "goose");
+  assert.equal(goose.kind, "unavailable");
+  assert.equal(readyToCreate(goose), false);
+  assert.deepEqual(signInOf({ id: "codex", installed: true, signedIn: null }), { flow: null, reason: "This machine's runner cannot sign in Codex from Buzz yet." });
+  assert.deepEqual(signInOf({ id: "claude", installed: true, signedIn: false }), { flow: "code", reason: null });
+  assert.equal(harnessOptions({ kind: "ok", harnesses: [{ id: "grok", installed: false, signIn: "device" }] }).length, 0, "not installed: not offered");
+});
+
+test("sign-in: a device sign-in shows the link and code, then waits by itself until approved", async () => {
+  let finishes = 0;
+  const box = machine((request) => {
+    if (request.op === "login.start") return { ok: true, loginId: "D1", url: "https://auth.openai.com/codex/device", needsCode: false, userCode: "ABCD-12EFG", expiresAt: 1 };
+    if (request.op === "login.finish") return ++finishes < 3 ? { ok: true, signedIn: false, pending: true } : { ok: true, signedIn: true, account: "owner@example.com" };
+    if (request.op === "machine.status") return { ok: true, harnesses: deviceRows({ codex: finishes >= 3 }) };
+    return { ok: true };
+  });
+  const reader = statusReader(box.spawn);
+  const states = [];
+  const login = createLogin(box.spawn, "commerce", "codex", {
+    onChange: (state) => states.push(state),
+    onSignedIn: () => reader.read("commerce", { force: true }),
+  });
+  await login.start();
+  assert.deepEqual(states.find((state) => state.step === "waiting"),
+    { step: "waiting", url: "https://auth.openai.com/codex/device", needsCode: false, userCode: "ABCD-12EFG" });
+  assert.deepEqual(box.seen[0].request, { op: "login.start", harness: "codex", flows: ["code", "device"] });
+  for (let i = 0; i < 50 && login.state.step !== "idle"; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(login.state, { step: "idle" });
+  assert.deepEqual(box.ops(), ["login.start", "login.finish", "login.finish", "login.finish", "machine.status"]);
+  assert.ok(box.seen.filter((entry) => entry.request.op === "login.finish").every((entry) => entry.request.loginId === "D1" && !("code" in entry.request)));
+  assert.deepEqual(signInState(reader.peek("commerce"), "codex"), { kind: "signed-in", account: "owner@example.com" });
+  await login.finish("pasted"); // nothing to paste in a device sign-in
+  assert.equal(box.seen.length, 5);
+});
+
+test("sign-in: a status refresh that fails after a device approval still leaves the form idle", async () => {
+  const box = machine((request) => {
+    if (request.op === "login.start") return { ok: true, loginId: "D4", url: "https://auth.openai.com/codex/device", needsCode: false, userCode: "ABCD-12EFG" };
+    if (request.op === "login.finish") return { ok: true, signedIn: true, account: null };
+    return { ok: true };
+  });
+  const login = createLogin(box.spawn, "commerce", "codex", { onSignedIn: () => Promise.reject(new Error("unreachable")) });
+  await login.start();
+  for (let i = 0; i < 50 && login.state.step !== "idle"; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(login.state, { step: "idle" });
+});
+
+test("sign-in: Cancel stops waiting for a device approval and cancels it on the machine", async () => {
+  let release;
+  const box = machine((request) => {
+    if (request.op === "login.start") return { ok: true, loginId: "D2", url: "https://accounts.x.ai/oauth2/device?user_code=QRST-UVWX", needsCode: false, userCode: "QRST-UVWX" };
+    if (request.op === "login.finish") return new Promise((resolve) => { release = () => resolve({ ok: false, error: "This sign-in has expired or was cancelled. Start the sign-in again." }); });
+    return { ok: true };
+  });
+  const login = createLogin(box.spawn, "commerce", "grok");
+  await login.start();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  await login.cancel();
+  release();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(login.state, { step: "idle" }, "the cancelled wait's answer does not show an error");
+  assert.deepEqual(box.ops(), ["login.start", "login.finish", "login.cancel"]);
+});
+
+test("sign-in: a refused or expired device approval is a plain error and the sign-in can start again", async () => {
+  const box = machine((request) => {
+    if (request.op === "login.start") return { ok: true, loginId: "D3", url: "https://auth.openai.com/codex/device", needsCode: false, userCode: "WXYZ-9876" };
+    if (request.op === "login.finish") return { ok: false, error: "The sign-in was not approved. Start the sign-in again." };
+    return { ok: true };
+  });
+  const login = createLogin(box.spawn, "commerce", "codex");
+  await login.start();
+  for (let i = 0; i < 50 && login.state.step !== "idle"; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(login.state, { step: "idle", error: "The sign-in was not approved. Start the sign-in again." });
+  assert.deepEqual(box.ops(), ["login.start", "login.finish"], "no automatic new sign-in for a device flow");
+});
+
+test("sign-in: an older runner answers a Codex sign-in with a plain sentence", async () => {
+  const box = machine(() => ({ ok: false, error: "Signing in from Buzz is only available for Claude Code on this machine." }));
+  const login = createLogin(box.spawn, "commerce", "codex");
+  await login.start();
+  assert.deepEqual(login.state, { step: "idle", error: "Signing in from Buzz is only available for Claude Code on this machine." });
 });
 
 /** Collects everything written to the console while `run` runs. */

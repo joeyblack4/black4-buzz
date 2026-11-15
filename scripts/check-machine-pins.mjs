@@ -9,7 +9,7 @@ const read = (path) => readFileSync(new URL(path, root), "utf8");
 const pins = JSON.parse(read("machine/pins.json"));
 const setup = read("machine/setup.sh");
 const tests = read("machine/tests/test_agentctl.py");
-const vars = Object.fromEntries([...setup.matchAll(/^([A-Z_]+)=(\S+)/gm)].map(([, name, value]) => [name, value]));
+const vars = Object.fromEntries([...setup.matchAll(/^([A-Z][A-Z0-9_]*)=(\S+)/gm)].map(([, name, value]) => [name, value]));
 const problems = [];
 const version = (text) => text.split(".").map(Number);
 const atMost = (a, b) => {
@@ -31,8 +31,17 @@ for (const [name, adapter] of Object.entries(pins.adapters)) {
   if (!atMost(adapter.sdk, pins.harness.maxAdapterSdk)) {
     problems.push(`machine/pins.json pins ${name} on SDK ${adapter.sdk}, newer than ${pins.harness.maxAdapterSdk}, the newest that buzz-acp ${pins.harness.release} can talk to.`);
   }
-  if (!setup.includes(`"${name}": { "@agentclientprotocol/sdk": "$${adapter.sdkVar}" }`)) {
+  if (!setup.includes(`"${name}": { "@agentclientprotocol/sdk": "$${adapter.sdkVar}"`)) {
     problems.push(`machine/setup.sh no longer forces ${name}'s SDK to $${adapter.sdkVar} with npm overrides.`);
+  }
+}
+for (const [name, cli] of Object.entries(pins.clis ?? {})) {
+  for (const [field, variable] of [["version", cli.versionVar], ["sha256", cli.sha256Var]]) {
+    if (!variable) continue;
+    if (vars[variable] !== cli[field]) problems.push(`machine/setup.sh sets ${variable}=${vars[variable] ?? "(missing)"}, but machine/pins.json pins ${name} ${field} ${cli[field]}.`);
+  }
+  if (cli.via && !setup.includes(`"${name}": "$${cli.versionVar}"`)) {
+    problems.push(`machine/setup.sh no longer forces ${cli.via}'s ${name} to $${cli.versionVar} with npm overrides.`);
   }
 }
 for (const variable of Object.keys(vars)) {
@@ -56,4 +65,4 @@ if (problems.length) {
   for (const problem of problems) console.error(`- ${problem}`);
   process.exit(1);
 }
-console.log(`Machine pins agree: buzz-acp ${pins.harness.release} with ${Object.entries(pins.adapters).map(([name, adapter]) => `${name.split("/")[1]} ${adapter.version} (SDK ${adapter.sdk})`).join(", ")}.`);
+console.log(`Machine pins agree: buzz-acp ${pins.harness.release} with ${Object.entries(pins.adapters).map(([name, adapter]) => `${name.split("/")[1]} ${adapter.version} (SDK ${adapter.sdk})`).join(", ")}; ${Object.entries(pins.clis ?? {}).map(([name, cli]) => `${name.split("/").pop()} ${cli.version}`).join(", ")}.`);

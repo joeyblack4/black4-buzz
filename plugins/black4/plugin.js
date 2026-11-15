@@ -1021,7 +1021,12 @@ const MACHINE_TIMEOUT_MS = 45 * 1000;
 const STATUS_TIMEOUT_MS = 12 * 1000;
 const STATUS_TTL_MS = 20 * 1000;
 const UNREACHABLE_TTL_MS = 4 * 1000;
-const LOGIN_TIMEOUT_MS = 120 * 1000; // the machine waits up to 90 s for Claude Code to accept a code
+const LOGIN_TIMEOUT_MS = 120 * 1000; // the machine waits up to 90 s for a code, 85 s per wait for a device approval
+/** Sign-in flows this plugin can show. "code": open a link, paste the code its
+ * page shows. "device": open a link and approve the short code shown here;
+ * the machine finishes by itself. A machine offers a device sign-in only to a
+ * plugin that says it can show one. */
+const SIGN_IN_FLOWS = ["code", "device"];
 
 export const HARNESSES = [
   { id: "claude", label: "Claude Code" },
@@ -1129,11 +1134,31 @@ export function statusReader(spawn, { ttlMs = STATUS_TTL_MS, timeoutMs = STATUS_
   };
 }
 
+/** How Buzz signs this harness in on the machine: "code", "device", or null
+ * with a one-sentence reason. A machine from before Codex and Grok sign-in
+ * reports no `signIn`; there only Claude Code signs in from Buzz. */
+export function signInOf(row) {
+  if (!row) return { flow: null, reason: null };
+  if ("signIn" in row) {
+    if (SIGN_IN_FLOWS.includes(row.signIn)) return { flow: row.signIn, reason: null };
+    return { flow: null, reason: typeof row.note === "string" && row.note ? row.note : `Buzz cannot sign in ${harnessLabel(row.id) ?? row.id} on this machine.` };
+  }
+  if (row.id === "claude") return { flow: "code", reason: null };
+  return { flow: null, reason: `This machine's runner cannot sign in ${harnessLabel(row.id) ?? row.id} from Buzz yet.` };
+}
+
 /** Harnesses to offer for a machine: those it reports installed once its
- * status has loaded, every harness otherwise. */
+ * status has loaded, every harness otherwise. One installed that Buzz cannot
+ * sign in, and that is not signed in already, is listed as unavailable, with
+ * its reason. */
 export function harnessOptions(status) {
   if (status?.kind !== "ok") return HARNESSES;
-  return HARNESSES.filter((entry) => status.harnesses.some((row) => row?.id === entry.id && row.installed !== false));
+  return HARNESSES.flatMap((entry) => {
+    const row = status.harnesses.find((candidate) => candidate?.id === entry.id);
+    if (!row || row.installed === false) return [];
+    const { flow, reason } = signInOf(row);
+    return [!flow && row.signedIn !== true ? { ...entry, label: `${entry.label} (unavailable)`, unavailable: reason } : entry];
+  });
 }
 
 /** The sign-in state of one harness on a machine, from its status (or
@@ -1145,6 +1170,8 @@ export function signInState(status, harness) {
   const row = status.harnesses.find((entry) => entry?.id === harness);
   if (!row || row.installed === false) return { kind: "not-installed" };
   if (row.signedIn === true) return { kind: "signed-in", account: typeof row.account === "string" && row.account ? row.account : null };
+  const { flow, reason } = signInOf(row);
+  if (!flow) return { kind: "unavailable", reason };
   if (row.signedIn === false) return { kind: "signed-out" };
   return { kind: "unknown" };
 }
@@ -1155,7 +1182,11 @@ export const readyToCreate = (state) => ["signed-in", "unknown", "unsupported"].
 /** One sign-in of a harness on a machine, as a small state machine the form
  * renders. The pasted code is passed straight to the machine and never kept
  * in state, logged or echoed back in an error. A second click while a step is
- * pending joins that step; a reply that lands after Cancel is cancelled too. */
+ * pending joins that step; a reply that lands after Cancel is cancelled too.
+ * A device sign-in (needsCode false: Codex, Grok) shows the link and the
+ * machine's short userCode, then waits by itself: login.finish with no code
+ * waits on the machine for the approval and answers `pending` if it has not
+ * come yet, and is asked again until it signs in, fails or is cancelled. */
 export function createLogin(spawn, machine, harness, { onChange, onSignedIn, timeoutMs = LOGIN_TIMEOUT_MS } = {}) {
   let state = Object.freeze({ step: "idle" });
   let loginId = null;
@@ -1178,7 +1209,7 @@ export function createLogin(spawn, machine, harness, { onChange, onSignedIn, tim
   };
   /** Asks for a new sign-in and shows its link; a reply for a cancelled or
    * replaced attempt is cancelled on the machine instead. */
-  const open = (mine, extra = {}) => askMachine(spawn, machine, { op: "login.start", harness }, { timeoutMs })
+  const open = (mine, extra = {}) => askMachine(spawn, machine, { op: "login.start", harness, flows: SIGN_IN_FLOWS }, { timeoutMs })
     .then((reply) => {
       const id = typeof reply.loginId === "string" ? reply.loginId : null;
       if (disposed || mine !== generation) return cancelRemote(id);
@@ -1188,8 +1219,42 @@ export function createLogin(spawn, machine, harness, { onChange, onSignedIn, tim
         throw new Error("The machine did not return a sign-in link.");
       }
       loginId = id;
-      set({ step: "waiting", url, needsCode: reply.needsCode !== false, ...extra });
+      const needsCode = reply.needsCode !== false;
+      const userCode = !needsCode && typeof reply.userCode === "string" && /^[A-Za-z0-9-]{4,32}$/.test(reply.userCode) ? reply.userCode : null;
+      set({ step: "waiting", url, needsCode, ...(userCode ? { userCode } : {}), ...extra });
+      if (!needsCode) approval(mine, id).catch((error) => {
+        if (disposed || mine !== generation) return;
+        loginId = null;
+        set({ step: "idle", error: message(error) });
+      });
     });
+  /** Waits for a device approval: one login.finish after another while the
+   * machine answers pending. Stops when this attempt is cancelled or replaced. */
+  const approval = async (mine, id) => {
+    while (!disposed && mine === generation && loginId === id) {
+      let reply;
+      try {
+        reply = await askMachine(spawn, machine, { op: "login.finish", loginId: id }, { timeoutMs });
+      } catch (error) {
+        if (disposed || mine !== generation || loginId !== id) return;
+        loginId = null;
+        set({ step: "idle", error: message(error) });
+        return;
+      }
+      if (disposed || mine !== generation || loginId !== id) return;
+      if (reply.pending || reply.signedIn === false) continue;
+      loginId = null;
+      await signedIn(mine, reply);
+      return;
+    }
+  };
+  /** Signed in: show it, refresh the machine's status, then back to idle. A
+   * status refresh that fails leaves the form idle, never stuck on "done". */
+  const signedIn = async (mine, reply) => {
+    set({ step: "done", account: typeof reply.account === "string" ? reply.account : null });
+    try { await onSignedIn?.(); } catch { /* the next status read shows it */ }
+    if (mine === generation) set({ step: "idle" });
+  };
   return {
     get state() { return state; },
     start() {
@@ -1203,6 +1268,7 @@ export function createLogin(spawn, machine, harness, { onChange, onSignedIn, tim
       const pasted = typeof code === "string" ? code.trim() : "";
       if (pending) return pending;
       if (state.step !== "waiting" || !loginId) return Promise.resolve();
+      if (!state.needsCode) return Promise.resolve(); // a device sign-in finishes by itself
       if (state.needsCode && !pasted) { set({ ...state, error: "Paste the code first." }); return Promise.resolve(); }
       const mine = ++generation;
       const used = loginId;
@@ -1212,9 +1278,7 @@ export function createLogin(spawn, machine, harness, { onChange, onSignedIn, tim
           if (reply.signedIn === false) throw new Error("Sign-in did not finish.");
           if (loginId === used) loginId = null;
           if (mine !== generation) return;
-          set({ step: "done", account: typeof reply.account === "string" ? reply.account : null });
-          await onSignedIn?.();
-          if (mine === generation) set({ step: "idle" });
+          await signedIn(mine, reply);
         }, async (error) => {
           // A failed finish closes that sign-in on the machine: its link and
           // id are dead. Start one fresh sign-in (once, no loop) for a new link.
@@ -1364,7 +1428,7 @@ export function applyHardware(ctx, { report = () => {}, access } = {}) {
   const Select = ({ label, value, options, onChange, disabled }) =>
     h("label", { style: { display: "grid", gap: 4 } }, label,
       h("select", { value, disabled, onChange: (event) => onChange(event.target.value) },
-        ...options.map((option) => h("option", { key: option.id, value: option.id }, option.label))));
+        ...options.map((option) => h("option", { key: option.id, value: option.id, disabled: !!option.unavailable && option.id !== value }, option.label))));
 
   /** The machine's status, read in an effect and shared across views. */
   const useStatus = (machineId) => {
@@ -1409,6 +1473,7 @@ export function applyHardware(ctx, { report = () => {}, access } = {}) {
       h("div", null, h("button", { type: "button", disabled, onClick: () => void statuses.read(machine.id, { force: true }) }, "Try again")));
     if (state.kind === "unsupported") return h("div", { style: muted }, `The ${machine.label} cannot report sign-in yet.`);
     if (state.kind === "not-installed") return h("div", { role: "alert" }, `${label} is not installed on the ${machine.label}.`);
+    if (state.kind === "unavailable") return h("div", { role: "alert" }, `${label} is unavailable: ${state.reason}`);
     if (state.kind === "signed-in" && !["waiting", "finishing", "renewing"].includes(login.step)) return h("div", { style: row },
       h("span", null, state.account ? `Signed in as ${state.account}` : `${label} is signed in`));
     if (state.kind === "unknown" && login.step === "idle") return h("div", { style: { display: "grid", gap: 6 } },
@@ -1435,6 +1500,20 @@ export function applyHardware(ctx, { report = () => {}, access } = {}) {
       setCode("");
       void flow.current?.finish(pasted);
     };
+    if (!login.needsCode) return h("div", { style: { display: "grid", gap: 8 } },
+      h("div", { style: row },
+        h("a", { href: login.url, target: "_blank", rel: "noopener noreferrer" }, `Open ${label} sign-in`),
+        h("button", { type: "button", onClick: () => {
+          Promise.resolve(globalThis.navigator?.clipboard?.writeText?.(login.url))
+            .then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }, () => {});
+        } }, copied ? "Copied" : "Copy link")),
+      login.userCode && h("div", { style: row },
+        h("span", null, "Approve this code there:"),
+        h("code", { style: { fontSize: "1.1em", letterSpacing: "0.08em" } }, login.userCode)),
+      h("div", { role: "status", style: { ...row, ...muted } }, h(Spinner),
+        login.step === "finishing" ? "Signing in…" : `Waiting for you to approve it. The ${machine.label} finishes by itself.`,
+        h("button", { type: "button", onClick: () => void flow.current?.cancel() }, "Cancel")),
+      login.error && h("span", { role: "alert" }, login.error));
     return h("div", { style: { display: "grid", gap: 8 } },
       h("div", { style: row },
         h("a", { href: login.url, target: "_blank", rel: "noopener noreferrer" }, login.renewed ? `Open new ${label} sign-in` : `Open ${label} sign-in`),
@@ -1442,18 +1521,14 @@ export function applyHardware(ctx, { report = () => {}, access } = {}) {
           Promise.resolve(globalThis.navigator?.clipboard?.writeText?.(login.url))
             .then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }, () => {});
         } }, copied ? "Copied" : "Copy link")),
-      login.needsCode
-        // Not a <form>: this sits inside Buzz's own Create agent form, and a
-        // nested form's submit goes to the outer one, which abandons the dialog.
-        ? h("div", { style: row },
+      // Not a <form>: this sits inside Buzz's own Create agent form, and a
+      // nested form's submit goes to the outer one, which abandons the dialog.
+      h("div", { style: row },
           h("input", { type: "password", autoComplete: "off", spellCheck: false, placeholder: "Paste code", "aria-label": "Sign-in code",
             value: code, disabled: busy, onChange: (event) => setCode(event.target.value), style: { flex: 1, minWidth: 160 },
             onKeyDown: (event) => { if (event.key === "Enter") { event.preventDefault(); event.stopPropagation(); if (!busy && code.trim()) submit(); } } }),
           h("button", { type: "button", disabled: busy || !code.trim(), "aria-busy": busy, onClick: submit }, busy ? h(Spinner) : "Finish"),
-          h("button", { type: "button", onClick: () => { setCode(""); void flow.current?.cancel(); } }, "Cancel"))
-        : h("div", { style: row },
-          h("button", { type: "button", disabled: busy, "aria-busy": busy, onClick: submit }, busy ? h(Spinner) : "Done"),
-          h("button", { type: "button", onClick: () => void flow.current?.cancel() }, "Cancel")),
+          h("button", { type: "button", onClick: () => { setCode(""); void flow.current?.cancel(); } }, "Cancel")),
       login.error && h("span", { role: "alert" }, login.error));
   };
 
@@ -1476,12 +1551,14 @@ export function applyHardware(ctx, { report = () => {}, access } = {}) {
     const offered = options.length ? options : HARNESSES;
     const state = spawn ? signInState(status, value.harness) : { kind: "unreachable" };
 
-    // A harness the machine does not have: suggest the first one it does.
+    // A harness the machine does not have, or cannot sign in: suggest the
+    // first one it can run.
+    const usable = options.filter((entry) => !entry.unavailable);
     React.useEffect(() => {
-      if (status?.kind === "ok" && options.length && !options.some((entry) => entry.id === value.harness))
-        onChange({ ...value, harness: options[0].id }, { suggested: true });
+      if (status?.kind === "ok" && usable.length && !usable.some((entry) => entry.id === value.harness))
+        onChange({ ...value, harness: usable[0].id }, { suggested: true });
     }, [status, value.harness]);
-    const isReady = readyToCreate(state) && (status?.kind !== "ok" || options.some((entry) => entry.id === value.harness));
+    const isReady = readyToCreate(state) && (status?.kind !== "ok" || usable.some((entry) => entry.id === value.harness));
     React.useEffect(() => { onReadyChange?.(isReady); }, [onReadyChange, isReady]);
     React.useEffect(() => () => onReadyChange?.(false), [onReadyChange]);
 

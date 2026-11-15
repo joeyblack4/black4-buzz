@@ -88,7 +88,20 @@ You should see: `Black 4 hardware reached:` and what the machine can run.
 
 In Buzz, **Agents → New agent**. Choose **Black 4 hardware**, give it a name
 and choose what it runs (Claude Code if unsure) and who it answers. If the
-machine is not signed in to Claude yet, the form offers **Sign in**. Create.
+machine is not signed in to it yet, the form offers **Sign in**. Create.
+
+Each harness is signed in once per machine, to the subscription of whoever
+signs it in, and every agent on that machine that runs it uses that sign-in:
+
+- **Claude Code** (Claude subscription): open the link, approve, paste the
+  code the Anthropic page shows into the form.
+- **Codex** (ChatGPT subscription) and **Grok Build** (SuperGrok or grok.com):
+  open the link, approve the short code the form shows. There is nothing to
+  paste; the machine notices the approval and the form says it is signed in.
+  The code lasts 15 minutes.
+
+A harness the machine has installed but Buzz cannot sign in (Goose) is listed
+as unavailable, with the reason.
 
 You should see: the agent in your list with *Claude Code · Commerce Mac*
 under its name. Its **Settings** tab shows **Status: Running**. @mention it in

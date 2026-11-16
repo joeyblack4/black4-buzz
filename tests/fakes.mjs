@@ -128,7 +128,7 @@ export function fakeMcp(authkit, { answer = () => ({ result: {} }), sse = false,
     else {
       let { name, arguments: args } = message.params ?? {};
       if (message.method === "tools/call" && name === "call_tool" && args?.name === "sign_hardware_request") ({ name, arguments: args } = args);
-      if (message.method === "tools/call" && name === "renew_signin") {
+      if (message.method === "tools/call" && name === "renew_signin" && self.renew) { // null: the test's own answer handles it
         const renew = self.renew;
         renew.calls.push(args ?? {});
         if (!renew.supported) return json(200, { jsonrpc: "2.0", id: message.id, error: { code: -32602, message: "MCP error -32602: Tool renew_signin not found" } }, headers);
@@ -152,7 +152,7 @@ export function fakeMcp(authkit, { answer = () => ({ result: {} }), sse = false,
         }
       } else if (message.method === "tools/call" && name === "sign_hardware_request") {
         if (self.approvalRequired) {
-          return toolFailure(message.id, headers, "signin_approval_required", "Hardware passes need a browser approval of this sign-in within the last 24 hours. Approve it with renew_signin, then try again.");
+          return toolFailure(message.id, headers, "signin_approval_required", "This needs a browser approval of this sign-in within the last 24 hours. Approve it with renew_signin, then try again.");
         }
         if (self.ownerKeys && args?.ownerKey !== undefined && !self.ownerKeys.includes(args.ownerKey)) {
           const error = { code: "owner_key_not_linked", message: "That owner key is not one of your live links." };

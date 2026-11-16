@@ -4,7 +4,7 @@
 // and people, no network.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { fakeAuthKit, fakeMcp, fakeDoor, https, freshPlugin, settle, until } from "./fakes.mjs";
+import { fakeAuthKit, fakeMcp, fakeDoor, https, freshPlugin, settle, until, AUTHKIT } from "./fakes.mjs";
 
 const { readAnswer, linkLabel } = await freshPlugin();
 
@@ -17,25 +17,32 @@ const link = (ownerKey, extra = {}) => ({
   linkedAt: "2026-11-14T12:00:00.000Z", linkedBy: "person@example.test", lastUsedAt: null, revokedAt: null, revokedBy: null, agents: [], ...extra,
 });
 
-/** A Black 4 server holding links for one person. `listed` is what tools/list shows. */
+// Platform Control's refusal of a gated tool without a recent approval, in its real shape.
+const APPROVAL_REFUSAL = ["signin_approval_required", "This needs a browser approval of this sign-in within the last 24 hours. Approve it with renew_signin, then try again."];
+
+/** A Black 4 server holding links for one person. `listed` is what tools/list shows.
+ * `approvalRequired` refuses link_agent_owner_key (and the other gated tools)
+ * until renew_signin is approved; `renew.polls` scripts its answers. */
 function server({ listed = ["whoami", "find_tools", "call_tool"], links = [], refuseLink, offline, kind = "staff", wire = false } = {}) {
   const calls = [];
   const tools = { // the non-core tools, reached directly when listed, else through call_tool
     list_agent_owner_keys: () => ok({ links: links.filter((entry) => !entry.revokedAt) }),
     link_agent_owner_key: ({ ownerKey, label }) => {
+      if (self.approvalRequired) return refusal(...APPROVAL_REFUSAL);
       if (refuseLink) return refusal(...refuseLink);
       let entry = links.find((value) => value.ownerKey === ownerKey && !value.revokedAt);
       const created = !entry;
       if (!entry) links.push(entry = link(ownerKey, { label }));
       return ok({ link: entry, created });
     },
+    invite_customer_admin: () => (self.approvalRequired ? refusal(...APPROVAL_REFUSAL) : ok({ invited: true })),
     revoke_agent_access: ({ linkId }) => {
       const entry = links.find((value) => value.linkId === linkId);
       entry.revokedAt = "2026-11-14T13:00:00.000Z";
       return ok({ revoked: "link", id: linkId, changed: true });
     },
   };
-  const self = { calls, links, kind };
+  const self = { calls, links, kind, approvalRequired: false, renew: { polls: ["pending", "approved"], calls: [] } };
   const answer = (message) => {
     if (message.method === "initialize") return { result: {} };
     if (message.method === "tools/list") return { result: { tools: listed.map((name) => ({ name, inputSchema: { type: "object" } })) } };
@@ -46,6 +53,13 @@ function server({ listed = ["whoami", "find_tools", "call_tool"], links = [], re
       return { result: wire ? { content: [{ type: "text", text: JSON.stringify({ data: who }) }] } : ok(who) };
     }
     if (offline) return { error: { code: -32000, message: "fetch failed" } };
+    if (name === "renew_signin") { // called directly, as an idle sign-in may
+      self.renew.calls.push(args ?? {});
+      if (!args?.approvalId) return { result: ok({ state: "pending", approvalId: `ssa_${"b".repeat(22)}`, userCode: "LINK-CODE", verificationUri: `${AUTHKIT}/device`, verificationUriComplete: `${AUTHKIT}/device?user_code=LINK-CODE`, expiresAt: new Date(Date.now() + 600_000).toISOString(), interval: 0.02 }) };
+      const step = self.renew.polls.length > 1 ? self.renew.polls.shift() : self.renew.polls[0];
+      if (step === "approved") self.approvalRequired = false;
+      return { result: ok({ state: step, approvalId: args.approvalId, ...(step === "pending" ? { interval: 0.02 } : { approvedAt: new Date().toISOString() }) }) };
+    }
     if (name === "call_tool" && listed.includes("call_tool")) ({ name, arguments: args } = args);
     else if (!listed.includes(name)) return { error: { code: -32602, message: `Unknown tool: ${name}` } };
     calls.push({ name, args, via: message.params.name });
@@ -61,12 +75,14 @@ function server({ listed = ["whoami", "find_tools", "call_tool"], links = [], re
 async function harness(t, black4, { viewer = VIEWER, plugin = true, register, signedIn = true, authkit = fakeAuthKit(), agentctl } = {}) {
   const { apply, signInStore } = await freshPlugin();
   const mcp = fakeMcp(authkit, { answer: (message) => black4.answer(message) });
+  mcp.renew = null; // the server below answers renew_signin
   const door = fakeDoor(mcp, agentctl);
   const net = https({ authkit, mcp, door });
   if (signedIn) await signInStore.save(authkit.issue().refresh_token);
   let card;
   const types = new Set();
   const tools = new Set();
+  const toolMap = new Map();
   const addType = register ?? ((type) => { types.add(type); return () => types.delete(type); });
   const cleanups = [];
   const relayListeners = new Set();
@@ -74,7 +90,7 @@ async function harness(t, black4, { viewer = VIEWER, plugin = true, register, si
   const h = (type, props, ...children) => ({ type, props: props ?? {}, children });
   const ctx = {
     react: { createElement: h, useState: (v) => [typeof v === "function" ? v() : v, () => {}], useEffect: () => {}, useRef: (v) => ({ current: v }), Component: class { constructor(props) { this.props = props; } } },
-    agents: { snapshot: () => ({ running: [] }), addTool: (tool) => { tools.add(tool.name); return () => tools.delete(tool.name); }, register: (type) => { addType(type); } },
+    agents: { snapshot: () => ({ running: [] }), addTool: (tool) => { tools.add(tool.name); toolMap.set(tool.name, tool); return () => { tools.delete(tool.name); toolMap.delete(tool.name); }; }, register: (type) => { addType(type); } },
     settingsCards: { register: (value) => { card = value; } },
     pages: { register() {} }, panels: { register() {} },
     conversation: { registerLink() {}, registerLinkPreview() {} },
@@ -111,6 +127,7 @@ async function harness(t, black4, { viewer = VIEWER, plugin = true, register, si
     net,
     door,
     wholeText: () => texts(whole()).join(" "),
+    agentTool: (name) => toolMap.get(name),
     clickAnywhere: async (label) => { const found = find(whole(), label); assert.ok(found, `no "${label}" button`); found.props.onClick(); await settle(); },
     text: () => texts(view()).join(" "),
     click: async (label) => { const found = find(view(), label); assert.ok(found, `no "${label}" button in: ${texts(view()).join(" ")}`); assert.ok(!found.props.disabled, `"${label}" is disabled`); found.props.onClick(); await settle(); },
@@ -433,4 +450,57 @@ test("a pass refused because this Buzz's key is not linked says so and brings ba
   const made = await remote.provision({ name: "Rock", community: "wss://example.test", config: {}, signal: new AbortController().signal }).catch((error) => error);
   assert.ok(ui.mcp.signed.some((entry) => entry.ownerKey === VIEWER && entry.op === "provision"), "after linking, the pass is minted");
   assert.ok(made);
+});
+
+// ---- a link that needs a recent approval (Platform Control's stored sign-in limits) ----
+
+test("signing in with linking refused for want of a recent approval: Approve in place, then the link is made by itself", async (t) => {
+  const black4 = server({ listed: ["whoami", "call_tool"] });
+  black4.approvalRequired = true;
+  const ui = await harness(t, black4, { signedIn: false });
+  await settle();
+  find(ui.whole(), "Sign in to Black 4").props.onClick();
+  await until(() => /Linking waits for your approval/.test(ui.text()), { timeoutMs: 6000, what: "the approval step" });
+  assert.match(ui.wholeText(), /Status Connected/, "signed in, not signed out");
+  assert.doesNotMatch(ui.text(), /not linked|could not|Try again/i, "no failure shown");
+  assert.equal(find(ui.whole(), "Sign in to Black 4"), null);
+  const approveButtons = (node) => { let n = 0; const walk = (x) => { if (!x || typeof x !== "object") return; if (x.type === "button" && texts(x).join("") === "Approve in browser") n++; (x.children ?? []).forEach(walk); }; walk(node); return n; };
+  assert.equal(approveButtons(ui.whole()), 1, "one Approve in Settings, in Agent access");
+  find(ui.view(), "Approve in browser").props.onClick();
+  await until(() => /^Agent access Linked/.test(ui.text()), { timeoutMs: 6000, what: "linked after approval" });
+  assert.ok(black4.calls.filter((call) => call.name === "link_agent_owner_key").length >= 2, "refused, then made by itself");
+  assert.deepEqual(black4.renew.calls[0], {}, "renew_signin started with no input");
+  assert.equal(black4.links.length, 1);
+});
+
+test("Link my agents refused for want of a recent approval: the same Approve, then linked; Cancel leaves it waiting", async (t) => {
+  const black4 = server({ listed: ["whoami", "call_tool"] });
+  const ui = await harness(t, black4);
+  await settle();
+  black4.approvalRequired = true;
+  black4.renew.polls = ["pending"];
+  await ui.click("Link my agents");
+  assert.match(ui.text(), /Linking waits for your approval/);
+  await ui.click("Approve in browser");
+  await until(() => /LINK-CODE/.test(ui.text()), { timeoutMs: 6000, what: "the code" });
+  await ui.click("Cancel");
+  assert.match(ui.text(), /Linking waits for your approval/, "still waiting, nothing failed");
+  assert.ok(find(ui.view(), "Approve in browser"));
+  black4.renew.polls = ["approved"];
+  await ui.click("Approve in browser");
+  await until(() => /^Agent access Linked/.test(ui.text()), { timeoutMs: 6000, what: "linked" });
+  assert.match(ui.wholeText(), /Status Connected/);
+});
+
+test("an agent's call refused for want of a recent approval tells the agent what the person does, and Settings offers Approve", async (t) => {
+  const black4 = server({ listed: ["whoami", "call_tool", "invite_customer_admin"], links: [link(VIEWER)] });
+  const ui = await harness(t, black4);
+  await settle();
+  black4.approvalRequired = true;
+  const tool = ui.agentTool("black4_invite_customer_admin");
+  await assert.rejects(tool.call({}, {}, { email: "new@example.test" }), /Approve in browser in Buzz/);
+  assert.ok(find(ui.whole(), "Approve in browser"), "the person sees Approve in Settings");
+  find(ui.whole(), "Approve in browser").props.onClick();
+  await until(() => !find(ui.whole(), "Approve in browser") && !/LINK-CODE|Approving/.test(ui.wholeText()), { timeoutMs: 6000, what: "approved" });
+  assert.equal(await tool.call({}, {}, { email: "new@example.test" }), JSON.stringify({ invited: true }), "the agent's retry works");
 });

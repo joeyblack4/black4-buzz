@@ -42,6 +42,10 @@ export const APPROVAL_CODE = "signin_approval_required";
 export const IDLE_CODE = "signin_idle";
 export const RENEW_TOOL = "renew_signin";
 const APPROVAL_TEXT = "Black 4 hardware needs your approval in your browser.";
+/** The tools Platform Control refuses with APPROVAL_CODE without a recent
+ * approval. A success from one proves the approval is there. */
+export const APPROVAL_GATED = Object.freeze(["sign_hardware_request", "link_agent_owner_key", "invite_customer_admin", "set_customer_role"]);
+const AGENT_APPROVAL_TEXT = "This needs the person to approve their Black 4 sign-in again. Ask them to choose Approve in browser in Buzz (Settings → Black 4), then try again.";
 const PASS_REFUSED = "Agents cannot mint Black 4 hardware passes. Only the Black 4 plugin's hardware agent type does, for its own requests.";
 /** Whether a tool call (directly, or through call_tool, however nested) asks
  * for a hardware pass. */
@@ -821,7 +825,18 @@ export function apply(ctx) {
     client.signal?.throwIfAborted?.();
     const result = await request("tools/call", { name, arguments: input }, { signal: client.signal });
     const text = textOf(result) || "(no content)";
-    if (result?.isError) throw new Error(text);
+    const called = name === "call_tool" ? String(input?.name ?? "") : name;
+    if (result?.isError) {
+      let code;
+      try { readAnswer(result); } catch (error) { code = error.serverCode; }
+      if (code === APPROVAL_CODE) {
+        // The person approves in Buzz; the agent is told so, not to call renew_signin.
+        needApproval(called === PASS_TOOL ? "hardware" : called === "link_agent_owner_key" ? "link" : "approval");
+        throw new Error(AGENT_APPROVAL_TEXT);
+      }
+      throw new Error(text);
+    }
+    approvalSeen(called);
     return text;
   };
 
@@ -924,12 +939,28 @@ export function apply(ctx) {
       if (/unknown tool|no tool|not found/i.test(error.message)) throw Object.assign(new Error(unavailable), { code: "unavailable" });
       throw Object.assign(new Error("Couldn't reach Black 4. Check your connection and try again."), { code: "offline" });
     }
+    let answer;
     try {
-      return readAnswer(result);
+      answer = readAnswer(result);
     } catch (error) {
       if (error.code === "unavailable") throw Object.assign(new Error(unavailable), { code: "unavailable" });
+      if (error.serverCode === APPROVAL_CODE) {
+        // Not a sign-out: offer Approve in place (renew_signin).
+        needApproval(name === PASS_TOOL ? "hardware" : name === "link_agent_owner_key" ? "link" : "approval");
+        throw Object.assign(new Error(error.message), { code: "approval", serverCode: error.serverCode });
+      }
       throw error;
     }
+    approvalSeen(name);
+    return answer;
+  };
+  /** Black 4 asked for a recent approval: one Approve, wherever it is shown. */
+  const needApproval = (reason) => { if (!state.renewal) update({ renewal: { reason, status: "needed" } }); };
+  /** A gated tool worked: the approval is there (given here or elsewhere). */
+  const approvalSeen = (name) => {
+    if (!APPROVAL_GATED.includes(name) || !state.renewal || state.renewal.reason === "idle" || state.renewal.status !== "needed") return;
+    update({ renewal: null });
+    if (name !== "link_agent_owner_key" && state.agentLink?.status === "approval") void linkAgents();
   };
   const linkFailure = (error, key) => ({
     status: error.code === "unavailable" ? "unavailable" : "error",
@@ -956,6 +987,9 @@ export function apply(ctx) {
     try {
       data = await callBlack4("link_agent_owner_key", { ownerKey: key, label: linkLabel() });
     } catch (error) {
+      // A recent approval is needed: Approve in place, then the link is made
+      // again by itself (renewDone).
+      if (error.code === "approval") return { status: "approval", key };
       // A refusal is the server's own sentence, such as a key already linked
       // to another person. Say it plainly; nothing retries it.
       if (!["offline", "signin", "unavailable"].includes(error.code)) throw new Error(`Your agents are not linked. ${error.message}`);
@@ -1023,20 +1057,14 @@ export function apply(ctx) {
       try {
         answer = await callBlack4(PASS_TOOL, { ...input, ...(ownerKey ? { ownerKey } : {}) }, { unavailable: "This Black 4 server can't sign hardware requests yet." });
       } catch (error) {
-        if (error?.serverCode === APPROVAL_CODE) {
-          // Not a sign-out: the sign-in stays. Offer Approve in place;
-          // hardware views read again once it is given.
-          if (!state.renewal) update({ renewal: { reason: "hardware", status: "needed" } });
-          throw Object.assign(new Error(APPROVAL_TEXT), { code: "approval" });
-        }
+        // Approve is offered in place (callBlack4); hardware views read again once given.
+        if (error?.code === "approval") throw Object.assign(new Error(APPROVAL_TEXT), { code: "approval" });
         if (error?.serverCode === "owner_key_not_linked" || /owner_key_not_linked/.test(String(error?.message))) {
           void checkLink();
           throw Object.assign(new Error("Your agents are not linked to you on this Buzz identity, or the key is linked to someone else. Choose Link my agents, then try again."), { code: "unlinked" });
         }
         throw error;
       }
-      // A pass minted: the approval limit is lifted (approved here or elsewhere).
-      if (state.renewal?.reason === "hardware" && state.renewal.status === "needed") update({ renewal: null });
       return answer?.data ?? answer;
     },
   });
@@ -1211,8 +1239,10 @@ export function apply(ctx) {
   const renewDone = () => {
     lastApproval = null;
     const idle = state.status === "idle";
+    const relink = state.agentLink?.status === "approval";
     update({ renewal: null, approvals: state.approvals + 1 });
     if (idle) reconnect();
+    else if (relink) void linkAgents(); // the link that waited for the approval
   };
   /** One cheap look before a new browser approval: this window's own last
    * approval (approved after Cancel?), and, while idle, one ordinary request
@@ -1303,6 +1333,7 @@ export function apply(ctx) {
     if (ticket !== renewTicket || state.renewal?.status !== "needed") return;
     if (done) renewDone();
     else if (state.renewal.reason === "hardware") update({ approvals: state.approvals + 1 });
+    else if (state.agentLink?.status === "approval") void linkAgents(); // approved elsewhere? the link tells
   };
   if (typeof globalThis.addEventListener === "function") {
     ctx.effect(() => {
@@ -1534,6 +1565,11 @@ export function apply(ctx) {
         text = "Your agents on Black 4 hardware lose Black 4 access.";
         actions = [action("Remove access", removeLink, { primary: true }), action("Cancel", () => confirmRemove(false))];
       } else actions = [action("Remove…", () => confirmRemove(true))];
+    } else if (link.status === "approval") {
+      // Black 4 wants a recent approval before it links: Approve here, and
+      // the link is made by itself once approved.
+      text = "Linking waits for your approval.";
+      actions = [h(SignInPrompt, { key: "approve", renewal: true })];
     } else if (link.status === "unavailable") text = link.message || LINK_UNAVAILABLE;
     else {
       role = "alert";
@@ -1652,6 +1688,9 @@ export function apply(ctx) {
             ? row("Signed in as", `${current.account.email ?? "unknown"}${current.account.kind ? ` (${current.account.kind})` : ""}`)
             : null,
           current.status === "connected" ? row("Agent tools", String(current.tools)) : null,
+          // Black 4 asked for a recent approval (an agent's call, or hardware):
+          // Approve here too. The link step shows its own.
+          current.status === "connected" && current.renewal && current.agentLink?.status !== "approval" ? h(SignInPrompt, { renewal: true }) : null,
           current.status === "stopped" ? null : bar(
             button(current.status === "connected" ? "Reconnect" : "Try again", reconnect),
             button("Sign out", () => void signOut())),

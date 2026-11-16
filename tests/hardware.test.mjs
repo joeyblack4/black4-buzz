@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import {
   askMachine, hardwareProvider, hardwareDefaults, HEARTBEAT_MINUTES, beatFrom, heartbeatRemote, MACHINES, machineOf, statusReader, harnessOptions, signInState, readyToCreate,
   createLogin, agentDirectory, summaryOf, signInOf, doorTransport, bodySha256, createSession, createMcp, readAnswer, memoryStore,
-  modelsReader, modelChoices, applyPick, setModel,
+  modelsReader, modelChoices, applyPick, setModel, applyHardware,
 } from "../plugins/black4/plugin.js";
 import { fakeAuthKit, fakeMcp, fakeDoor, https, sha256url, DOOR } from "./fakes.mjs";
 
@@ -231,6 +231,123 @@ test("creation carries the model and effort; a change goes to the agent's machin
   assert.deepEqual(box.seen[1], { id: "commerce", request: { op: "settings.set", pubkey: PUBKEY, model: "opus", effort: "max" } });
   const refused = machine(() => ({ ok: false, error: "Claude Code does not offer the model x on this machine. Choose another model for this agent." }));
   await assert.rejects(setModel(refused.ask, agentDirectory(refused.ask), { pubkey: PUBKEY, model: "x", effort: "" }), /does not offer the model x/);
+});
+
+/** Just enough React to render the hardware forms in a test: elements as
+ * plain objects, hook state kept per position across renders, effects run
+ * after each render. `settle` renders until the machine's answers are in. */
+function testReact() {
+  const slots = new Map();
+  let effects = [];
+  let path = "";
+  let index = 0;
+  const slot = (make) => { const key = `${path}:${index++}`; if (!slots.has(key)) slots.set(key, make()); return key; };
+  const React = {
+    Fragment: "fragment",
+    Component: class { constructor(props) { this.props = props; this.state = {}; } },
+    createElement: (type, props, ...children) => ({ type, props: { ...(props ?? {}), children: children.flat() } }),
+    useState(init) {
+      const key = slot(() => (typeof init === "function" ? init() : init));
+      return [slots.get(key), (next) => slots.set(key, typeof next === "function" ? next(slots.get(key)) : next)];
+    },
+    useRef(value) { return slots.get(slot(() => ({ current: value }))); },
+    useEffect(effect, deps) {
+      const key = `${path}:${index++}`;
+      const before = slots.get(key);
+      if (!before || !deps || deps.some((dep, i) => dep !== before[i])) { slots.set(key, deps ?? []); effects.push(effect); }
+    },
+  };
+  const render = (node, at = "r") => {
+    if (!node || typeof node !== "object") return node;
+    if (typeof node.type === "function") {
+      if (node.type.prototype?.render) return render(new node.type(node.props).render(), `${at}c`);
+      path = at; index = 0;
+      return render(node.type(node.props), `${at}/`);
+    }
+    return { ...node, props: { ...node.props, children: node.props.children.map((child, i) => render(child, `${at}.${i}`)) } };
+  };
+  const settle = async (element) => {
+    let tree;
+    for (let pass = 0; pass < 6; pass++) {
+      tree = render(element);
+      const run = effects; effects = [];
+      for (const effect of run) effect();
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    return tree;
+  };
+  return { React, settle };
+}
+
+/** Every labelled select in a rendered tree: { label, value, options }. */
+function selectsIn(tree) {
+  const out = [];
+  const walk = (node) => {
+    if (!node || typeof node !== "object") return;
+    const kids = node.props?.children ?? [];
+    const select = node.type === "label" && kids.find((child) => child?.type === "select");
+    if (select) out.push({ label: kids.find((child) => typeof child === "string"), value: select.props.value,
+      options: select.props.children.map((option) => option.props.value) });
+    kids.forEach(walk);
+  };
+  walk(tree);
+  return out;
+}
+const textIn = (tree) => (!tree || typeof tree !== "object" ? (typeof tree === "string" ? tree : "") : (tree.props?.children ?? []).map(textIn).join(" "));
+
+/** The hardware type registered on a test host whose machine answers `reply`. */
+function hardwareOn(reply) {
+  const { React, settle } = testReact();
+  const asked = [];
+  let type;
+  const ctx = {
+    react: React,
+    host: { request: async ({ body }) => { const request = JSON.parse(body); asked.push(request); return { status: 200, body: JSON.stringify(await reply(request)) }; } },
+    agents: { register: (registered) => { type = registered; } },
+  };
+  applyHardware(ctx, { sign: async () => ({ pass: "test-pass" }) });
+  return { type, React, settle, asked };
+}
+
+const fleet = (request) => {
+  if (request.op === "machine.status") return { ok: true, machine: "commerce", harnesses: harnesses({ signedIn: true }) };
+  if (request.op === "models") return MODELS;
+  if (request.op === "list") return { ok: true, agents: [] };
+  if (request.op === "status") return { ok: true, running: true, activated: true, harness: "claude", respondTo: "anyone",
+    model: "opus", effort: "max", modelChosen: true, effortChosen: true };
+  if (request.op === "instructions.get") return { ok: true, instructions: "Be brief." };
+  return { ok: true };
+};
+
+test("render: the Create agent form shows Model and Effort from the machine, at its defaults", async () => {
+  const { type, React, settle } = hardwareOn(fleet);
+  const changes = [];
+  const tree = await settle(React.createElement(type.CreateConfiguration, {
+    config: { ...hardwareDefaults(), harness: "claude" }, onChange: (next) => changes.push(next), disabled: false }));
+  const selects = selectsIn(tree);
+  assert.deepEqual(selects.map((entry) => entry.label), ["Runs on", "Runs", "Model", "Effort", "Answers"]);
+  assert.deepEqual(selects[2], { label: "Model", value: "claude-fable-5-2", options: ["claude-fable-5-2", "opus"] });
+  assert.deepEqual(selects[3], { label: "Effort", value: "high", options: ["low", "medium", "high", "xhigh", "max"] });
+  assert.doesNotMatch(textIn(tree), /could not show/);
+  const older = hardwareOn((request) => (request.op === "models" ? UNKNOWN : fleet(request)));
+  const plain = await older.settle(older.React.createElement(older.type.CreateConfiguration, { config: hardwareDefaults(), onChange: () => {} }));
+  assert.deepEqual(selectsIn(plain).map((entry) => entry.label), ["Runs on", "Runs", "Answers"], "an older machine: no Model or Effort");
+});
+
+test("render: Settings shows the agent's own model and effort, and a change is sent to its machine", async () => {
+  const { type, React, settle, asked } = hardwareOn(fleet);
+  const tree = await settle(React.createElement(type.tabs[0].component, { agent: { pubkey: PUBKEY } }));
+  const selects = selectsIn(tree);
+  assert.deepEqual(selects.map((entry) => [entry.label, entry.value]), [["Model", "opus"], ["Effort", "max"]]);
+  const select = (function find(node) {
+    if (!node || typeof node !== "object") return null;
+    if (node.type === "select" && node.props.value === "opus") return node;
+    for (const child of node.props?.children ?? []) { const hit = find(child); if (hit) return hit; }
+    return null;
+  })(tree);
+  select.props.onChange({ target: { value: "claude-fable-5-2" } });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(asked.find((request) => request.op === "settings.set"), { op: "settings.set", pubkey: PUBKEY, model: "", effort: "max" });
 });
 
 test("harness choices follow what the machine has installed", () => {

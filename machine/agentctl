@@ -916,7 +916,9 @@ def claude_efforts(cli):
 
 def claude_answers(cli, token, model):
     """True when a one-line call on this sign-in is answered by `model` itself
-    (Claude Code reports the model that answered in modelUsage)."""
+    (Claude Code reports the model that answered in modelUsage); False when the
+    API says the model is not there for it (404, as 2.1.303 reports it); None
+    for anything else (a usage limit, overload, offline), which proves nothing."""
     env = base_env()
     env["CLAUDE_CODE_OAUTH_TOKEN"] = token
     try:
@@ -925,7 +927,15 @@ def claude_answers(cli, token, model):
         result = json.loads(done.stdout.strip().splitlines()[-1])
     except (subprocess.TimeoutExpired, OSError, ValueError, IndexError):
         return None
-    return not result.get("is_error") and model in (result.get("modelUsage") or {})
+    return judge_model_answer(result, model)
+
+
+def judge_model_answer(result, model):
+    if not result.get("is_error"): return model in (result.get("modelUsage") or {})
+    if result.get("api_error_status") == 404 or re.search(r"issue with the selected model|may not exist or you may not have access",
+                                                         str(result.get("result") or ""), re.I):
+        return False
+    return None
 
 
 def list_claude_models():
@@ -1132,6 +1142,7 @@ def _start(d):
     if picked.get("problem"): fail(picked["problem"])
     model_env, args = launch(harness, picked)
     stop(d)
+    (d / "launch.json").unlink(missing_ok=True)
     command = HARNESS[harness][0]
     env.update({
         "BUZZ_PRIVATE_KEY": (d / "key").read_text().strip(),
@@ -1723,18 +1734,27 @@ def community_url(value):
 CHANGES = {"remove", "activate", "profile", "instructions.set", "settings.set", "start", "heartbeat.set"}
 
 
-def model_fields(s, cache=None):
+def model_fields(s, cache=None, d=None):
     """What status and list say about an agent's model: the model and effort
-    it runs with (the default's when it chose none), whether it chose them
-    (modelChosen, effortChosen), and modelNote or modelProblem when the machine
-    has one. `cache` keeps one offered() per harness across a list."""
+    it runs with, whether it chose them (modelChosen, effortChosen), and
+    modelNote or modelProblem when the machine has one. A running agent
+    reports what it was started with (launch.json), which is what it runs
+    until it restarts; a stopped one what it would start with now. `cache`
+    keeps one offered() per harness across a list."""
     harness = s.get("harness") or "claude"
     if harness not in DEFAULTS: return {"model": None, "effort": None}
+    chosen = {"modelChosen": bool(s.get("model")), "effortChosen": bool(s.get("effort"))}
+    if d is not None and running(d):
+        launched = read_json(d / "launch.json")
+        if not isinstance(launched, dict):
+            return {"model": None, "effort": None, **chosen,
+                    "modelNote": f"Started before agents had a model here; it runs {LABEL[harness]}'s own default until it restarts."}
+        return {"model": launched.get("model"), "effort": launched.get("effort"), **chosen,
+                **({"modelNote": launched["note"]} if launched.get("note") else {})}
     if cache is None: cache = {}
     if harness not in cache: cache[harness] = offered(harness)
     picked = choice(harness, s, cache[harness])
-    return {"model": picked.get("model"), "effort": picked.get("effort"),
-            "modelChosen": bool(s.get("model")), "effortChosen": bool(s.get("effort")),
+    return {"model": picked.get("model"), "effort": picked.get("effort"), **chosen,
             **({"modelNote": picked["note"]} if picked.get("note") else {}),
             **({"modelProblem": picked["problem"]} if picked.get("problem") else {})}
 
@@ -1816,7 +1836,7 @@ def handle(req):
             rows.append({"pubkey": d.name, "name": s.get("name"), "harness": s.get("harness"),
                          "respondTo": s.get("respondTo"), "activated": bool(s.get("auth")), "running": bool(running(d)),
                          "keepsStopping": keeps_stopping(d), "createdBy": s.get("createdBy"), "heartbeat": heartbeat_minutes(s),
-                         **model_fields(s, cache)})
+                         **model_fields(s, cache, d)})
         return {"ok": True, "agents": rows}
 
     d = folder(req.get("pubkey"))
@@ -1890,7 +1910,7 @@ def handle(req):
         s["model"], s["effort"] = checked_choice(harness, model, effort)
         write_settings(d, s)
         if s.get("auth"): start(d)
-        return {"ok": True, **model_fields(s)}
+        return {"ok": True, **model_fields(s, d=d)}
 
     if op == "start":
         return {"ok": True, "pid": start(d)}
@@ -1899,7 +1919,7 @@ def handle(req):
         r = restarts(d)
         return {"ok": True, "running": bool(running(d)), "activated": bool(s.get("auth")),
                 "name": s.get("name"), "harness": s.get("harness"), "respondTo": s.get("respondTo"),
-                "keepsStopping": keeps_stopping(d), "restarts": r.get("count", 0), **model_fields(s),
+                "keepsStopping": keeps_stopping(d), "restarts": r.get("count", 0), **model_fields(s, d=d),
                 **({"nextRestart": int(r["next"])} if r.get("next") and not running(d) else {}),
                 "log": log_tail(d, 1500)}
 

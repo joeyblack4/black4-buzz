@@ -1929,7 +1929,8 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
     React.useEffect(() => {
       const current = createLogin(ask, machine.id, harness, {
         onChange: setLogin,
-        onSignedIn: () => statuses.read(machine.id, { force: true }),
+        // A harness signed out lists no models; signed in, it does.
+        onSignedIn: () => Promise.all([statuses.read(machine.id, { force: true }), modelLists.read(machine.id, { force: true })]),
       });
       flow.current = current;
       setLogin(current.state);

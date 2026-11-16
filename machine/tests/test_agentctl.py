@@ -54,8 +54,12 @@ if "-p" in args:
     home = os.environ["HOME"]
     with open(os.path.join(home, "claude-calls.txt"), "a") as f: f.write(model + "\\n")
     refused = os.path.exists(os.path.join(home, "refuse-" + model))
-    if token == {FAKE_TOKEN!r} and refused:
-        print(json.dumps({{"is_error": True, "api_error_status": 404, "result": "model not found"}}))
+    busy = os.path.exists(os.path.join(home, "busy-" + model))
+    if token == {FAKE_TOKEN!r} and refused:  # what 2.1.303 answered for a model the sign-in lacks
+        print(json.dumps({{"is_error": True, "subtype": "success", "api_error_status": 404, "modelUsage": {{}},
+                          "result": "There's an issue with the selected model (" + model + "). It may not exist or you may not have access to it."}}))
+    elif token == {FAKE_TOKEN!r} and busy:
+        print(json.dumps({{"is_error": True, "api_error_status": 429, "result": "API Error: 429 rate limited"}}))
     elif token == {FAKE_TOKEN!r}:
         print(json.dumps({{"is_error": False, "result": "OK", "modelUsage": {{model: {{}}}}}}))
     elif token:
@@ -1322,6 +1326,27 @@ class ModelAndEffort(DeviceBase):
         self.assertNotIn("claude-fable-5-2", [m["id"] for m in row["models"]])
         self.assertEqual((row["model"], row["effort"]), ("fable", "high"))
         self.assertEqual(row["note"], "claude-fable-5-2 is not offered here; fable runs instead.")
+
+    def test_a_busy_api_proves_nothing_and_the_default_still_applies(self):
+        (self.home / "busy-claude-fable-5-2").write_text("x")
+        self.listed()
+        self.assertIsNone(self.a.offered("claude"), "a 429 is not 'not offered'")
+        env = self.env_of(self.make_agent("claude"))
+        self.assertEqual(env["ANTHROPIC_MODEL"], "claude-fable-5-2", "never 5.1 for a day because of one busy reply")
+
+    def test_status_reports_what_a_running_agent_was_started_with(self):
+        self.listed()
+        agent = self.make_agent("grok")
+        self.a.start(agent)
+        s = self.a.read_settings(agent); s["model"] = "grok-4.5"; self.a.write_settings(agent, s)  # not restarted
+        status = self.req(op="status", pubkey=agent.name)
+        self.assertEqual((status["model"], status["effort"], status["modelChosen"]), ("grok-4.7", "high", True))
+        (agent / "launch.json").unlink()  # as if the old runner had started it
+        status = self.req(op="status", pubkey=agent.name)
+        self.assertEqual((status["model"], status["effort"]), (None, None))
+        self.assertIn("runs Grok Build's own default until it restarts", status["modelNote"])
+        self.a.stop(agent)
+        self.assertEqual(self.req(op="status", pubkey=agent.name)["model"], "grok-4.5", "stopped: what it would start with")
 
     def test_the_claude_listing_is_kept_per_sign_in(self):
         self.listed(); self.listed()

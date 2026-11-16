@@ -1,21 +1,22 @@
 // Black 4 plugin for Buzz 1.0 (API v1: one self-contained ES module, no imports).
 //
-// It starts the black4-mcp-bridge process (mcp-remote in front of the Black 4
-// MCP, holding the person's WorkOS sign-in), lists the MCP's core tools and
-// offers each to every agent in this Buzz app as `black4_<tool>`. A call runs
-// on the bridge's MCP session, so the agent acts with the signed-in person's
-// Black 4 authority: the same door, tools and Reviews as every other harness.
-// `find_tools` and `call_tool` in the core list reach the rest of the tools.
+// It needs nothing outside Buzz. Settings → Black 4 → Sign in runs the WorkOS
+// AuthKit device sign-in over `ctx.host.request`; the plugin then speaks the
+// Black 4 MCP over HTTPS as that person, lists its core tools and offers each
+// to every agent in this Buzz app as `black4_<tool>`. A call runs with the
+// signed-in person's Black 4 authority: the same door, tools and Reviews as
+// every other harness. `find_tools` and `call_tool` reach the rest.
 //
 // The plugin adds no authority of its own. It fills in the Buzz channel and
 // community for `resolve_channel_business` when the agent leaves them out.
 //
-// The file, in order: the MCP bridge and agent tools, Reviews, Agent access
-// and the Settings card (`apply`); the member-mention relay; and, fenced at the
-// end, Black 4 hardware: a hosted agent type, offered to staff only, whose
-// agents run on a Black 4 machine. Hardware is the least stable part of Buzz's
-// plugin API, so it runs in its own scope and a failure there is shown in the
-// Settings card instead of stopping the rest.
+// The file, in order: sign-in, the MCP client and the hardware door's pass
+// hashing; Reviews; the MCP tools, Agent access and the Settings card
+// (`apply`); the member-mention relay; and, fenced at the end, Black 4
+// hardware: a hosted agent type, offered to staff only, whose agents run on a
+// Black 4 machine. Hardware is the least stable part of Buzz's plugin API, so
+// it runs in its own scope and a failure there is shown in the Settings card
+// instead of stopping the rest.
 
 export const inject = ["react", "host", "agents", "settingsCards", "panels", "browser", "conversation", "pages", "relay"];
 
@@ -27,6 +28,300 @@ const QUEUE_POLL_MS = 60 * 1000; // the Reviews badge refreshes this often while
 const QUEUE_TIMEOUT_MS = 30 * 1000;
 const LINK_TIMEOUT_MS = 30 * 1000;
 const LINK_UNAVAILABLE = "This Black 4 server can't link agents yet.";
+const PASS_TOOL = "sign_hardware_request";
+const PASS_REFUSED = "Agents cannot mint Black 4 hardware passes. Only the Black 4 plugin's hardware agent type does, for its own requests.";
+/** Whether a tool call (directly, or through call_tool, however nested) asks
+ * for a hardware pass. */
+export function mintsPass(name, args, depth = 0) {
+  const tool = String(name ?? "").trim().toLowerCase();
+  if (tool === PASS_TOOL) return true;
+  if (tool === "call_tool" && depth < 4 && args && typeof args === "object") return mintsPass(args.name, args.arguments, depth + 1);
+  return false;
+}
+
+// ---- sign-in, the Black 4 MCP and the hardware door, over HTTPS -------------
+// Everything goes through `ctx.host.request` to the origins the manifest
+// declares; nothing runs outside Buzz. Tokens live only in the closures below:
+// never in UI state, logs, error text or anything an agent receives.
+
+/** WorkOS AuthKit, device authorization (RFC 8628). Platform Control owns the
+ * client ("Black 4 for Buzz": public, no secret). `params` go with every
+ * request: the access token is for the Black 4 MCP resource. */
+export const AUTHKIT = Object.freeze({
+  origin: "https://overjoyed-tea-41.authkit.app",
+  clientId: "client_01M7G889K5GQTA4Q38Q6PPJQSN",
+  scope: "openid profile email offline_access",
+  params: Object.freeze({ resource: "https://api.black4.ai/mcp" }),
+});
+export const MCP_URL = "https://api.black4.ai/mcp?tools=core";
+const MCP_PROTOCOL = "2025-06-18";
+const HOST_TIMEOUT_MAX_MS = 180 * 1000; // ctx.host.request's own ceiling
+const REFRESH_EARLY_MS = 2 * 60 * 1000; // refresh this long before an access token ends
+const DEVICE_INTERVAL_S = 5; // RFC 8628's default poll interval
+
+const clampTimeout = (ms) => Math.max(1000, Math.min(HOST_TIMEOUT_MAX_MS, Math.round(ms)));
+const headerOf = (response, name) => {
+  for (const [key, value] of Object.entries(response?.headers ?? {})) if (key.toLowerCase() === name) return value;
+  return undefined;
+};
+const plain = (text, max = 300) => String(text ?? "").replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, max);
+const jsonOf = (text) => { try { return JSON.parse(text); } catch { return undefined; } };
+const form = (fields) => Object.entries(fields).filter(([, value]) => value != null && value !== "")
+  .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`).join("&");
+
+/** base64url (no padding) SHA-256 of a string's UTF-8 bytes: the body hash a
+ * hardware pass is bound to. */
+export async function bodySha256(text) {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)));
+  let binary = "";
+  for (const byte of digest) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/** Where a refresh token is kept between sign-ins. The default keeps it in
+ * this module, so it lasts while Buzz runs (a plugin reload or an off/on keeps
+ * it) and is gone when Buzz quits: nothing is written to disk. */
+export function memoryStore() {
+  let value = null;
+  return { load: async () => value, save: async (token) => { value = token; }, clear: async () => { value = null; } };
+}
+export const signInMemory = memoryStore(); // this Buzz run's sign-in (tests seed it)
+
+/** One person's Black 4 sign-in. `request` is `ctx.host.request`. The state
+ * it reports (`subscribe`/`snapshot`) never holds a token. */
+export function createSession({ request, store = signInMemory, now = () => Date.now(), sleep, authkit = AUTHKIT } = {}) {
+  const wait = sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  let access = null; // { token, expiresAt }
+  let refreshToken = null;
+  let refreshing = null;
+  let restored = null;
+  let flow = 0; // the current device sign-in; a newer one or cancel retires it
+  let view = Object.freeze({ status: "signed-out" }); // signed-out | starting | waiting | signed-in
+  const listeners = new Set();
+  const set = (next) => { view = Object.freeze(next); for (const listener of [...listeners]) listener(view); };
+
+  const post = async (path, fields) => {
+    let response;
+    try {
+      response = await request({
+        url: `${authkit.origin}${path}`, method: "POST", timeoutMs: 30 * 1000,
+        headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
+        body: form(fields),
+      });
+    } catch (error) {
+      throw Object.assign(new Error(`Could not reach Black 4 sign-in (${plain(error?.message ?? error, 120)}).`), { code: "offline" });
+    }
+    return { status: response.status, body: jsonOf(response.body) ?? {} };
+  };
+  const reason = (body, fallback) => plain(body.error_description || body.error || fallback);
+
+  const keep = async (body) => {
+    if (typeof body.access_token !== "string" || !body.access_token) throw new Error("Black 4 sign-in returned no access token.");
+    const seconds = Number(body.expires_in);
+    access = { token: body.access_token, expiresAt: now() + (Number.isFinite(seconds) && seconds > 0 ? seconds : 300) * 1000 };
+    // A rotated refresh token is saved before anything uses the new access.
+    if (typeof body.refresh_token === "string" && body.refresh_token) {
+      refreshToken = body.refresh_token;
+      await store.save(refreshToken);
+    }
+  };
+  const forget = async () => {
+    access = null;
+    refreshToken = null;
+    try { await store.clear(); } catch {}
+  };
+
+  const exchange = async (token) => {
+    const { status, body } = await post("/oauth2/token", { grant_type: "refresh_token", client_id: authkit.clientId, refresh_token: token, ...authkit.params });
+    if (status === 200 && body.access_token) return { ok: true, body };
+    return { ok: false, grant: body.error === "invalid_grant" || status === 400 || status === 401, message: reason(body, `HTTP ${status}`) };
+  };
+
+  /** Swaps the refresh token for a new access token. One at a time. On a
+   * refused grant it reads the store once more (another window may have
+   * rotated it) before it gives up and signs out. */
+  const refresh = () => refreshing ??= (async () => {
+    try {
+      if (!refreshToken) throw Object.assign(new Error("Sign in to Black 4 first."), { code: "signed-out" });
+      const used = refreshToken;
+      let result = await exchange(used);
+      if (!result.ok && result.grant) {
+        const stored = await store.load().catch(() => null);
+        if (stored && stored !== used) { refreshToken = stored; result = await exchange(stored); }
+      }
+      if (!result.ok) {
+        if (result.grant) {
+          await forget();
+          set({ status: "signed-out", detail: "Your Black 4 sign-in ended. Sign in again." });
+          throw Object.assign(new Error("Your Black 4 sign-in ended. Sign in again."), { code: "signed-out" });
+        }
+        throw Object.assign(new Error(`Black 4 sign-in could not refresh (${result.message}).`), { code: "offline" });
+      }
+      await keep(result.body);
+      return access.token;
+    } finally { refreshing = null; }
+  })();
+
+  return {
+    snapshot: () => view,
+    subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
+    get signedIn() { return view.status === "signed-in"; },
+
+    /** A saved sign-in from earlier in this Buzz run, if there is one. */
+    restore: () => restored ??= (async () => {
+      try {
+        const saved = await store.load();
+        if (!saved) return false;
+        refreshToken = saved;
+        await refresh();
+        set({ status: "signed-in" });
+        return true;
+      } catch { return false; } finally { restored = null; }
+    })(),
+
+    /** An access token that is good for a while yet; refreshes first when near its end. */
+    async accessToken({ force = false } = {}) {
+      if (!force && access && access.expiresAt - now() > REFRESH_EARLY_MS) return access.token;
+      return refresh();
+    },
+
+    /** Starts a device sign-in. `onCode({ url, userCode, expiresAt })` hears
+     * what to show; resolves once signed in, rejects with a sentence. */
+    async signIn({ onCode } = {}) {
+      const mine = ++flow;
+      const live = () => mine === flow;
+      set({ status: "starting" });
+      try {
+        const started = await post("/oauth2/device_authorization", { client_id: authkit.clientId, scope: authkit.scope, ...authkit.params });
+        if (!live()) throw Object.assign(new Error("Cancelled."), { code: "cancelled" });
+        const code = started.body;
+        if (started.status !== 200 || typeof code.device_code !== "string") throw new Error(`Black 4 sign-in did not start (${reason(code, `HTTP ${started.status}`)}).`);
+        // Only a link on the sign-in origin is ever shown.
+        const link = [code.verification_uri_complete, code.verification_uri].find((value) => {
+          try { const url = new URL(value); return url.origin === authkit.origin && !url.username && !url.password; } catch { return false; }
+        });
+        if (!link) throw new Error("Black 4 sign-in returned no link to open.");
+        const userCode = typeof code.user_code === "string" ? plain(code.user_code, 32) : "";
+        const expiresAt = now() + (Number(code.expires_in) > 0 ? Number(code.expires_in) : 600) * 1000;
+        set({ status: "waiting", url: link, userCode, expiresAt });
+        onCode?.({ url: link, userCode, expiresAt });
+        let interval = Number(code.interval) > 0 ? Number(code.interval) : DEVICE_INTERVAL_S;
+        for (;;) {
+          await wait(interval * 1000);
+          if (!live()) throw Object.assign(new Error("Cancelled."), { code: "cancelled" });
+          if (now() > expiresAt) throw Object.assign(new Error("The sign-in code expired. Sign in again."), { code: "expired" });
+          let polled;
+          try {
+            polled = await post("/oauth2/token", { grant_type: "urn:ietf:params:oauth:grant-type:device_code", device_code: code.device_code, client_id: authkit.clientId, ...authkit.params });
+          } catch (error) {
+            if (error.code === "offline") continue; // a dropped poll is asked again
+            throw error;
+          }
+          if (!live()) throw Object.assign(new Error("Cancelled."), { code: "cancelled" });
+          if (polled.status === 200 && polled.body.access_token) { await keep(polled.body); break; }
+          const error = polled.body.error;
+          if (error === "authorization_pending") continue;
+          if (error === "slow_down") { interval += 5; continue; }
+          if (error === "expired_token") throw Object.assign(new Error("The sign-in code expired. Sign in again."), { code: "expired" });
+          if (error === "access_denied") throw Object.assign(new Error("Sign-in was declined."), { code: "denied" });
+          throw new Error(`Black 4 sign-in failed (${reason(polled.body, `HTTP ${polled.status}`)}).`);
+        }
+        set({ status: "signed-in" });
+      } catch (error) {
+        if (live()) set({ status: "signed-out", ...(error.code === "cancelled" ? {} : { detail: error.message }) });
+        throw error;
+      }
+    },
+    cancel() { flow += 1; if (view.status === "starting" || view.status === "waiting") set({ status: "signed-out" }); },
+    async signOut() { flow += 1; await forget(); set({ status: "signed-out" }); },
+  };
+}
+
+/** The Black 4 MCP over HTTPS (Streamable HTTP, one JSON or SSE reply per
+ * POST), as the signed-in person. A 401 refreshes the sign-in and asks once
+ * more; a lost MCP session is opened again. Errors carry `code`: "signin"
+ * when the sign-in is the problem, "offline" when Black 4 could not be reached. */
+export function createMcp({ request, session, url = MCP_URL, clientInfo = { name: "black4-buzz", version: "2.0.0" } } = {}) {
+  let sessionId = null;
+  let opening = null;
+  let opened = null; // the initialize result
+  let nextId = 1;
+
+  const post = async (message, { timeoutMs = 60 * 1000, retried = false, reopened = false } = {}) => {
+    let token;
+    try { token = await session.accessToken({ force: retried }); } catch (error) {
+      throw Object.assign(new Error(error.message), { code: "signin" });
+    }
+    const headers = {
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+      authorization: `Bearer ${token}`,
+      "mcp-protocol-version": MCP_PROTOCOL,
+    };
+    if (sessionId && message.method !== "initialize") headers["mcp-session-id"] = sessionId;
+    let response;
+    try {
+      response = await request({ url, method: "POST", headers, body: JSON.stringify(message), timeoutMs: clampTimeout(timeoutMs) });
+    } catch (error) {
+      throw Object.assign(new Error(`Could not reach Black 4 (${plain(error?.message ?? error, 120)}).`), { code: "offline" });
+    }
+    if (response.status === 401 && !retried) return post(message, { timeoutMs, retried: true, reopened });
+    if (response.status === 401 || response.status === 403) {
+      const body = jsonOf(response.body);
+      const said = plain(body?.error_description ?? body?.error?.message ?? body?.error ?? "");
+      throw Object.assign(new Error(`Black 4 refused your sign-in${said ? `: ${said}` : ""}.`), { code: "signin" });
+    }
+    const sid = headerOf(response, "mcp-session-id");
+    if (sid) sessionId = sid;
+    // (Never for a notification: initialized is sent from inside open itself.)
+    if (response.status === 404 && headers["mcp-session-id"] && message.id != null && message.method !== "initialize" && !reopened) {
+      // The server forgot this MCP session: open a new one and ask again, once.
+      sessionId = null;
+      opened = null;
+      await open();
+      return post(message, { timeoutMs, retried, reopened: true });
+    }
+    if (response.status === 202 || response.status === 204) return undefined;
+    if (response.status < 200 || response.status >= 300) {
+      throw Object.assign(new Error(`Black 4 answered HTTP ${response.status}${response.body ? `: ${plain(response.body, 200)}` : ""}.`), { code: "http" });
+    }
+    const type = headerOf(response, "content-type") ?? "";
+    const messages = [];
+    if (type.includes("text/event-stream")) {
+      for (const event of String(response.body ?? "").split(/\r?\n\r?\n/)) {
+        const data = event.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => line.slice(5).replace(/^ /, "")).join("\n");
+        const parsed = data && jsonOf(data);
+        if (parsed) messages.push(...(Array.isArray(parsed) ? parsed : [parsed]));
+      }
+    } else {
+      const parsed = jsonOf(response.body ?? "");
+      if (parsed) messages.push(...(Array.isArray(parsed) ? parsed : [parsed]));
+    }
+    const reply = messages.find((entry) => entry?.id === message.id);
+    if (!reply) throw Object.assign(new Error("Black 4 sent no answer."), { code: "http" });
+    if (reply.error) throw Object.assign(new Error(plain(reply.error.message || "Black 4 MCP error")), { code: "rpc" });
+    return reply.result;
+  };
+
+  const open = () => opening ??= (async () => {
+    try {
+      const result = await post({ jsonrpc: "2.0", id: nextId++, method: "initialize", params: { protocolVersion: MCP_PROTOCOL, capabilities: {}, clientInfo } });
+      await post({ jsonrpc: "2.0", method: "notifications/initialized" }).catch(() => {});
+      opened = result ?? {};
+      return opened;
+    } finally { opening = null; }
+  })();
+
+  return {
+    /** Opens the MCP session (again, after `reset`) and resolves with initialize's result. */
+    initialize: () => opened ? Promise.resolve(opened) : open(),
+    async request(method, params, { timeoutMs } = {}) {
+      if (!opened) await open();
+      return post({ jsonrpc: "2.0", id: nextId++, method, params }, { timeoutMs });
+    },
+    reset() { sessionId = null; opened = null; },
+  };
+}
 
 // A tool's answer as data, or its refusal as an Error carrying the server's
 // own sentence. The MCP answers `{"error":{"code","message"}}` text on refusal.
@@ -99,7 +394,7 @@ export function reviewReader(call) {
 // (prominent fills pair CanvasText with Canvas text, never currentColor, which
 // would resolve against the element's own text color), and sizes are em-based,
 // so light, dark and interface size all hold.
-// `useConnection` returns the bridge status string or `{ status, detail, connect }`.
+// `useConnection` returns the connection status string or `{ status, detail, connect }`.
 const HOST_BORDER = "var(--border-standard,color-mix(in srgb,currentColor 14%,transparent))";
 const HOST_ACCENT = "var(--border-accent,var(--border-focus,currentColor))";
 export function reviewSurface(React, read, HumanView, useConnection = () => "connected") {
@@ -137,6 +432,7 @@ export function reviewSurface(React, read, HumanView, useConnection = () => "con
   const CONNECTION_TEXT = {
     starting: "Connecting to Black 4…",
     "signing-in": "Waiting for you to sign in to Black 4.",
+    "signed-out": "Sign in to Black 4 in Settings → Black 4.",
     stopped: "Black 4 is stopped.",
     failed: "Black 4 is not connected.",
   };
@@ -217,8 +513,9 @@ export function apply(ctx) {
 
   // ---- state shared with the Settings card -------------------------------
   let state = {
-    status: "starting", // starting | signing-in | connected | stopped | failed
+    status: "starting", // starting | signed-out | signing-in | connected | stopped | failed
     detail: "",
+    signIn: null, // { url, userCode } while a device sign-in waits for the person
     tools: 0,
     account: null,
     instructions: "",
@@ -242,95 +539,37 @@ export function apply(ctx) {
     update({ log });
   };
 
-  // ---- the bridge process and its JSON-RPC session -----------------------
-  let proc = null;
-  let buffer = "";
-  let nextId = 1;
-  const pending = new Map();
+  // ---- the Black 4 sign-in and the MCP over HTTPS ------------------------
+  const hostRequest = (input) => {
+    if (typeof ctx.host?.request !== "function") throw new Error("This Buzz cannot make HTTPS requests for plugins.");
+    return ctx.host.request(input);
+  };
+  const session = createSession({ request: hostRequest });
+  const mcp = createMcp({ request: hostRequest, session });
   let retry = 0;
   let retryTimer = null;
   let stopped = false;
   let starting = false;
   let generation = 0;
+  let linkOnConnect = false; // set by an interactive sign-in: link this Buzz's key once connected
   const registered = new Map(); // tool name -> disposer (if the host returns one)
 
-  const rejectAll = (message) => {
-    for (const { reject, timer } of pending.values()) {
-      clearTimeout(timer);
-      reject(new Error(message));
-    }
-    pending.clear();
-  };
-
-  const send = async (message) => {
-    if (!proc) throw new Error("The Black 4 bridge is not running.");
-    await proc.write(JSON.stringify(message) + "\n");
-  };
-
-  const request = (method, params, { timeoutMs = CALL_TIMEOUT_MS, signal } = {}) =>
-    new Promise((resolve, reject) => {
-      const id = nextId++;
-      let abort;
-      const finish = (callback, value) => {
-        if (!pending.has(id)) return;
-        clearTimeout(timer);
-        pending.delete(id);
-        if (abort) signal.removeEventListener("abort", abort);
-        callback(value);
-      };
-      const timer = setTimeout(() => {
-        finish(reject, new Error(`Black 4 MCP did not answer ${method} in ${Math.round(timeoutMs / 1000)}s.`));
-      }, timeoutMs);
-      pending.set(id, {
-        resolve: (value) => finish(resolve, value),
-        reject: (error) => finish(reject, error),
-        timer,
-      });
-      if (signal) {
-        abort = () => {
-          if (!pending.has(id)) return;
-          finish(reject, new Error("Stopped."));
-          void send({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: id, reason: "Stopped in Buzz" } }).catch(() => {});
-        };
-        if (signal.aborted) return abort();
-        signal.addEventListener("abort", abort, { once: true });
-      }
-      void send({ jsonrpc: "2.0", id, method, params }).catch((error) => finish(reject, error));
+  /** One MCP request. A reply that lands after a reconnect, sign-out or stop
+   * (the generation moved on) is refused; `signal` stops waiting for it. */
+  const request = (method, params, { timeoutMs = CALL_TIMEOUT_MS, signal } = {}) => {
+    const attempt = generation;
+    const call = mcp.request(method, params, { timeoutMs }).then((value) => {
+      if (attempt !== generation) throw new Error("Black 4 reconnected; ask again.");
+      return value;
     });
-
-  const onStdout = (chunk) => {
-    buffer += chunk;
-    let newline;
-    while ((newline = buffer.indexOf("\n")) >= 0) {
-      const line = buffer.slice(0, newline).trim();
-      buffer = buffer.slice(newline + 1);
-      if (!line) continue;
-      let message;
-      try {
-        message = JSON.parse(line);
-      } catch {
-        continue;
-      }
-      if (message.id == null || !pending.has(message.id)) continue;
-      const { resolve, reject } = pending.get(message.id);
-      if (message.error) reject(new Error(message.error.message || "Black 4 MCP error"));
-      else resolve(message.result);
-    }
+    if (!signal) return call;
+    return new Promise((resolve, reject) => {
+      const abort = () => reject(new Error("Stopped."));
+      if (signal.aborted) return abort();
+      signal.addEventListener("abort", abort, { once: true });
+      call.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+    });
   };
-
-  const onStderr = (chunk) => {
-    for (const raw of chunk.split("\n")) {
-      const line = raw.trim();
-      if (!line) continue;
-      if (/authorize this client|Waiting for authorization|Browser opened/i.test(line)) {
-        update({ status: "signing-in", detail: "Finish signing in to Black 4 in your browser." });
-      }
-      // mcp-remote prints the sign-in URL; keep it out of the log (it carries a PKCE challenge).
-      if (/https?:\/\/\S*authorize/i.test(line)) continue;
-      if (/error|connected|refresh|exit/i.test(line)) note(line);
-    }
-  };
-
   // ---- agent tools --------------------------------------------------------
   const relayFor = (client) => {
     try {
@@ -346,10 +585,13 @@ export function apply(ctx) {
       .join("\n");
 
   const toolCall = (name) => async (client, context, args) => {
+    // Only this plugin's own hardware provider mints door passes. An agent's
+    // call carries the person's sign-in, so Black 4 cannot tell it apart.
+    if (mintsPass(name, args)) throw new Error(PASS_REFUSED);
     if (state.status !== "connected") {
       throw new Error(
         `Black 4 is not connected in Buzz (${state.status}${state.detail ? `: ${state.detail}` : ""}). ` +
-          "Ask the owner to open Settings → Black 4 and choose Reconnect.",
+          "Ask the owner to open Settings → Black 4 and choose Sign in.",
       );
     }
     let input = args ?? {};
@@ -372,6 +614,7 @@ export function apply(ctx) {
     for (const tool of tools) {
       const name = PREFIX + tool.name;
       if (registered.has(name)) continue;
+      if (mintsPass(tool.name)) continue; // never offered to agents
       if (!/^[a-z][a-z0-9_]{0,63}$/.test(name)) {
         note(`Skipped a tool whose name Buzz refuses: ${tool.name}`);
         continue;
@@ -404,7 +647,7 @@ export function apply(ctx) {
   };
 
   // ---- waiting count for the Reviews badge --------------------------------
-  // `review_queue.total` counts decisions waiting on the bridge's signed-in
+  // `review_queue.total` counts decisions waiting on the plugin's signed-in
   // account (the MCP principal), which can differ from the embedded website's
   // own sign-in. One call in flight at a time; an answer that arrives after
   // the connection it was asked on has been replaced is ignored.
@@ -438,8 +681,10 @@ export function apply(ctx) {
   // ---- agent access: this Buzz's key, linked to the signed-in person ------
   // Agents that run elsewhere (Black 4 hardware) sign their own requests; the
   // MCP accepts them when their owner's Buzz key is linked to a staff person.
-  // The link is a claim made from the person's own sign-in, so it is asked
-  // for once, with one button, and never made on its own.
+  // The link is a claim made from the person's own sign-in. It is made right
+  // after an interactive Sign in, when this key is not linked yet (approved
+  // 2026-11-15), and otherwise only with the Link my agents button: a plain
+  // check never links, so Remove… stays removed until the person asks again.
   let listedNames = new Set();
   let linkTicket = 0;
   const viewerKey = () => {
@@ -451,18 +696,25 @@ export function apply(ctx) {
     }
   };
   const setLink = (agentLink) => update({ agentLink });
-  const callBlack4 = async (name, args) => {
+  /** A Black 4 tool by name, directly when listed, else through call_tool.
+   * `unavailable` is the sentence for a server that does not have it. */
+  const callBlack4 = async (name, args, { unavailable = LINK_UNAVAILABLE } = {}) => {
     let result;
     try {
       if (listedNames.has(name)) result = await request("tools/call", { name, arguments: args }, { timeoutMs: LINK_TIMEOUT_MS });
       else if (listedNames.has("call_tool")) result = await request("tools/call", { name: "call_tool", arguments: { name, arguments: args } }, { timeoutMs: LINK_TIMEOUT_MS });
-      else throw Object.assign(new Error(LINK_UNAVAILABLE), { code: "unavailable" });
+      else throw Object.assign(new Error(unavailable), { code: "unavailable" });
     } catch (error) {
-      if (error.code) throw error;
-      if (/unknown tool|no tool|not found/i.test(error.message)) throw Object.assign(new Error(LINK_UNAVAILABLE), { code: "unavailable" });
+      if (error.code === "unavailable" || error.code === "signin") throw error;
+      if (/unknown tool|no tool|not found/i.test(error.message)) throw Object.assign(new Error(unavailable), { code: "unavailable" });
       throw Object.assign(new Error("Couldn't reach Black 4. Check your connection and try again."), { code: "offline" });
     }
-    return readAnswer(result);
+    try {
+      return readAnswer(result);
+    } catch (error) {
+      if (error.code === "unavailable") throw Object.assign(new Error(unavailable), { code: "unavailable" });
+      throw error;
+    }
   };
   const linkFailure = (error, key) => ({
     status: error.code === "unavailable" ? "unavailable" : "error",
@@ -484,24 +736,37 @@ export function apply(ctx) {
       if (current()) setLink(linkFailure(error, key));
     }
   };
-  const checkLink = () => {
+  const makeLink = async (key) => {
+    let data;
+    try {
+      data = await callBlack4("link_agent_owner_key", { ownerKey: key, label: linkLabel() });
+    } catch (error) {
+      // A refusal is the server's own sentence, such as a key already linked
+      // to another person. Say it plainly; nothing retries it.
+      if (!["offline", "signin", "unavailable"].includes(error.code)) throw new Error(`Your agents are not linked. ${error.message}`);
+      throw error;
+    }
+    if (!data?.link || String(data.link.ownerKey).toLowerCase() !== key) throw new Error("Black 4 did not confirm the link.");
+    return { status: "linked", key, link: data.link };
+  };
+  /** Checks this Buzz's key. `{ link: true }` (right after Sign in) also
+   * links it when it is not linked yet. */
+  const checkLink = (options) => {
+    const autoLink = options?.link === true;
     const key = viewerKey();
     if (state.status !== "connected") return setLink({ status: "idle" });
     if (!key) return setLink({ status: "no-key" });
-    return linkStep("checking", key, async () => {
+    return linkStep(autoLink ? "linking" : "checking", key, async () => {
       const data = await callBlack4("list_agent_owner_keys", {});
       const link = (data?.links ?? []).find((entry) => String(entry.ownerKey).toLowerCase() === key && !entry.revokedAt);
-      return link ? { status: "linked", key, link } : { status: "unlinked", key };
+      if (link) return { status: "linked", key, link };
+      return autoLink ? makeLink(key) : { status: "unlinked", key };
     });
   };
   const linkAgents = () => {
     const key = viewerKey();
     if (state.status !== "connected" || !key) return checkLink();
-    return linkStep("linking", key, async () => {
-      const data = await callBlack4("link_agent_owner_key", { ownerKey: key, label: linkLabel() });
-      if (!data?.link || String(data.link.ownerKey).toLowerCase() !== key) throw new Error("Black 4 did not confirm the link.");
-      return { status: "linked", key, link: data.link };
-    });
+    return linkStep("linking", key, () => makeLink(key));
   };
   const removeLink = () => {
     const key = viewerKey();
@@ -525,6 +790,26 @@ export function apply(ctx) {
       update({ hardwareError: `Black 4 hardware is unavailable in this Buzz: ${String(error?.message ?? error).slice(0, 200)}` });
     },
     access: { use: () => useBridgeState().agentLink, link: () => linkAgents() },
+    // One 60-second pass per door request, minted as the signed-in person.
+    // ownerKey: this Buzz identity's key, which becomes the pass's owner, so an
+    // activate matches the attestation this Buzz signs.
+    // A key that is not one of the person's live links (never linked,
+    // removed, or someone else's) is refused as owner_key_not_linked: say so
+    // and bring back the link step, in the form and in Settings.
+    sign: async (input) => {
+      const ownerKey = viewerKey();
+      let answer;
+      try {
+        answer = await callBlack4(PASS_TOOL, { ...input, ...(ownerKey ? { ownerKey } : {}) }, { unavailable: "This Black 4 server can't sign hardware requests yet." });
+      } catch (error) {
+        if (error?.serverCode === "owner_key_not_linked" || /owner_key_not_linked/.test(String(error?.message))) {
+          void checkLink();
+          throw Object.assign(new Error("Your agents are not linked to you on this Buzz identity, or the key is linked to someone else. Choose Link my agents, then try again."), { code: "unlinked" });
+        }
+        throw error;
+      }
+      return answer?.data ?? answer;
+    },
   });
   const syncHardware = () => {
     if (state.status !== "connected" || !state.account) return;
@@ -544,47 +829,24 @@ export function apply(ctx) {
     retryTimer = setTimeout(start, delay);
   };
 
-  const kill = (child) => {
-    try { Promise.resolve(child?.kill?.()).catch(() => {}); } catch {}
-  };
-
+  /** Connects the MCP as the signed-in person: lists and offers its tools,
+   * reads whoami, then the Reviews count and Agent access. Without a sign-in
+   * it waits for the person to choose Sign in. */
   const start = async () => {
-    if (stopped || proc || starting) return;
+    if (stopped || starting) return;
     starting = true;
     const attempt = ++generation;
-    buffer = "";
-    update({ status: "starting", detail: "" });
-    let child;
     try {
-      child = await ctx.host.spawn("bridge", {
-        cwd: "~/.black4/mcp-bridge",
-        onStdout: (chunk) => { if (attempt === generation && !stopped) onStdout(chunk); },
-        onStderr: (chunk) => { if (attempt === generation && !stopped) onStderr(chunk); },
-      });
-    } catch (error) {
+      if (!session.signedIn) {
+        update({ status: "starting", detail: "" });
+        const restored = await session.restore();
+        if (attempt !== generation || stopped) return;
+        if (!restored) { update({ status: "signed-out", detail: session.snapshot().detail ?? "" }); return; }
+      }
+      update({ status: "starting", detail: "" });
+      mcp.reset();
+      const init = await mcp.initialize();
       if (attempt !== generation || stopped) return;
-      starting = false;
-      scheduleRetry(`Could not start black4-mcp-bridge (${error?.message ?? error}). Is it installed?`);
-      return;
-    }
-    if (attempt !== generation || stopped) { kill(child); return; }
-    starting = false;
-    proc = child;
-    child.exited?.then?.((code) => {
-      if (proc !== child) return;
-      generation += 1;
-      proc = null;
-      rejectAll("The Black 4 bridge stopped.");
-      if (!stopped) scheduleRetry(`The bridge exited (${JSON.stringify(code ?? null)}).`);
-    });
-    try {
-      const init = await request(
-        "initialize",
-        { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "black4-buzz", version: "1.0.0" } },
-        { timeoutMs: START_TIMEOUT_MS },
-      );
-      if (attempt !== generation || stopped) return;
-      await send({ jsonrpc: "2.0", method: "notifications/initialized" });
       const listed = await request("tools/list", {});
       if (attempt !== generation || stopped) return;
       listedNames = new Set((listed?.tools ?? []).map((tool) => tool.name));
@@ -601,15 +863,15 @@ export function apply(ctx) {
       update({ status: "connected", detail: "", account, instructions: init?.instructions ?? "" });
       syncHardware();
       void pollQueue();
-      void checkLink();
+      const link = linkOnConnect;
+      linkOnConnect = false;
+      void checkLink({ link });
     } catch (error) {
       if (attempt !== generation || stopped) return;
-      rejectAll("The Black 4 connection failed.");
-      if (proc === child) {
-        proc = null;
-        kill(child);
-      }
-      scheduleRetry(error?.message ?? String(error));
+      if (error?.code === "signin" || !session.signedIn) update({ status: "signed-out", detail: error?.message ?? "" });
+      else scheduleRetry(error?.message ?? String(error));
+    } finally {
+      if (attempt === generation) starting = false;
     }
   };
 
@@ -619,12 +881,55 @@ export function apply(ctx) {
     retry = 0;
     generation += 1;
     starting = false;
-    const child = proc;
-    proc = null;
-    rejectAll("Reconnecting.");
-    kill(child);
     start();
   };
+
+  /** Settings → Black 4 → Sign in: the device sign-in, then connect and link. */
+  // Each Sign in is its own attempt: a cancelled one that ends later (its
+  // poll was asleep) never touches the one that replaced it.
+  let signInTicket = 0;
+  const signIn = async () => {
+    if (stopped || state.status === "signing-in") return;
+    const mine = ++signInTicket;
+    clearTimeout(retryTimer);
+    generation += 1;
+    starting = false;
+    update({ status: "signing-in", detail: "", signIn: null });
+    try {
+      await session.signIn({ onCode: (code) => { if (mine === signInTicket) update({ status: "signing-in", signIn: { url: code.url, userCode: code.userCode } }); } });
+    } catch (error) {
+      if (!stopped && mine === signInTicket && state.status === "signing-in") update({ status: "signed-out", signIn: null, detail: error?.code === "cancelled" ? "" : error?.message ?? String(error) });
+      return;
+    }
+    if (stopped || mine !== signInTicket) return;
+    update({ signIn: null });
+    linkOnConnect = true;
+    reconnect();
+  };
+  const cancelSignIn = () => {
+    signInTicket += 1;
+    session.cancel();
+    update({ status: "signed-out", signIn: null, detail: "" });
+  };
+  const signOut = async () => {
+    signInTicket += 1;
+    generation += 1;
+    starting = false;
+    clearTimeout(retryTimer);
+    stopQueuePolling();
+    await session.signOut();
+    hardware.withdraw();
+    update({ status: "signed-out", detail: "", account: null, hardware: "hidden" });
+  };
+
+  // A refresh the sign-in server refused ends the session: say so in place.
+  ctx.effect(() => session.subscribe((view) => {
+    if (view.status === "signed-out" && state.status === "connected") {
+      generation += 1;
+      stopQueuePolling();
+      update({ status: "signed-out", detail: view.detail ?? "" });
+    }
+  }));
 
   ctx.effect(() => {
     stopped = false;
@@ -635,10 +940,7 @@ export function apply(ctx) {
       starting = false;
       clearTimeout(retryTimer);
       stopQueuePolling();
-      const child = proc;
-      proc = null;
-      rejectAll("The Black 4 plugin stopped.");
-      kill(child);
+      session.cancel();
       for (const dispose of registered.values()) {
         try {
           dispose?.();
@@ -662,6 +964,7 @@ export function apply(ctx) {
   // ---- Settings card ------------------------------------------------------
   const STATUS_TEXT = {
     starting: "Connecting…",
+    "signed-out": "Not signed in",
     "signing-in": "Waiting for you to sign in",
     connected: "Connected",
     stopped: "Stopped",
@@ -787,7 +1090,7 @@ export function apply(ctx) {
     let actions = [];
     let role = "status";
     let next = "";
-    if (!connected) text = "Connect Black 4 first.";
+    if (!connected) text = "Sign in to Black 4 first.";
     else if (link.status === "no-key") text = "Open a community in Buzz first.";
     else if (link.status === "checking" || link.status === "idle") text = "Checking…";
     else if (link.status === "unlinked" || link.status === "linking") {
@@ -818,6 +1121,32 @@ export function apply(ctx) {
     );
   }
 
+  // Sign in, the code to approve while it waits, and what to do once in.
+  // Not a <form>: nothing here submits anything of Buzz's.
+  function SignInControls({ current }) {
+    const [copied, setCopied] = React.useState(false);
+    const button = (text, onClick, primary = false) => h("button", { type: "button", onClick, className: primary ? "b4-primary" : undefined }, text);
+    const bar = (...children) => h("div", { style: { display: "flex", gap: "var(--space-2)", flexWrap: "wrap", alignItems: "center" } }, ...children);
+    if (current.status === "signing-in") {
+      const code = current.signIn;
+      if (!code) return bar(h("span", { role: "status" }, "Starting sign-in…"), button("Cancel", cancelSignIn));
+      return h("div", { style: { display: "flex", flexDirection: "column", gap: "var(--space-2)" } },
+        bar(
+          h("a", { href: code.url, target: "_blank", rel: "noopener noreferrer" }, "Open Black 4 sign-in"),
+          button(copied ? "Copied" : "Copy link", () => {
+            Promise.resolve(globalThis.navigator?.clipboard?.writeText?.(code.url))
+              .then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }, () => {});
+          })),
+        code.userCode ? bar(h("span", null, "Check that the page shows this code:"), h("code", { style: { fontSize: "1.1em", letterSpacing: "0.08em" } }, code.userCode)) : null,
+        bar(h("span", { role: "status" }, "Waiting for you to approve it in your browser…"), button("Cancel", cancelSignIn)));
+    }
+    if (current.status === "signed-out") return bar(button("Sign in", () => void signIn(), true));
+    if (current.status === "stopped") return null;
+    return bar(
+      button(current.status === "connected" ? "Reconnect" : "Try again", reconnect),
+      button("Sign out", () => void signOut()));
+  }
+
   function Black4Settings() {
     const current = useBridgeState();
     const row = (label, value) =>
@@ -840,15 +1169,12 @@ export function apply(ctx) {
         "section",
         { className: "ui-card", style: { padding: "var(--space-panel-inset)", display: "flex", flexDirection: "column", gap: "var(--space-2)" } },
         row("Status", STATUS_TEXT[current.status] ?? current.status),
-        current.detail ? row("", current.detail) : null,
-        row("Signed in as", current.account ? `${current.account.email ?? "unknown"} (${current.account.kind ?? "unknown"})` : "unknown"),
-        row("Agent tools", String(current.tools)),
-        row("Server", "https://api.black4.ai/mcp?tools=core"),
-        h(
-          "div",
-          null,
-          h("button", { type: "button", onClick: reconnect }, current.status === "connected" ? "Reconnect" : "Connect"),
-        ),
+        current.detail ? h("span", { role: current.status === "connected" ? "status" : "alert" }, current.detail) : null,
+        current.account && current.status === "connected"
+          ? row("Signed in as", `${current.account.email ?? "unknown"}${current.account.kind ? ` (${current.account.kind})` : ""}`)
+          : null,
+        current.status === "connected" ? row("Agent tools", String(current.tools)) : null,
+        h(SignInControls, { current }),
       ),
       h(AgentAccess, { link: current.agentLink, connected: current.status === "connected", hardware: current.hardware === "offered" }),
       current.hardwareError ? h("p", { role: "alert" }, current.hardwareError) : null,
@@ -856,7 +1182,7 @@ export function apply(ctx) {
         ? h(
             "details",
             null,
-            h("summary", null, "Bridge log"),
+            h("summary", null, "Connection log"),
             h("pre", { style: { whiteSpace: "pre-wrap", fontSize: "0.85em" } }, current.log.join("\n")),
           )
         : null,
@@ -1003,17 +1329,18 @@ export function relayMemberMentions(ctx) {
 // Buzz is closed.
 //
 // This part holds no key and no agent state. Each step is one request to the
-// machine's `agentctl`, reached over the owner's own SSH access (the `commerce`
-// process the manifest declares). Buzz signs the owner's attestation; the
-// plugin only carries it. Harness sign-in belongs to the machine: once a
+// machine's `agentctl`, POSTed to the machine's public HTTPS door with a
+// 60-second, single-use pass that Platform Control mints for the signed-in
+// staff member and binds to that exact request body. Buzz signs the owner's
+// attestation; the plugin only carries it. Harness sign-in belongs to the machine: once a
 // harness is signed in there, every agent on that machine that runs it uses
 // that sign-in. Nothing above this line depends on anything below it except
 // `hardwareSlot`, which `apply` uses to offer the type to staff.
 
-/** Black 4 machines. Adding one is one entry here plus one manifest
- * `processes` entry whose id is `process`. */
+/** Black 4 machines. Adding one is one entry here plus its door's origin in
+ * the manifest's `networkOrigins`. */
 export const MACHINES = [
-  { id: "commerce", label: "Commerce Mac", process: "commerce" },
+  { id: "commerce", label: "Commerce Mac", door: "https://black4-commerce-01.tail50b7f0.ts.net" },
 ];
 const DEFAULT_MACHINE = "commerce";
 
@@ -1052,40 +1379,65 @@ export function machineOf(value) {
 
 export const harnessLabel = (id) => HARNESSES.find((entry) => entry.id === id)?.label;
 
-/** One request to a machine's agentctl: JSON in on stdin, one JSON reply out.
- * `spawn` is `ctx.host.spawn`; `machine` is a machine, its id or a config.
- * The reply is the last stdout line, so a login banner before it is ignored.
- * Rejects with the machine's own error text. */
-export async function askMachine(spawn, machine, request, { signal, timeoutMs = MACHINE_TIMEOUT_MS } = {}) {
+/** The door transport: one agentctl request to a machine, as `ask(machine,
+ * request, { timeoutMs })` resolving agentctl's JSON reply. The body is
+ * serialized once; its exact UTF-8 bytes are hashed for the pass and the same
+ * string is POSTed. Every request gets its own new pass. `sign` is the MCP's
+ * `sign_hardware_request`. A failure says whether the sign-in or the door
+ * failed. */
+export function doorTransport({ request, sign }) {
+  return async (machine, payload, { timeoutMs = MACHINE_TIMEOUT_MS } = {}) => {
+    const body = JSON.stringify(payload);
+    const hash = await bodySha256(body);
+    let pass;
+    try {
+      pass = (await sign({ machine: machine.id, op: payload.op, bodySha256: hash }))?.pass;
+    } catch (error) {
+      if (error?.code === "unlinked") throw error;
+      throw Object.assign(new Error(`Could not reach the ${machine.label}: your Black 4 sign-in could not get a pass (${plain(error?.message ?? error, 200)}).`), { code: "signin" });
+    }
+    if (typeof pass !== "string" || !pass) throw Object.assign(new Error(`Could not reach the ${machine.label}: your Black 4 sign-in got no pass.`), { code: "signin" });
+    let response;
+    try {
+      response = await request({
+        url: `${machine.door}/agentctl`, method: "POST", body, timeoutMs: clampTimeout(timeoutMs + 5000),
+        headers: { authorization: `Black4-Hardware ${pass}`, "content-type": "application/json", accept: "application/json" },
+      });
+    } catch (error) {
+      throw Object.assign(new Error(`Could not reach the ${machine.label}: its door did not answer (${plain(error?.message ?? error, 160)}).`), { code: "door" });
+    }
+    const reply = jsonOf(response.body ?? "");
+    if (response.status === 401) {
+      throw Object.assign(new Error(`Could not reach the ${machine.label}: its door refused the pass${reply?.error ? ` (${plain(reply.error, 160)})` : ""}.`), { code: "door" });
+    }
+    if (reply && typeof reply === "object" && typeof reply.ok === "boolean") return reply;
+    const said = typeof reply?.error === "string" && reply.error ? ` (${plain(reply.error, 160)})` : "";
+    throw Object.assign(new Error(`Could not reach the ${machine.label}: its door answered HTTP ${response.status}${said}.`), { code: "door" });
+  };
+}
+
+/** One request to a machine's agentctl through `ask` (see `doorTransport`):
+ * `machine` is a machine, its id or a config. Rejects with the machine's own
+ * error text, or with what kept the request from reaching it. */
+export async function askMachine(ask, machine, request, { signal, timeoutMs = MACHINE_TIMEOUT_MS } = {}) {
   const target = machineOf(machine);
-  if (typeof spawn !== "function") throw new Error("This Buzz cannot start processes, so it cannot reach Black 4 hardware.");
+  if (typeof ask !== "function") throw new Error(`Could not reach the ${target.label}: sign in to Black 4 first.`);
   signal?.throwIfAborted?.();
-  let out = "";
-  let err = "";
-  let timedOut = false;
-  const text = (chunk) => (typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
-  const child = await spawn(target.process, {
-    onStdout: (chunk) => { out += text(chunk); },
-    onStderr: (chunk) => { err += text(chunk); },
+  let timer;
+  let abort;
+  const cut = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`The ${target.label} did not answer in time.`)), timeoutMs);
+    abort = () => reject(new DOMException("Cancelled.", "AbortError"));
+    signal?.addEventListener?.("abort", abort, { once: true });
   });
-  const stop = () => { try { Promise.resolve(child.kill?.()).catch(() => {}); } catch {} };
-  const timer = setTimeout(() => { timedOut = true; stop(); }, timeoutMs);
-  const abort = () => stop();
-  signal?.addEventListener?.("abort", abort, { once: true });
+  const asked = Promise.resolve().then(() => ask(target, request, { timeoutMs }));
+  asked.catch(() => {}); // a late failure after a timeout or Cancel is not unhandled
+  let reply;
   try {
-    await child.write(JSON.stringify(request));
-    await child.end?.();
-    await child.exited;
+    reply = await Promise.race([asked, cut]);
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener?.("abort", abort);
-  }
-  if (signal?.aborted) throw new DOMException("Cancelled.", "AbortError");
-  if (timedOut) throw new Error(`The ${target.label} did not answer in time.`);
-  const lines = out.split("\n").map((line) => line.trim()).filter(Boolean);
-  let reply;
-  try { reply = JSON.parse(lines.pop() || ""); } catch {
-    throw new Error(`Could not reach the ${target.label}${err.trim() ? `: ${err.trim().slice(-300)}` : "."}`);
   }
   if (!reply?.ok) throw new Error(reply?.error || "The machine refused the request.");
   return reply;
@@ -1097,7 +1449,7 @@ const unsupported = (error) => /unknown op/i.test(String(error?.message ?? error
  * it resolves `{ kind: "ok", harnesses }`, `{ kind: "unsupported" }` (the
  * machine predates the op) or `{ kind: "unreachable", error }`. Concurrent
  * reads share one request. */
-export function statusReader(spawn, { ttlMs = STATUS_TTL_MS, timeoutMs = STATUS_TIMEOUT_MS, now = () => Date.now() } = {}) {
+export function statusReader(ask, { ttlMs = STATUS_TTL_MS, timeoutMs = STATUS_TIMEOUT_MS, now = () => Date.now() } = {}) {
   const cache = new Map(); // machine id -> { at, status }
   const flight = new Map(); // machine id -> promise
   const listeners = new Set();
@@ -1118,7 +1470,7 @@ export function statusReader(spawn, { ttlMs = STATUS_TTL_MS, timeoutMs = STATUS_
         if (hit) return Promise.resolve(hit);
         if (flight.has(id)) return flight.get(id);
       }
-      const request = askMachine(spawn, id, { op: "machine.status" }, { timeoutMs })
+      const request = askMachine(ask, id, { op: "machine.status" }, { timeoutMs })
         .then((reply) => ({ kind: "ok", harnesses: Array.isArray(reply.harnesses) ? reply.harnesses : [] }))
         .catch((error) => (unsupported(error) ? { kind: "unsupported" } : { kind: "unreachable", error: String(error?.message ?? error) }))
         .then((status) => {
@@ -1197,7 +1549,7 @@ export const readyToCreate = (state) => ["signed-in", "unknown", "unsupported"].
  * machine's short userCode, then waits by itself: login.finish with no code
  * waits on the machine for the approval and answers `pending` if it has not
  * come yet, and is asked again until it signs in, fails or is cancelled. */
-export function createLogin(spawn, machine, harness, { onChange, onSignedIn, timeoutMs = LOGIN_TIMEOUT_MS } = {}) {
+export function createLogin(ask, machine, harness, { onChange, onSignedIn, timeoutMs = LOGIN_TIMEOUT_MS } = {}) {
   let state = Object.freeze({ step: "idle" });
   let loginId = null;
   let pending = null;
@@ -1210,7 +1562,7 @@ export function createLogin(spawn, machine, harness, { onChange, onSignedIn, tim
     return text;
   };
   const cancelRemote = (id) => (id
-    ? askMachine(spawn, machine, { op: "login.cancel", loginId: id }, { timeoutMs }).then(() => {}, () => {})
+    ? askMachine(ask, machine, { op: "login.cancel", loginId: id }, { timeoutMs }).then(() => {}, () => {})
     : Promise.resolve());
   const track = (promise) => {
     const tracked = promise.finally(() => { if (pending === tracked) pending = null; });
@@ -1219,7 +1571,7 @@ export function createLogin(spawn, machine, harness, { onChange, onSignedIn, tim
   };
   /** Asks for a new sign-in and shows its link; a reply for a cancelled or
    * replaced attempt is cancelled on the machine instead. */
-  const open = (mine, extra = {}) => askMachine(spawn, machine, { op: "login.start", harness, flows: SIGN_IN_FLOWS }, { timeoutMs })
+  const open = (mine, extra = {}) => askMachine(ask, machine, { op: "login.start", harness, flows: SIGN_IN_FLOWS }, { timeoutMs })
     .then((reply) => {
       const id = typeof reply.loginId === "string" ? reply.loginId : null;
       if (disposed || mine !== generation) return cancelRemote(id);
@@ -1244,7 +1596,7 @@ export function createLogin(spawn, machine, harness, { onChange, onSignedIn, tim
     while (!disposed && mine === generation && loginId === id) {
       let reply;
       try {
-        reply = await askMachine(spawn, machine, { op: "login.finish", loginId: id }, { timeoutMs });
+        reply = await askMachine(ask, machine, { op: "login.finish", loginId: id }, { timeoutMs });
       } catch (error) {
         if (disposed || mine !== generation || loginId !== id) return;
         loginId = null;
@@ -1283,7 +1635,7 @@ export function createLogin(spawn, machine, harness, { onChange, onSignedIn, tim
       const mine = ++generation;
       const used = loginId;
       set({ step: "finishing", url: state.url, needsCode: state.needsCode, ...(state.renewed ? { renewed: true } : {}) });
-      return track(askMachine(spawn, machine, { op: "login.finish", loginId: used, ...(pasted ? { code: pasted } : {}) }, { timeoutMs })
+      return track(askMachine(ask, machine, { op: "login.finish", loginId: used, ...(pasted ? { code: pasted } : {}) }, { timeoutMs })
         .then(async (reply) => {
           if (reply.signedIn === false) throw new Error("Sign-in did not finish.");
           if (loginId === used) loginId = null;
@@ -1325,7 +1677,7 @@ export function createLogin(spawn, machine, harness, { onChange, onSignedIn, tim
 /** Which machine holds each agent. A hosted agent's config is gone once Buzz
  * has set it up, so later steps (which carry only the pubkey) find it here:
  * learned at creation, then from each machine's `list`, else the default. */
-export function agentDirectory(spawn) {
+export function agentDirectory(ask) {
   const known = new Map(); // pubkey -> { machine, harness?, respondTo? }
   const listeners = new Set();
   let scan = null;
@@ -1337,7 +1689,7 @@ export function agentDirectory(spawn) {
   };
   const refresh = () => {
     scan ??= Promise.all(MACHINES.map((machine) =>
-      askMachine(spawn, machine, { op: "list" }, { timeoutMs: STATUS_TIMEOUT_MS })
+      askMachine(ask, machine, { op: "list" }, { timeoutMs: STATUS_TIMEOUT_MS })
         .then((reply) => {
           for (const row of reply.agents ?? []) {
             if (row?.pubkey) known.set(row.pubkey, { machine: machine.id, harness: row.harness, respondTo: row.respondTo });
@@ -1373,7 +1725,7 @@ export function summaryOf(agent, directory) {
 /** The hosted steps Buzz calls, in terms of `askMachine`. Each is safe to repeat.
  * Creation goes to the machine the config names; later steps go to the
  * machine the directory says holds the agent. */
-export function hardwareProvider(spawn, requestId = () => crypto.randomUUID(), directory = agentDirectory(spawn)) {
+export function hardwareProvider(ask, requestId = () => crypto.randomUUID(), directory = agentDirectory(ask)) {
   const pending = new Map(); // name -> request id, so a retried creation gets the same agent
   const clean = (config) => {
     const value = { ...hardwareDefaults(), ...(config && typeof config === "object" ? config : {}) };
@@ -1383,7 +1735,7 @@ export function hardwareProvider(spawn, requestId = () => crypto.randomUUID(), d
     async provision({ name, picture, community, config, signal }) {
       const settled = clean(config);
       if (!pending.has(name)) pending.set(name, requestId());
-      const reply = await askMachine(spawn, settled.machine, {
+      const reply = await askMachine(ask, settled.machine, {
         op: "provision", name, community, requestId: pending.get(name),
         ...(picture ? { picture } : {}), config: settled,
       }, { signal });
@@ -1392,7 +1744,7 @@ export function hardwareProvider(spawn, requestId = () => crypto.randomUUID(), d
     },
     async activate({ pubkey, name, community, auth, config, signal }) {
       const machine = config === undefined ? await directory.machine(pubkey) : machineOf(clean(config).machine);
-      await askMachine(spawn, machine, {
+      await askMachine(ask, machine, {
         op: "activate", pubkey, community, auth: [...auth],
         ...(config === undefined ? {} : { config: clean(config) }),
       }, { signal });
@@ -1400,37 +1752,40 @@ export function hardwareProvider(spawn, requestId = () => crypto.randomUUID(), d
       pending.delete(name);
     },
     async profile({ pubkey, name, picture, signal }) {
-      await askMachine(spawn, await directory.machine(pubkey), { op: "profile", pubkey, name, picture: picture ?? null }, { signal });
+      await askMachine(ask, await directory.machine(pubkey), { op: "profile", pubkey, name, picture: picture ?? null }, { signal });
     },
     instructions: {
       async get({ pubkey, signal }) {
-        return (await askMachine(spawn, await directory.machine(pubkey), { op: "instructions.get", pubkey }, { signal })).instructions ?? "";
+        return (await askMachine(ask, await directory.machine(pubkey), { op: "instructions.get", pubkey }, { signal })).instructions ?? "";
       },
       async set({ pubkey, instructions, signal }) {
-        await askMachine(spawn, await directory.machine(pubkey), { op: "instructions.set", pubkey, instructions }, { signal });
+        await askMachine(ask, await directory.machine(pubkey), { op: "instructions.set", pubkey, instructions }, { signal });
       },
     },
     async remove({ pubkey, signal }) {
-      await askMachine(spawn, await directory.machine(pubkey), { op: "remove", pubkey }, { signal });
+      await askMachine(ask, await directory.machine(pubkey), { op: "remove", pubkey }, { signal });
     },
   };
 }
 
 /** Registers the "Black 4 hardware" agent type on `ctx`. `report(error)` hears
  * any failure of its components, so the plugin's Settings card can say so;
+ * `sign` mints a door pass (the MCP's `sign_hardware_request`);
  * `access` is the Agent access link (`use()` reads it in a component, `link()`
  * asks for it), so the form can offer the one step it needs. */
-export function applyHardware(ctx, { report = () => {}, access } = {}) {
+export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
   const React = ctx.react;
   const h = React.createElement;
-  const spawn = ctx.host?.spawn ? (id, options) => ctx.host.spawn(id, options) : undefined;
-  const statuses = statusReader(spawn);
-  const directory = agentDirectory(spawn);
-  const remote = hardwareProvider(spawn, undefined, directory);
+  const ask = sign && typeof ctx.host?.request === "function"
+    ? doorTransport({ request: (input) => ctx.host.request(input), sign })
+    : undefined;
+  const statuses = statusReader(ask);
+  const directory = agentDirectory(ask);
+  const remote = hardwareProvider(ask, undefined, directory);
 
   // Learn each agent's machine and harness once, off the render path, so
   // summaries and later steps have them.
-  if (spawn) setTimeout(() => { void directory.refresh(); }, 0);
+  if (ask) setTimeout(() => { void directory.refresh(); }, 0);
 
   const muted = { color: "var(--text-secondary, inherit)", opacity: 0.8 };
   const row = { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" };
@@ -1447,7 +1802,7 @@ export function applyHardware(ctx, { report = () => {}, access } = {}) {
       let live = true;
       setStatus(statuses.peek(machineId));
       const off = statuses.subscribe((id) => { if (live && id === machineOf(machineId).id) setStatus(statuses.peek(machineId)); });
-      if (spawn) void statuses.read(machineId).then((next) => { if (live) setStatus(next); });
+      if (ask) void statuses.read(machineId).then((next) => { if (live) setStatus(next); });
       return () => { live = false; off(); };
     }, [machineId]);
     return status;
@@ -1466,7 +1821,7 @@ export function applyHardware(ctx, { report = () => {}, access } = {}) {
     const [copied, setCopied] = React.useState(false);
     const flow = React.useRef(null);
     React.useEffect(() => {
-      const current = createLogin(spawn, machine.id, harness, {
+      const current = createLogin(ask, machine.id, harness, {
         onChange: setLogin,
         onSignedIn: () => statuses.read(machine.id, { force: true }),
       });
@@ -1559,7 +1914,7 @@ export function applyHardware(ctx, { report = () => {}, access } = {}) {
     const status = useStatus(machine.id);
     const options = harnessOptions(status);
     const offered = options.length ? options : HARNESSES;
-    const state = spawn ? signInState(status, value.harness) : { kind: "unreachable" };
+    const state = ask ? signInState(status, value.harness) : { kind: "unreachable" };
 
     // A harness the machine does not have, or cannot sign in: suggest the
     // first one it can run.
@@ -1580,9 +1935,9 @@ export function applyHardware(ctx, { report = () => {}, access } = {}) {
         onChange: (harness) => onChange({ ...value, harness }) }),
       status?.kind === "ok" && !options.length && h("span", { role: "alert" }, `No harness is installed on the ${machine.label}.`),
       h(Select, { label: "Answers", value: value.respondTo, options: ANSWERS, disabled, onChange: (respondTo) => onChange({ ...value, respondTo }) }),
-      spawn
+      ask
         ? h(SignIn, { machineId: machine.id, harness: value.harness, status, disabled })
-        : h("p", { role: "alert" }, "This Buzz cannot start processes, so it cannot reach Black 4 hardware."));
+        : h("p", { role: "alert" }, "Sign in to Black 4 in Settings → Black 4 to reach Black 4 hardware."));
   };
 
   const Create = ({ config, onChange, disabled }) => {
@@ -1616,7 +1971,7 @@ export function applyHardware(ctx, { report = () => {}, access } = {}) {
         if (signal.aborted) return;
         setMachineId(machine.id);
         const [status, instructions] = await Promise.allSettled([
-          askMachine(spawn, machine, { op: "status", pubkey }, { signal, timeoutMs: STATUS_TIMEOUT_MS }),
+          askMachine(ask, machine, { op: "status", pubkey }, { signal, timeoutMs: STATUS_TIMEOUT_MS }),
           remote.instructions.get({ pubkey, signal }),
         ]);
         if (signal.aborted) return;
@@ -1640,7 +1995,7 @@ export function applyHardware(ctx, { report = () => {}, access } = {}) {
       if (restarting) return;
       setRestarting(true);
       try {
-        await askMachine(spawn, machine, { op: "start", pubkey });
+        await askMachine(ask, machine, { op: "start", pubkey });
         setRevision((value) => value + 1);
       } catch (error) {
         setRun((prior) => ({ ...prior, error: String(error?.message ?? error) }));
@@ -1720,7 +2075,7 @@ export function applyHardware(ctx, { report = () => {}, access } = {}) {
  * made it, so the type lives in its own child scope (`ctx.plugin`), disposed to
  * withdraw it. Whatever the registration throws goes to `report`, never up to
  * the plugin: the MCP tools, Reviews and Agent access do not depend on it. */
-export function hardwareSlot(ctx, { report, access, register = applyHardware }) {
+export function hardwareSlot(ctx, { report, access, sign, register = applyHardware }) {
   let scope = null;
   let failed = false;
   const fail = (error) => { failed = true; report(error); };
@@ -1732,14 +2087,14 @@ export function hardwareSlot(ctx, { report, access, register = applyHardware }) 
         if (typeof ctx.plugin !== "function") {
           // An older host: the type stays until the plugin stops.
           scope = { dispose() {} };
-          register(ctx, { report, access });
+          register(ctx, { report, access, sign });
           return;
         }
         scope = ctx.plugin({
           name: "black4-hardware",
           inject: ["react", "host", "agents"],
           apply: (child) => {
-            try { register(child, { report, access }); } catch (error) { fail(error); }
+            try { register(child, { report, access, sign }); } catch (error) { fail(error); }
           },
         });
       } catch (error) {

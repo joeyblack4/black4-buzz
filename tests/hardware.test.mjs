@@ -1,36 +1,26 @@
-// Black 4 hardware (the hosted agent type in plugins/black4) against a process double: no SSH, no machine.
+// Black 4 hardware (the hosted agent type in plugins/black4) against a door
+// double, then the real door transport against fake MCP and door servers:
+// no machine, no network.
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
   askMachine, hardwareProvider, hardwareDefaults, MACHINES, machineOf, statusReader, harnessOptions, signInState, readyToCreate,
-  createLogin, agentDirectory, summaryOf, signInOf,
+  createLogin, agentDirectory, summaryOf, signInOf, doorTransport, bodySha256, createSession, createMcp, readAnswer, memoryStore,
 } from "../plugins/black4/plugin.js";
+import { fakeAuthKit, fakeMcp, fakeDoor, https, sha256url, DOOR } from "./fakes.mjs";
 
-/** A spawn double: records each request and answers with `reply(request)`.
- * `undefined` means the machine cannot be reached; a promise is a slow
- * machine; `banner` is printed before the reply, as an SSH login might. */
-function machine(reply, { banner = "" } = {}) {
+/** A door double, in the shape of \`doorTransport\`'s \`ask\`: records each
+ * request and answers with \`reply(request)\`. \`undefined\` means the door
+ * cannot be reached; a promise is a slow machine. */
+function machine(reply) {
   const seen = [];
-  const spawn = async (id, { onStdout, onStderr }) => {
-    let input = "";
-    let done;
-    const exited = new Promise((resolve) => { done = resolve; });
-    return {
-      write: async (text) => { input += text; },
-      end: async () => {
-        const request = JSON.parse(input);
-        seen.push({ id, request });
-        Promise.resolve(reply(request)).then((answer) => {
-          if (answer === undefined) onStderr("ssh: connect to host commerce: Operation timed out\n");
-          else onStdout(`${banner}${JSON.stringify(answer)}\n`);
-          done(0);
-        });
-      },
-      kill: async () => done(1),
-      exited,
-    };
+  const ask = async (target, request) => {
+    seen.push({ id: target.id, request: JSON.parse(JSON.stringify(request)) });
+    const answer = await reply(request);
+    if (answer === undefined) throw new Error(`Could not reach the ${target.label}: its door did not answer (operation timed out).`);
+    return answer;
   };
-  return { spawn, seen, ops: () => seen.map((entry) => entry.request.op) };
+  return { ask, seen, ops: () => seen.map((entry) => entry.request.op) };
 }
 
 const PUBKEY = "a".repeat(64);
@@ -46,23 +36,18 @@ const harnesses = (claude = {}) => [
 
 test("ask returns the machine's reply and names the machine's own error", async () => {
   const ok = machine(() => ({ ok: true, agents: [] }));
-  assert.deepEqual(await askMachine(ok.spawn, "commerce", { op: "list" }), { ok: true, agents: [] });
+  assert.deepEqual(await askMachine(ok.ask, "commerce", { op: "list" }), { ok: true, agents: [] });
   assert.equal(ok.seen[0].id, "commerce");
   const refused = machine(() => ({ ok: false, error: "no such agent on this machine" }));
-  await assert.rejects(askMachine(refused.spawn, "commerce", { op: "status", pubkey: PUBKEY }), /no such agent/);
-});
-
-test("ask takes the last line, so an SSH banner before the reply is ignored", async () => {
-  const chatty = machine(() => ({ ok: true, running: true }), { banner: "Welcome to the machine\n{not json\n" });
-  assert.deepEqual(await askMachine(chatty.spawn, "commerce", { op: "status" }), { ok: true, running: true });
+  await assert.rejects(askMachine(refused.ask, "commerce", { op: "status", pubkey: PUBKEY }), /no such agent/);
 });
 
 test("ask says so when the machine cannot be reached or is too slow", async () => {
   const down = machine(() => undefined);
-  await assert.rejects(askMachine(down.spawn, "commerce", { op: "list" }), /Could not reach the Commerce Mac: ssh: connect/);
-  await assert.rejects(askMachine(undefined, "commerce", { op: "list" }), /cannot start processes/);
+  await assert.rejects(askMachine(down.ask, "commerce", { op: "list" }), /Could not reach the Commerce Mac: its door did not answer/);
+  await assert.rejects(askMachine(undefined, "commerce", { op: "list" }), /Could not reach the Commerce Mac: sign in to Black 4 first/);
   const slow = machine(() => new Promise(() => {}));
-  await assert.rejects(askMachine(slow.spawn, "commerce", { op: "machine.status" }, { timeoutMs: 20 }), /did not answer in time/);
+  await assert.rejects(askMachine(slow.ask, "commerce", { op: "machine.status" }, { timeoutMs: 20 }), /did not answer in time/);
 });
 
 test("machines: a config or id names one, and anything else is the default", () => {
@@ -72,13 +57,13 @@ test("machines: a config or id names one, and anything else is the default", () 
   assert.equal(machineOf(undefined).id, "commerce");
   assert.equal(machineOf("gone").id, "commerce");
   assert.equal(hardwareDefaults().machine, "commerce");
-  for (const entry of MACHINES) assert.ok(entry.id && entry.label && entry.process);
+  for (const entry of MACHINES) assert.match(entry.door, /^https:\/\/[a-z0-9.-]+$/);
 });
 
 test("a retried creation asks for the same agent, and activation carries the attestation", async () => {
   const box = machine((request) => (request.op === "provision" ? { ok: true, pubkey: PUBKEY } : { ok: true }));
   let ids = 0;
-  const remote = hardwareProvider(box.spawn, () => `request-${++ids}`);
+  const remote = hardwareProvider(box.ask, () => `request-${++ids}`);
   const input = { name: "Paid Media", community: "wss://example.communities.buzz.xyz", config: { harness: "codex" } };
   assert.deepEqual(await remote.provision(input), { pubkey: PUBKEY });
   await remote.provision(input);
@@ -94,7 +79,7 @@ test("a retried creation asks for the same agent, and activation carries the att
 
 test("every step goes to the agent's machine, and a legacy agent goes to commerce", async () => {
   const box = machine((request) => (request.op === "instructions.get" ? { ok: true, instructions: "Be brief." } : { ok: true }));
-  const remote = hardwareProvider(box.spawn);
+  const remote = hardwareProvider(box.ask);
   // Never seen by this copy (made before machines were a choice): the default.
   await remote.profile({ pubkey: PUBKEY, community: "wss://x", name: "Rock" });
   assert.equal(await remote.instructions.get({ pubkey: PUBKEY, community: "wss://x" }), "Be brief.");
@@ -106,7 +91,7 @@ test("every step goes to the agent's machine, and a legacy agent goes to commerc
 });
 
 test("with a second machine, creation follows the config and later steps find the agent", async () => {
-  const extra = { id: "lab", label: "Lab Mac", process: "lab" };
+  const extra = { id: "lab", label: "Lab Mac", door: "https://lab.example.test" };
   MACHINES.push(extra);
   try {
     const OTHER = "d".repeat(64);
@@ -117,9 +102,9 @@ test("with a second machine, creation follows the config and later steps find th
     });
     const listing = machine((request) => (request.op === "list"
       ? { ok: true, agents: [{ pubkey: OTHER, harness: "goose", respondTo: "anyone" }] } : { ok: true }));
-    const spawn = (id, options) => (id === "lab" ? listing.spawn(id, options) : box.spawn(id, options));
-    const directory = agentDirectory(spawn);
-    const remote = hardwareProvider(spawn, () => "r", directory);
+    const ask = (target, request) => (target.id === "lab" ? listing.ask(target, request) : box.ask(target, request));
+    const directory = agentDirectory(ask);
+    const remote = hardwareProvider(ask, () => "r", directory);
     await remote.provision({ name: "A", community: "wss://x", config: { machine: "commerce" } });
     await remote.remove({ pubkey: PUBKEY, community: "wss://x" });
     assert.deepEqual(box.ops(), ["provision", "remove"], "known agent: no search");
@@ -141,7 +126,7 @@ test("summary reads like 'Claude Code · Commerce Mac', from what it knows", () 
 test("status is read once, shared, cached briefly and turned into a kind", async () => {
   let clock = 0;
   const box = machine(() => ({ ok: true, machine: "commerce", harnesses: harnesses() }));
-  const reader = statusReader(box.spawn, { now: () => clock, ttlMs: 1000 });
+  const reader = statusReader(box.ask, { now: () => clock, ttlMs: 1000 });
   assert.equal(reader.peek("commerce"), undefined);
   const [a, b] = await Promise.all([reader.read("commerce"), reader.read({ machine: "commerce" })]);
   assert.equal(a, b);
@@ -157,8 +142,8 @@ test("status is read once, shared, cached briefly and turned into a kind", async
   assert.equal(box.seen.length, 3);
   assert.deepEqual(box.seen[0].request, { op: "machine.status" });
 
-  assert.deepEqual(await statusReader(machine(() => UNKNOWN).spawn).read("commerce"), { kind: "unsupported" });
-  const down = await statusReader(machine(() => undefined).spawn).read("commerce");
+  assert.deepEqual(await statusReader(machine(() => UNKNOWN).ask).read("commerce"), { kind: "unsupported" });
+  const down = await statusReader(machine(() => undefined).ask).read("commerce");
   assert.equal(down.kind, "unreachable");
   assert.match(down.error, /Could not reach the Commerce Mac/);
 });
@@ -241,9 +226,9 @@ test("sign-in: a device sign-in shows the link and code, then waits by itself un
     if (request.op === "machine.status") return { ok: true, harnesses: deviceRows({ codex: finishes >= 3 }) };
     return { ok: true };
   });
-  const reader = statusReader(box.spawn);
+  const reader = statusReader(box.ask);
   const states = [];
-  const login = createLogin(box.spawn, "commerce", "codex", {
+  const login = createLogin(box.ask, "commerce", "codex", {
     onChange: (state) => states.push(state),
     onSignedIn: () => reader.read("commerce", { force: true }),
   });
@@ -266,7 +251,7 @@ test("sign-in: a status refresh that fails after a device approval still leaves 
     if (request.op === "login.finish") return { ok: true, signedIn: true, account: null };
     return { ok: true };
   });
-  const login = createLogin(box.spawn, "commerce", "codex", { onSignedIn: () => Promise.reject(new Error("unreachable")) });
+  const login = createLogin(box.ask, "commerce", "codex", { onSignedIn: () => Promise.reject(new Error("unreachable")) });
   await login.start();
   for (let i = 0; i < 50 && login.state.step !== "idle"; i++) await new Promise((resolve) => setTimeout(resolve, 5));
   assert.deepEqual(login.state, { step: "idle" });
@@ -279,7 +264,7 @@ test("sign-in: Cancel stops waiting for a device approval and cancels it on the 
     if (request.op === "login.finish") return new Promise((resolve) => { release = () => resolve({ ok: false, error: "This sign-in has expired or was cancelled. Start the sign-in again." }); });
     return { ok: true };
   });
-  const login = createLogin(box.spawn, "commerce", "grok");
+  const login = createLogin(box.ask, "commerce", "grok");
   await login.start();
   await new Promise((resolve) => setTimeout(resolve, 5));
   await login.cancel();
@@ -295,7 +280,7 @@ test("sign-in: a refused or expired device approval is a plain error and the sig
     if (request.op === "login.finish") return { ok: false, error: "The sign-in was not approved. Start the sign-in again." };
     return { ok: true };
   });
-  const login = createLogin(box.spawn, "commerce", "codex");
+  const login = createLogin(box.ask, "commerce", "codex");
   await login.start();
   for (let i = 0; i < 50 && login.state.step !== "idle"; i++) await new Promise((resolve) => setTimeout(resolve, 5));
   assert.deepEqual(login.state, { step: "idle", error: "The sign-in was not approved. Start the sign-in again." });
@@ -304,7 +289,7 @@ test("sign-in: a refused or expired device approval is a plain error and the sig
 
 test("sign-in: an older runner answers a Codex sign-in with a plain sentence", async () => {
   const box = machine(() => ({ ok: false, error: "Signing in from Buzz is only available for Claude Code on this machine." }));
-  const login = createLogin(box.spawn, "commerce", "codex");
+  const login = createLogin(box.ask, "commerce", "codex");
   await login.start();
   assert.deepEqual(login.state, { step: "idle", error: "Signing in from Buzz is only available for Claude Code on this machine." });
 });
@@ -342,10 +327,10 @@ test("sign-in: a wrong code shows the error and a new link, and the right code o
     if (request.op === "machine.status") return { ok: true, harnesses: harnesses({ signedIn }) };
     return { ok: true };
   });
-  const reader = statusReader(box.spawn);
+  const reader = statusReader(box.ask);
   const states = [];
   const said = await console_(async () => {
-    const login = createLogin(box.spawn, "commerce", "claude", {
+    const login = createLogin(box.ask, "commerce", "claude", {
       onChange: (state) => states.push(state),
       onSignedIn: () => reader.read("commerce", { force: true }),
     });
@@ -384,7 +369,7 @@ test("sign-in: one automatic restart per failed finish, and a failed restart off
     if (request.op === "login.finish") return { ok: false, error: "That code was not accepted." };
     return { ok: true };
   });
-  const login = createLogin(box.spawn, "commerce", "claude");
+  const login = createLogin(box.ask, "commerce", "claude");
   await login.start();
   await login.finish("wrong-code-000");
   assert.deepEqual(login.state, { step: "idle", error: "That code was not accepted. The machine is busy." });
@@ -402,7 +387,7 @@ test("sign-in: closing the dialog after a restart cancels the new login, not the
     if (request.op === "login.finish") return { ok: false, error: "That code was not accepted." };
     return { ok: true };
   });
-  const login = createLogin(box.spawn, "commerce", "claude");
+  const login = createLogin(box.ask, "commerce", "claude");
   await login.start();
   await login.finish("wrong-code-000");
   await login.dispose();
@@ -411,7 +396,7 @@ test("sign-in: closing the dialog after a restart cancels the new login, not the
 
 test("sign-in: an empty code is not sent", async () => {
   const box = machine(() => ({ ok: true, loginId: "L1", url: "https://example.com/a", needsCode: true }));
-  const login = createLogin(box.spawn, "commerce", "claude");
+  const login = createLogin(box.ask, "commerce", "claude");
   await login.start();
   await login.finish("   ");
   assert.equal(login.state.error, "Paste the code first.");
@@ -421,7 +406,7 @@ test("sign-in: an empty code is not sent", async () => {
 test("sign-in: Cancel cancels on the machine, also when it lands mid-start", async () => {
   const box = machine((request) => (request.op === "login.start"
     ? { ok: true, loginId: "L1", url: "https://example.com/a", needsCode: true } : { ok: true }));
-  const login = createLogin(box.spawn, "commerce", "claude");
+  const login = createLogin(box.ask, "commerce", "claude");
   await login.start();
   await login.cancel();
   assert.deepEqual(login.state, { step: "idle" });
@@ -431,7 +416,7 @@ test("sign-in: Cancel cancels on the machine, also when it lands mid-start", asy
   const slow = machine((request) => (request.op === "login.start"
     ? new Promise((resolve) => { answer = () => resolve({ ok: true, loginId: "L2", url: "https://example.com/b", needsCode: true }); })
     : { ok: true }));
-  const late = createLogin(slow.spawn, "commerce", "claude");
+  const late = createLogin(slow.ask, "commerce", "claude");
   const started = late.start();
   await new Promise((resolve) => setTimeout(resolve, 5));
   assert.equal(late.state.step, "starting");
@@ -446,25 +431,25 @@ test("sign-in: Cancel cancels on the machine, also when it lands mid-start", asy
 test("sign-in: closing the dialog mid-sign-in cancels it", async () => {
   const box = machine((request) => (request.op === "login.start"
     ? { ok: true, loginId: "L3", url: "https://example.com/c", needsCode: true } : { ok: true }));
-  const login = createLogin(box.spawn, "commerce", "claude");
+  const login = createLogin(box.ask, "commerce", "claude");
   await login.start();
   await login.dispose();
   assert.deepEqual(box.ops(), ["login.start", "login.cancel"]);
-  const idle = createLogin(box.spawn, "commerce", "claude");
+  const idle = createLogin(box.ask, "commerce", "claude");
   await idle.dispose();
   assert.equal(box.seen.length, 2, "nothing to cancel, nothing sent");
 });
 
 test("sign-in: an unreachable machine or a missing link is a plain error", async () => {
-  const down = createLogin(machine(() => undefined).spawn, "commerce", "claude");
+  const down = createLogin(machine(() => undefined).ask, "commerce", "claude");
   await down.start();
   assert.equal(down.state.step, "idle");
   assert.match(down.state.error, /Could not reach the Commerce Mac/);
-  const old = createLogin(machine(() => UNKNOWN).spawn, "commerce", "claude");
+  const old = createLogin(machine(() => UNKNOWN).ask, "commerce", "claude");
   await old.start();
   assert.equal(old.state.error, "unknown op");
   const linkless = machine((request) => (request.op === "login.start" ? { ok: true, loginId: "L4", url: "javascript:alert(1)" } : { ok: true }));
-  const bad = createLogin(linkless.spawn, "commerce", "claude");
+  const bad = createLogin(linkless.ask, "commerce", "claude");
   await bad.start();
   assert.equal(bad.state.error, "The machine did not return a sign-in link.");
   await new Promise((resolve) => setTimeout(resolve, 5));
@@ -477,4 +462,76 @@ test("the hardware part never logs (a pasted sign-in code must not reach a log)"
   const part = source.slice(source.indexOf("// ---- Black 4 hardware ----"));
   assert.ok(part.length > 10000, "the hardware part is fenced");
   assert.doesNotMatch(part, /console\./);
+});
+
+// ---- the door: one pass per request, bound to the exact body -------------------
+
+/** The real transport over fake AuthKit, MCP and door; \`signedIn: false\`
+ * has no sign-in to mint passes with. */
+async function door({ agentctl = () => ({ ok: true }), signedIn = true, offline = new Set(), sign } = {}) {
+  const authkit = fakeAuthKit();
+  const mcp = fakeMcp(authkit);
+  const box = fakeDoor(mcp, agentctl);
+  const net = https({ authkit, mcp, door: box, offline });
+  const store = memoryStore();
+  const session = createSession({ request: net.request, store });
+  if (signedIn) { await store.save(authkit.issue().refresh_token); await session.restore(); }
+  const client = createMcp({ request: net.request, session });
+  const minted = [];
+  const realSign = async (input) => {
+    const answer = readAnswer(await client.request("tools/call", { name: "sign_hardware_request", arguments: input }));
+    minted.push(answer.pass);
+    return answer;
+  };
+  const ask = doorTransport({ request: net.request, sign: sign ? sign(realSign) : realSign });
+  return { ask, mcp, box, net, minted };
+}
+
+test("door: every request gets its own pass, bound to the hash of its exact body", async () => {
+  const d = await door({ agentctl: (request) => ({ ok: true, echo: request.instructions ?? null }) });
+  const instructions = "Café ☕ — 日本語 and \"quotes\"\n";
+  const reply = await askMachine(d.ask, "commerce", { op: "instructions.set", pubkey: PUBKEY, instructions });
+  assert.equal(reply.echo, instructions, "non-ASCII arrives intact");
+  await askMachine(d.ask, "commerce", { op: "list" });
+  assert.equal(d.minted.length, 2);
+  assert.notEqual(d.minted[0], d.minted[1], "a new pass for each request");
+  const body = JSON.stringify({ op: "instructions.set", pubkey: PUBKEY, instructions });
+  assert.deepEqual(d.mcp.signed[0], { machine: "commerce", op: "instructions.set", bodySha256: sha256url(body) });
+  assert.equal(await bodySha256(body), sha256url(body), "base64url SHA-256 of the UTF-8 bytes, no padding");
+  assert.doesNotMatch(await bodySha256(body), /[=+/]/);
+  assert.deepEqual(d.box.seen.map((request) => request.op), ["instructions.set", "list"]);
+  const posted = d.net.requests.filter((entry) => entry.origin === DOOR);
+  assert.ok(posted.every((entry) => /^Black4-Hardware pass-/.test(entry.headers.authorization) && entry.headers["content-type"] === "application/json"));
+});
+
+test("door: a reused pass is refused, and the error says the door refused it", async () => {
+  let first;
+  const d = await door({ sign: (real) => async (input) => (first ??= await real(input)) });
+  await askMachine(d.ask, "commerce", { op: "list" });
+  await assert.rejects(askMachine(d.ask, "commerce", { op: "list" }), /^Error: Could not reach the Commerce Mac: its door refused the pass \(pass already used\)\.$/);
+});
+
+test("door: a pass for another body is refused", async () => {
+  const d = await door({ sign: (real) => (input) => real({ ...input, bodySha256: sha256url("{}") }) });
+  await assert.rejects(askMachine(d.ask, "commerce", { op: "list" }), /its door refused the pass \(pass does not match this request\)/);
+  assert.equal(d.box.seen.length, 0);
+});
+
+test("door: a failed sign-in and an unreachable door say which one failed", async () => {
+  const signedOut = await door({ signedIn: false });
+  await assert.rejects(askMachine(signedOut.ask, "commerce", { op: "list" }), /^Error: Could not reach the Commerce Mac: your Black 4 sign-in could not get a pass \(Sign in to Black 4 first\.\)\.$/);
+  assert.equal(signedOut.net.requests.filter((entry) => entry.origin === DOOR).length, 0, "nothing sent to the door without a pass");
+  const down = await door({ offline: new Set([DOOR]) });
+  await assert.rejects(askMachine(down.ask, "commerce", { op: "list" }), /^Error: Could not reach the Commerce Mac: its door did not answer \(error sending request: connection refused\)\.$/);
+});
+
+test("door: agentctl's own refusal comes through as its sentence", async () => {
+  const d = await door({ agentctl: () => ({ ok: false, error: "no such agent on this machine" }) });
+  await assert.rejects(askMachine(d.ask, "commerce", { op: "status", pubkey: PUBKEY }), /^Error: no such agent on this machine$/);
+});
+
+test("door: a door that is overloaded or broken says so with its own words", async () => {
+  const d = await door();
+  d.box.handle = async () => ({ status: 503, headers: {}, body: JSON.stringify({ error: "too many requests in flight" }) });
+  await assert.rejects(askMachine(d.ask, "commerce", { op: "list" }), /^Error: Could not reach the Commerce Mac: its door answered HTTP 503 \(too many requests in flight\)\.$/);
 });

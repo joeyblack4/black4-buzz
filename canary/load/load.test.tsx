@@ -8,7 +8,8 @@
 // Then every component the plugins register is rendered once on the server
 // with the props Buzz gives it, so a prop or service change that throws at
 // render shows up too. Nothing here reaches a network or a machine: off the
-// desktop, host.spawn rejects and the plugins handle that as "unreachable".
+// desktop, host.spawn and host.request reject, and the plugins handle that
+// as "unreachable" (the Black 4 plugin simply stays signed out).
 // The Black 4 plugin offers its hosted "Black 4 hardware" type only to a staff
 // sign-in, which never happens here, so two more tests start that part on its
 // own through the plugin's exported hardwareSlot: once to register, render and

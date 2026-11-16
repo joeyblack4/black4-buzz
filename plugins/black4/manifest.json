@@ -9,13 +9,10 @@
   },
   "updates": { "defaultEnabled": true },
   "host": {
-    "processes": [
-      { "id": "bridge", "program": "black4-mcp-bridge" },
-      {
-        "id": "commerce",
-        "program": "ssh",
-        "args": ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "commerce", "workforce/bin/agentctl"]
-      }
+    "networkOrigins": [
+      "https://overjoyed-tea-41.authkit.app",
+      "https://api.black4.ai",
+      "https://black4-commerce-01.tail50b7f0.ts.net"
     ]
   }
 }

@@ -1,18 +1,38 @@
+// The Black 4 MCP tools, Reviews and the connection lifecycle, over fake
+// AuthKit and MCP servers behind host.request: no process, no network.
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { fakeAuthKit, fakeMcp, https, freshPlugin, settle, MCP } from "./fakes.mjs";
 
-const source = await readFile(process.env.BLACK4_TEST_PLUGIN ?? new URL("../plugins/black4/plugin.js", import.meta.url), "utf8");
-const { apply, reviewUrl, reviewReader, reviewSurface } = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
-const tick = () => new Promise((resolve) => setImmediate(resolve));
-async function settle() { for (let i = 0; i < 12; i++) await tick(); }
+const { reviewUrl, reviewReader, reviewSurface } = await freshPlugin();
 const tools = ["whoami", "resolve_channel_business", "open_review"].map((name) => ({
   name, description: name, inputSchema: { type: "object", required: ["channelId"] },
 }));
 
-function harness(t, options = {}) {
+/** A deferred answer: `hold()` returns a promise the test releases later. */
+function gate() {
+  const held = [];
+  return { held, hold: (value) => new Promise((resolve) => held.push({ resolve, value })), release: (value) => { for (const entry of held.splice(0)) entry.resolve(value ?? entry.value); } };
+}
+
+async function harness(t, options = {}) {
+  const { apply, signInMemory } = await freshPlugin();
   const registered = new Map();
-  const processes = [];
+  const authkit = fakeAuthKit();
+  const held = gate();
+  const mcp = fakeMcp(authkit, {
+    answer: (message) => {
+      if (message.method === "tools/list") return { result: { tools: options.tools ?? tools } };
+      const name = message.params?.name;
+      if (name === "whoami") return { result: { content: [{ type: "text", text: '{"kind":"staff","email":"operator@example.test"}' }] } };
+      if (options.holdCalls && message.method === "tools/call") return held.hold({ result: { content: [{ type: "text", text: "late" }] } });
+      if (name === "review_queue" && options.queue) return { result: typeof options.queue === "function" ? options.queue() : options.queue };
+      return { result: { content: [{ type: "text", text: "readable result" }], _meta: { decisionToken: "hidden-token" } } };
+    },
+  });
+  const net = https({ authkit, mcp, offline: options.offline ?? new Set() });
+  const request = async (input) => { await options.beforeRequest?.(input); return net.request(input); };
+  if (options.signedIn !== false) await signInMemory.save(authkit.issue().refresh_token);
   let cleanup;
   let card;
   let panel;
@@ -32,37 +52,28 @@ function harness(t, options = {}) {
     panels: { register: (value) => { panel = value; } },
     conversation: { registerLink: (value) => { link = value; }, registerLinkPreview: (value) => { preview = value; } },
     browser: { available: options.browserAvailable ?? true, View: "browser-view" },
-    effect: (fn) => { cleanup = fn(); },
-    host: { spawn: async (id, callbacks) => {
-      if (id !== "bridge") throw new Error("No Black 4 machine in this test."); // Black 4 hardware asks one; only the bridge is doubled
-      let exit;
-      const child = {
-        callbacks, calls: [], killed: false,
-        exited: new Promise((resolve) => { exit = resolve; }),
-        kill: async () => { child.killed = true; exit(0); },
-        write: async (line) => {
-          const message = JSON.parse(line);
-          child.calls.push(message);
-          if (options.writeError) throw new Error("native write refused");
-          if (message.id == null || options.holdCalls && message.method === "tools/call" && message.params.name !== "whoami") return;
-          const result = message.method === "initialize" ? { instructions: "People decide." }
-            : message.method === "tools/list" ? { tools }
-            : message.params.name === "whoami" ? { content: [{ type: "text", text: '{"kind":"staff","email":"operator@example.test"}' }] }
-            : message.params.name === "review_queue" && options.queue ? (typeof options.queue === "function" ? options.queue() : options.queue)
-            : { content: [{ type: "text", text: "readable result" }], _meta: { decisionToken: "hidden-token" } };
-          const answer = JSON.stringify({ jsonrpc: "2.0", id: message.id, result }) + "\n";
-          queueMicrotask(() => { callbacks.onStdout(answer.slice(0, 7)); callbacks.onStdout(answer.slice(7)); });
-        },
-      };
-      processes.push(child);
-      await options.beforeSpawn?.(child);
-      return child;
-    } },
+    effect: (fn) => { const off = fn(); if (off) cleanup = cleanup ? ((a, b) => () => { b(); a(); })(cleanup, off) : off; },
+    host: { request },
   };
   apply(ctx);
-  t.after(() => cleanup());
-  return { registered, processes, page, panel, link, preview, stop: () => cleanup(), reconnect: () => button(card.component()).props.onClick() };
+  let stopped = false;
+  const stop = () => { if (!stopped) { stopped = true; cleanup?.(); } };
+  t.after(stop);
+  const settings = () => expandAll(card.component());
+  return {
+    registered, mcp, authkit, net, held, page, panel, link, preview, stop, settings,
+    reconnect: () => button(settings(), "Reconnect").props.onClick(),
+  };
 }
+
+// Mount every component element, the way a host would.
+const expandAll = (node) => {
+  if (!node || typeof node !== "object") return node;
+  if (typeof node.type === "function") return expandAll(node.type.prototype?.render ? new node.type(node.props).render() : node.type(node.props));
+  return { ...node, children: (node.children ?? []).map(expandAll) };
+};
+const calls = (mcp, method) => mcp.calls.filter((call) => call.method === method);
+const h_queue = (app) => app.mcp.calls.filter((call) => call.params?.name === "review_queue");
 
 const queueText = (queue) => ({ content: [{ type: "text", text: JSON.stringify({ kind: "black4_review_queue", reviews: [], ...queue }) }] });
 function button(node, text) {
@@ -81,9 +92,9 @@ test("review links preserve exact item/version and refuse unrelated or deceptive
 });
 
 test("native reviews register a panel and message preview without submitting a decision", async (t) => {
-  const h = harness(t);
+  const h = await harness(t);
   await settle();
-  const calls = h.processes[0].calls.length;
+  const before = h.mcp.calls.length;
   const url = "https://app.black4.ai/r/rv_example?item=hero&v=3";
   assert.equal(h.panel.matches(url), true);
   const view = h.panel.component({ target: url });
@@ -91,7 +102,7 @@ test("native reviews register a panel and message preview without submitting a d
   assert.equal(view.props.target, url);
   assert.equal(h.preview.matches(url), true);
   assert.equal(h.preview.component({ url, open() {} }).props.compact, true);
-  assert.equal(h.processes[0].calls.length, calls);
+  assert.equal(h.mcp.calls.length, before);
   assert.equal(h.link.matches(url), true);
   let opened;
   const launcher = h.panel.channelLauncher({ available: () => true, pressed: false, toggle: (target) => { opened = target; } });
@@ -100,33 +111,52 @@ test("native reviews register a panel and message preview without submitting a d
   assert.equal(h.panel.channelLauncher({ available: () => false }), null);
 });
 
-test("native review inspection remains available without an embedded browser", (t) => {
-  const h = harness(t, { browserAvailable: false });
+test("native review inspection remains available without an embedded browser", async (t) => {
+  const h = await harness(t, { browserAvailable: false });
   assert.equal(h.panel.matches("https://app.black4.ai/reviews"), true);
   assert.equal(h.panel.channelLauncher({ available: () => true }).type, "button");
 });
 
-test("awaits the native process, initializes MCP and registers every listed tool", async (t) => {
-  const h = harness(t);
+test("signed in, it initializes the MCP over HTTPS with the bearer and registers every listed tool", async (t) => {
+  const h = await harness(t);
   await settle();
   assert.deepEqual([...h.registered.keys()], tools.map((tool) => `black4_${tool.name}`));
-  assert.deepEqual(h.processes[0].calls.slice(0, 3).map((call) => call.method), ["initialize", "notifications/initialized", "tools/list"]);
+  assert.deepEqual(h.mcp.calls.slice(0, 3).map((call) => call.method), ["initialize", "notifications/initialized", "tools/list"]);
   assert.match(h.registered.get("black4_whoami").description, /People decide/);
+  assert.ok(h.mcp.tokens.every((token) => /^access-/.test(token)), "every MCP request carries the access token");
+  assert.ok(h.net.requests.every((entry) => [MCP, "https://overjoyed-tea-41.authkit.app"].includes(entry.origin)));
+});
+
+test("a forgotten MCP session is opened again and the call still answers", async (t) => {
+  const h = await harness(t);
+  await settle();
+  h.mcp.sessions.clear(); // the server restarted
+  const value = await h.registered.get("black4_open_review").call({}, {}, {});
+  assert.equal(value, "readable result");
+  assert.equal(calls(h.mcp, "initialize").length, 2);
+});
+
+test("signed out, nothing reaches the MCP and the card offers Sign in", async (t) => {
+  const h = await harness(t, { signedIn: false });
+  await settle();
+  assert.equal(h.mcp.calls.length, 0);
+  assert.equal(h.registered.size, 0);
+  assert.ok(button(h.settings(), "Sign in"));
 });
 
 test("defaults channel binding to the calling agent's channel and relay", async (t) => {
-  const h = harness(t);
+  const h = await harness(t);
   await settle();
   const tool = h.registered.get("black4_resolve_channel_business");
   assert.ok(tool);
   assert.deepEqual(tool.inputSchema.required, []);
   const controller = new AbortController();
   await tool.call({ key: "agent", signal: controller.signal }, { channel: "channel-a" }, {});
-  assert.deepEqual(h.processes[0].calls.at(-1).params.arguments, { channelId: "channel-a", communityId: "relay:wss://example.test/" });
+  assert.deepEqual(h.mcp.calls.at(-1).params.arguments, { channelId: "channel-a", communityId: "relay:wss://example.test/" });
 });
 
 test("keeps private MCP metadata out of agent results and removes abort listeners", async (t) => {
-  const h = harness(t);
+  const h = await harness(t);
   await settle();
   const controller = new AbortController();
   let listeners = 0;
@@ -139,47 +169,69 @@ test("keeps private MCP metadata out of agent results and removes abort listener
   assert.equal(listeners, 0);
 });
 
-test("handles an asynchronous write rejection and closes the failed process", async (t) => {
-  const h = harness(t, { writeError: true });
+test("agents can never mint a hardware pass: not offered, and refused directly or through call_tool", async (t) => {
+  const listed = [...tools, ...["call_tool", "sign_hardware_request"].map((name) => ({ name, description: name, inputSchema: { type: "object" } }))];
+  const h = await harness(t, { tools: listed });
   await settle();
-  assert.equal(h.registered.size, 0);
-  assert.equal(h.processes[0].killed, true);
+  assert.ok(h.registered.has("black4_call_tool"));
+  assert.equal(h.registered.has("black4_sign_hardware_request"), false, "never offered to agents");
+  const input = { machine: "commerce", op: "list", bodySha256: "x".repeat(43) };
+  for (const args of [
+    { name: "sign_hardware_request", arguments: input },
+    { name: " Sign_Hardware_Request ", arguments: input },
+    { name: "call_tool", arguments: { name: "sign_hardware_request", arguments: input } },
+  ]) {
+    await assert.rejects(h.registered.get("black4_call_tool").call({ key: "agent" }, {}, args), /Agents cannot mint Black 4 hardware passes/);
+  }
+  // (The plugin's own hardware provider may mint passes for its requests; none for the agent's.)
+  assert.equal(h.mcp.calls.filter((call) => JSON.stringify(call).includes(input.bodySha256)).length, 0, "nothing the agent asked for reached Black 4");
+  assert.equal(h.mcp.signed.filter((entry) => entry.bodySha256 === input.bodySha256).length, 0);
+  assert.equal(await h.registered.get("black4_call_tool").call({ key: "agent" }, {}, { name: "open_review", arguments: {} }), "readable result", "other tools still pass");
 });
 
-test("kills a process whose spawn completes after disable", async (t) => {
+test("Black 4 out of reach is a retry with the reason, and no tools", async (t) => {
+  const h = await harness(t, { offline: new Set([MCP]) });
+  await settle();
+  assert.equal(h.registered.size, 0);
+  const text = JSON.stringify(h.settings());
+  assert.match(text, /Not connected/);
+  assert.match(text, /Could not reach Black 4 \(error sending request: connection refused\)\. Retrying in 5s\./);
+  assert.doesNotMatch(text, /access-|refresh-/, "no token in anything shown");
+});
+
+test("turning the plugin off while it connects leaves no tools behind", async (t) => {
   let release;
-  const h = harness(t, { beforeSpawn: () => new Promise((resolve) => { release = resolve; }) });
+  const h = await harness(t, { beforeRequest: (input) => input.url.startsWith(MCP) && !release ? new Promise((resolve) => { release = resolve; }) : undefined });
+  await settle();
   h.stop();
   release();
   await settle();
-  assert.equal(h.processes[0].killed, true);
-  assert.equal(h.processes[0].calls.length, 0);
   assert.equal(h.registered.size, 0);
 });
 
-test("reconnect supersedes a pending spawn without creating a stale session", async (t) => {
+test("Try again supersedes a connection still starting, without a stale session", async (t) => {
   let release;
-  let spawns = 0;
-  const h = harness(t, { beforeSpawn: () => ++spawns === 1 ? new Promise((resolve) => { release = resolve; }) : undefined });
-  h.reconnect();
+  const h = await harness(t, { beforeRequest: (input) => input.url.startsWith(MCP) && !release ? new Promise((resolve) => { release = resolve; }) : undefined });
+  await settle();
+  button(h.settings(), "Try again").props.onClick();
   await settle();
   release();
   await settle();
-  assert.equal(h.processes[0].killed, true);
-  assert.equal(h.processes[0].calls.length, 0);
   assert.equal(h.registered.size, 3);
+  assert.equal(calls(h.mcp, "tools/list").length, 1, "the superseded start never listed tools");
 });
 
-test("cancels an in-flight call and removes the signal listener", async (t) => {
-  const h = harness(t, { holdCalls: true });
+test("Stop ends an in-flight call for the agent, and its late answer goes nowhere", async (t) => {
+  const h = await harness(t, { holdCalls: true });
   await settle();
   const controller = new AbortController();
   const call = h.registered.get("black4_open_review").call({ signal: controller.signal }, {}, {});
+  await settle();
   controller.abort();
   await assert.rejects(call, /Stopped/);
-  assert.equal(h.processes[0].calls.at(-1).method, "notifications/cancelled");
+  h.held.release();
+  await settle();
 });
-
 
 test("review reader resolves business from the authorized queue and never calls a mutation", async () => {
   const calls = [];
@@ -228,7 +280,7 @@ test("a decided review can refresh after leaving the pending queue", async () =>
 });
 
 test("Reviews registers a host workspace in the dock without replacing MCP tools", async t => {
-  const app = harness(t); await settle();
+  const app = await harness(t); await settle();
   assert.equal(app.page.id, "reviews");
   assert.equal(app.page.placement, "dock");
   assert.equal(app.page.primary, true);
@@ -243,7 +295,7 @@ test("Reviews registers a host workspace in the dock without replacing MCP tools
 });
 
 test("without an embedded browser the Reviews page is the native queue, with the review brief one step away", async t => {
-  const app = harness(t, { browserAvailable: false, queue: queueText({ total: 1, reviews: [{ assetId: "rv_a", businessId: "b", businessName: "Sample", title: "Copy", reviewUrl: "https://app.black4.ai/r/rv_a", items: [{ age: "2h" }] }] }) });
+  const app = await harness(t, { browserAvailable: false, queue: queueText({ total: 1, reviews: [{ assetId: "rv_a", businessId: "b", businessName: "Sample", title: "Copy", reviewUrl: "https://app.black4.ai/r/rv_a", items: [{ age: "2h" }] }] }) });
   await settle();
   const page = app.page.component();
   assert.notEqual(page.children[0].type, "browser-view");
@@ -256,12 +308,12 @@ test("without an embedded browser the Reviews page is the native queue, with the
 
 test("the Reviews badge shows the connected account's waiting count and clears on disconnect", async t => {
   let total = 3;
-  const app = harness(t, { queue: () => queueText({ total }) });
+  const app = await harness(t, { queue: () => queueText({ total }) });
   await settle();
   assert.deepEqual(app.page.badge().children, ["3"]);
   assert.match(app.page.badge().props["aria-label"], /3 decisions waiting for the connected Black 4 account/);
   assert.match(app.page.badge().props.style.background, /CanvasText\)$/, "the badge fallback contrasts with its Canvas text");
-  assert.equal(app.processes[0].calls.filter((call) => call.params?.name === "review_queue").length, 1, "one queue read per refresh");
+  assert.equal(h_queue(app).length, 1, "one queue read per refresh");
   app.reconnect();
   assert.equal(app.page.badge(), null, "a reconnect clears the count before the new account answers");
   total = 7;
@@ -272,34 +324,33 @@ test("the Reviews badge shows the connected account's waiting count and clears o
 });
 
 test("the Reviews badge hides after a failed refresh and ignores an answer from a replaced connection", async t => {
-  const app = harness(t, { holdCalls: true });
+  const app = await harness(t, { holdCalls: true });
   await settle();
   assert.equal(app.page.badge(), null);
-  const stale = app.processes[0].calls.find((call) => call.params?.name === "review_queue");
-  assert.ok(stale, "the badge asks the queue once connected");
+  assert.ok(h_queue(app).length, "the badge asks the queue once connected");
   app.reconnect();
-  app.processes[0].callbacks.onStdout(JSON.stringify({ jsonrpc: "2.0", id: stale.id, result: queueText({ total: 42 }) }) + "\n");
+  app.held.release({ result: queueText({ total: 42 }) });
   await settle();
   assert.equal(app.page.badge(), null, "the old connection's answer never reaches the badge");
-  const failing = harness(t, { queue: { isError: true, content: [{ type: "text", text: "queue unavailable" }] } });
+  const failing = await harness(t, { queue: { isError: true, content: [{ type: "text", text: "queue unavailable" }] } });
   await settle();
   assert.equal(failing.page.badge(), null);
   assert.equal(failing.registered.size, tools.length, "a failed queue read does not disturb the agent tools");
 });
 
 test("a native review offers Connect in place only when nothing is already in progress", async t => {
-  let spawns = 0;
-  const app = harness(t, { beforeSpawn: () => { if (++spawns === 1) throw new Error("black4-mcp-bridge is not installed"); } });
+  const offline = new Set([MCP]);
+  const app = await harness(t, { offline });
   await settle();
   const failed = render(render(app.panel.component({ target: "https://app.black4.ai/reviews" })));
   const connect = button(failed, "Connect Black 4");
   assert.ok(connect, "a failed connection shows Connect where the person is");
-  assert.match(JSON.stringify(failed), /not installed/, "the failure detail is shown");
+  assert.match(JSON.stringify(failed), /connection refused/, "the failure detail is shown");
+  offline.clear();
   connect.props.onClick();
   const starting = render(render(app.panel.component({ target: "https://app.black4.ai/reviews" })));
   assert.equal(button(starting, "Connect Black 4"), undefined, "no second Connect while a connection is in progress");
   await settle();
-  assert.equal(spawns, 2);
   assert.equal(app.registered.size, tools.length);
   const React = { createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }), useState: (v) => [v, () => {}], useEffect: () => {} };
   let connects = 0;

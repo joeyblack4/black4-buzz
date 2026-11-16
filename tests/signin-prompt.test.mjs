@@ -441,6 +441,43 @@ const treeText = (tree) => (!tree || typeof tree !== "object" ? (typeof tree ===
 const isPrompt = (n) => n.type === "button" && treeText(n).trim() === "Sign in to Black 4";
 const has = (tree, test) => !!tree && typeof tree === "object" && (test(tree) || (tree.props?.children ?? []).some((child) => has(child, test)));
 
+test("Black 4 hardware: while a fresh approval is needed the form offers it and Create stays off; once approved it reads the machine again", async () => {
+  const { applyHardware, hardwareDefaults } = await freshPlugin();
+  const { React, settle: settleTree } = testReact();
+  const asked = [];
+  const approval = { needed: false, epoch: 0 };
+  const Approve = () => React.createElement("button", { type: "button" }, "Approve in browser");
+  let type;
+  applyHardware({
+    react: React,
+    host: { request: async ({ body }) => {
+      const request = JSON.parse(body);
+      asked.push(request.op);
+      if (request.op === "machine.status") return { status: 200, body: JSON.stringify({ ok: true, machine: "commerce", harnesses: [{ id: "claude", label: "Claude Code", installed: true, signedIn: true, account: "a@example.test" }] }) };
+      return { status: 200, body: JSON.stringify({ ok: true }) };
+    } },
+    agents: { register: (value) => { type = value; } },
+  }, {
+    sign: async () => ({ pass: "p" }),
+    access: { use: () => ({ status: "linked" }), link() {}, signIn: { use: () => "connected", Prompt: () => null }, approval: { use: () => approval, Prompt: Approve } },
+  });
+  const ready = [];
+  const form = React.createElement(type.CreateConfiguration, { config: hardwareDefaults(), onChange() {}, onReadyChange: (value) => ready.push(value) });
+  let tree = await settleTree(form);
+  assert.equal(ready.at(-1), true);
+  const reads = () => asked.filter((op) => op === "machine.status").length;
+  const before = reads();
+  approval.needed = true;
+  tree = await settleTree(form);
+  assert.ok(has(tree, (n) => n.type === "button" && treeText(n).trim() === "Approve in browser"), "offered in place");
+  assert.equal(ready.at(-1), false, "Create stays off");
+  approval.needed = false;
+  approval.epoch = 1;
+  tree = await settleTree(form);
+  assert.ok(reads() > before, "approved: the machine is read again, past the cache");
+  assert.equal(ready.at(-1), true);
+});
+
 test("Black 4 hardware: a sign-in that ended shows Sign in in the form (not ready) and in the agent's Settings, then reads the machine again", async () => {
   const { applyHardware, hardwareDefaults } = await freshPlugin();
   const { React, settle: settleTree } = testReact();
@@ -547,14 +584,25 @@ test("a kept sign-in that cannot be refreshed at launch (offline) stays kept and
   await app.connected();
 });
 
-test("a kept sign-in refused at launch is removed, and Settings opens once at Sign in", async (t) => {
+test("a kept sign-in refused at launch is removed and shown in place with its reason; no Settings takeover", async (t) => {
   const device = deviceStorage(t);
   device.set(KEY, JSON.stringify({ v: 1, refresh: "refresh-revoked" }));
   const app = await harness(t, { revision: "rev-1" });
   await until(() => button(app.settings(), "Sign in to Black 4"), { what: "signed out" });
   assert.equal(device.has(KEY), false);
-  assert.equal(app.opened.length, 1);
+  assert.deepEqual(app.opened, [], "a launch never opens Settings for it");
   assert.match(text(app.settings()), /sign-in ended/i);
+  assert.match(app.badge().props["aria-label"], /sign-in ended/i);
+});
+
+test("Sign in uses a sign-in another window kept meanwhile, with no browser", async (t) => {
+  const device = deviceStorage(t);
+  const app = await harness(t);
+  await settle();
+  device.set(KEY, JSON.stringify({ v: 1, refresh: app.authkit.issue().refresh_token })); // another window signed in
+  app.click("Sign in to Black 4");
+  await app.connected();
+  assert.equal(app.authkit.calls.filter((call) => call.path === "/oauth2/device_authorization").length, 0, "no device sign-in");
 });
 
 // ---- Black 4 hardware asks for a fresh approval ----

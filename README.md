@@ -64,8 +64,9 @@ Terminal, Node, Tailscale or an SSH key.
   WebView2 data folder under `%LOCALAPPDATA%`. Quitting and reopening Buzz,
   or updating the plugin, signs you back in without a browser.
   - **Who can read it:** it is stored as plain text, so any program running
-    as you on this computer can read it, local agents included. Treat this
-    computer's account as trusted with your Black 4 access.
+    as you on this computer can read it, local agents included, and so can
+    any other Buzz plugin you install. Treat this computer's account as
+    trusted with your Black 4 access.
   - **To remove it, choose Sign out** in **Settings → Black 4**: the stored
     token is deleted at once. It is also deleted when Black 4 refuses it (your
     sign-in ended) and replaced when you sign in again. A dropped network
@@ -76,7 +77,8 @@ Terminal, Node, Tailscale or an SSH key.
     refresh (within about five minutes).
   - Buzz opens **Settings → Black 4** at its Sign in by itself only the first
     time a newly installed or updated plugin starts without a kept sign-in,
-    and if a sign-in ends while Buzz runs. Otherwise choose **Sign in to
+    and if a sign-in ends while Buzz runs. A kept sign-in that Black 4 refuses
+    at launch is removed and shown in place with its reason. Otherwise choose **Sign in to
     Black 4** wherever you are; a dot on the Reviews entry reminds you.
   - Access tokens are refreshed before they expire. Tokens never go into
     logs, into the Settings card or to any agent.

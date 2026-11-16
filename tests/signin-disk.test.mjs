@@ -65,7 +65,7 @@ test("rotation: each refresh replaces the kept token, and the used one is gone",
   assert.equal(authkit.refresh.has(afterRestore), false);
 });
 
-test("Sign out deletes the kept token at once; a new sign-in replaces it from its start", async () => {
+test("Sign out deletes the kept token at once; a new sign-in leaves the store alone until approved, then replaces it", async () => {
   const authkit = fakeAuthKit({ polls: ["authorization_pending"], interval: 0.001 });
   const storage = fakeStorage();
   storage.setItem(SIGNIN_KEY, JSON.stringify({ v: 1, refresh: authkit.issue().refresh_token }));
@@ -73,13 +73,20 @@ test("Sign out deletes the kept token at once; a new sign-in replaces it from it
   await session.restore();
   await session.signOut();
   assert.equal(storage.values.has(SIGNIN_KEY), false);
-  storage.setItem(SIGNIN_KEY, JSON.stringify({ v: 1, refresh: authkit.issue().refresh_token }));
+  // Another window's sign-in is on disk while this window starts its own.
+  const other = authkit.issue().refresh_token;
+  storage.setItem(SIGNIN_KEY, JSON.stringify({ v: 1, refresh: other }));
   const replacing = windowOn(authkit, storage);
   const flow = replacing.signIn();
   await new Promise((resolve) => setTimeout(resolve, 5));
-  assert.equal(storage.values.has(SIGNIN_KEY), false, "the old sign-in is gone while the new one waits");
+  assert.equal(stored(storage), other, "a sign-in that is still waiting removes nothing");
   replacing.cancel();
   await assert.rejects(flow, /Cancelled/);
+  assert.equal(stored(storage), other, "nor a cancelled one");
+  authkit.polls = ["ok"];
+  await replacing.signIn();
+  assert.notEqual(stored(storage), other, "a completed one replaces it");
+  assert.ok(authkit.refresh.has(stored(storage)));
 });
 
 test("a refused grant (sign-in ended) deletes the kept token", async () => {
@@ -135,7 +142,10 @@ test("two windows refreshing at the same moment: the loser picks up the winner's
   const b = windowOn(authkit, storage);
   await a.restore();
   await b.restore();
+  const before = authkit.calls.length;
   const results = await Promise.allSettled([a.accessToken({ force: true }), b.accessToken({ force: true })]);
+  const presented = authkit.calls.slice(before).filter((call) => call.form.grant_type === "refresh_token").map((call) => call.form.refresh_token);
+  assert.ok(presented.length >= 3 && presented[0] === presented[1], "it really raced: both presented the same token, one was refused");
   assert.deepEqual(results.map((result) => result.status), ["fulfilled", "fulfilled"]);
   for (const session of [a, b]) assert.equal(session.snapshot().status, "signed-in");
   assert.ok(stored(storage), "never cleared");

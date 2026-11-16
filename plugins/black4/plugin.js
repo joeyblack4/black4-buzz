@@ -295,11 +295,12 @@ export function createSession({ request, store = signInStore, now = () => Date.n
     },
 
     /** Starts a device sign-in. `onCode({ url, userCode, expiresAt })` hears
-     * what to show; resolves once signed in, rejects with a sentence. A new
-     * sign-in replaces the one kept on this computer, which is cleared at
-     * once. `stepUp`: a fresh approval while signed in; the current sign-in
-     * stays in use (and kept) until the new one replaces it, and a stepUp that
-     * fails or is cancelled leaves the person signed in. */
+     * what to show; resolves once signed in, rejects with a sentence. Once
+     * approved, the new sign-in replaces any kept on this computer; until then
+     * the store is left alone (another window may be using it). `stepUp`: a
+     * fresh approval while signed in; the current sign-in stays in use until
+     * the new one replaces it, and a stepUp that fails or is cancelled leaves
+     * the person signed in. */
     async signIn({ onCode, stepUp = false } = {}) {
       const mine = ++flow;
       const live = () => mine === flow;
@@ -308,7 +309,6 @@ export function createSession({ request, store = signInStore, now = () => Date.n
       stepping = keepCurrent ? mine : 0;
       steppedFrom = before;
       set({ status: "starting", ...(keepCurrent ? { stepUp: true } : {}) });
-      if (!keepCurrent) await forget();
       try {
         const started = await post("/oauth2/device_authorization", { client_id: authkit.clientId, scope: authkit.scope, ...authkit.params });
         if (!live()) throw Object.assign(new Error("Cancelled."), { code: "cancelled" });
@@ -1035,8 +1035,9 @@ export function apply(ctx) {
         update({ status: "starting", detail: "" });
         const restored = await session.restore();
         if (attempt !== generation || stopped) return;
-        // No sign-in kept on this computer, or the kept one was refused.
-        if (!restored) { update({ status: "signed-out", detail: session.snapshot().detail ?? "" }); promptSignIn(session.snapshot().ended ? "ended" : "installed"); return; }
+        // No sign-in kept on this computer, or the kept one was refused (shown
+        // in place with its reason; a launch never opens Settings for it).
+        if (!restored) { update({ status: "signed-out", detail: session.snapshot().detail ?? "" }); if (!session.snapshot().ended) promptSignIn("installed"); return; }
       }
       update({ status: "starting", detail: "" });
       mcp.reset();
@@ -1096,6 +1097,16 @@ export function apply(ctx) {
     generation += 1;
     starting = false;
     update({ status: "signing-in", detail: "", signIn: null });
+    // Another Buzz window may have signed in since: use that, no browser.
+    let restored = false;
+    try { restored = await session.restore(); } catch {}
+    if (stopped || mine !== signInTicket) return;
+    if (restored) {
+      signInPrompt.due = true;
+      update({ signIn: null });
+      reconnect();
+      return;
+    }
     try {
       await session.signIn({ onCode: (code) => {
         if (mine !== signInTicket) return;

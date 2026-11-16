@@ -194,8 +194,8 @@ test("Settings → Black 4: Sign in shows the prefilled link and code, then Conn
   };
   const view = () => expand(card.component());
   await settle();
-  assert.match(texts(view()).join(" "), /Status Not signed in/);
-  find(view(), (node) => node.type === "button" && texts(node).join("") === "Sign in").props.onClick();
+  assert.ok(find(view(), (node) => node.type === "button" && texts(node).join("") === "Sign in to Black 4"), "signed out, the card is Sign in");
+  find(view(), (node) => node.type === "button" && texts(node).join("") === "Sign in to Black 4").props.onClick();
   await until(() => find(view(), (node) => node.type === "a"), { what: "the sign-in link" });
   const link = find(view(), (node) => node.type === "a");
   assert.equal(link.props.href, `${AUTHKIT}/device?user_code=WDJB-MJHT`);
@@ -207,7 +207,7 @@ test("Settings → Black 4: Sign in shows the prefilled link and code, then Conn
   assert.doesNotMatch(JSON.stringify(view()), tokenText, "no token anywhere in the card");
   find(view(), (node) => node.type === "button" && texts(node).join("") === "Sign out").props.onClick();
   await settle();
-  assert.match(texts(view()).join(" "), /Status Not signed in/);
+  assert.ok(find(view(), (node) => node.type === "button" && texts(node).join("") === "Sign in to Black 4"), "signed out again: Sign in");
 });
 
 test("an MCP that keeps forgetting its session is reopened once per call, then reported", async () => {
@@ -254,15 +254,16 @@ test("Cancel, then Sign in again: the cancelled attempt ending later leaves the 
   const view = () => expand(card.component());
   const click = (label) => find(view(), (node) => node.type === "button" && texts(node).join("") === label).props.onClick();
   await settle();
-  click("Sign in");
+  click("Sign in to Black 4");
   await until(() => find(view(), (node) => node.type === "a"), { what: "the first link" });
   click("Cancel");
-  click("Sign in");
+  click("Sign in to Black 4");
   await until(() => find(view(), (node) => node.type === "a"), { what: "the second link" });
   await new Promise((resolve) => setTimeout(resolve, 250)); // the first attempt's poll wakes and ends
   await settle();
   assert.ok(find(view(), (node) => node.type === "a"), "the new link is still shown");
-  assert.match(texts(view()).join(" "), /Waiting for you to sign in/);
+  assert.match(texts(view()).join(" "), /Confirm it in your browser/);
+  assert.match(texts(view()).join(" "), /WDJB-MJHT/);
   click("Cancel");
 });
 

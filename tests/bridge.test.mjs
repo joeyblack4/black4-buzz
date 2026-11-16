@@ -141,7 +141,7 @@ test("signed out, nothing reaches the MCP and the card offers Sign in", async (t
   await settle();
   assert.equal(h.mcp.calls.length, 0);
   assert.equal(h.registered.size, 0);
-  assert.ok(button(h.settings(), "Sign in"));
+  assert.ok(button(h.settings(), "Sign in to Black 4"));
 });
 
 test("defaults channel binding to the calling agent's channel and relay", async (t) => {
@@ -289,9 +289,11 @@ test("Reviews registers a host workspace in the dock without replacing MCP tools
   assert.equal(typeof app.page.badge, "function");
   assert.equal(app.registered.size, tools.length);
   const view = app.page.component();
-  assert.equal(view.children[0].type, "browser-view");
-  assert.equal(view.children[0].props.url, "https://app.black4.ai/reviews?experience=buzz");
-  assert.equal(view.children[0].props.storage, "black4-reviews");
+  assert.equal(view.children[0], null, "signed in, nothing sits above the inbox");
+  const inbox = view.children[1].children[0];
+  assert.equal(inbox.type, "browser-view");
+  assert.equal(inbox.props.url, "https://app.black4.ai/reviews?experience=buzz");
+  assert.equal(inbox.props.storage, "black4-reviews");
 });
 
 test("without an embedded browser the Reviews page is the native queue, with the review brief one step away", async t => {

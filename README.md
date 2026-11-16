@@ -35,10 +35,13 @@ Terminal, Node, Tailscale or an SSH key.
    Commerce Mac's door (`black4-commerce-01.tail50b7f0.ts.net`). Choose
    **Install plugin**.
 2. **Turn it on** in **Settings → Plugins**. Plugins start off.
-3. **Sign in.** In **Settings → Black 4**, choose **Sign in**, then **Open
-   Black 4 sign-in**. Your browser opens with the code already filled in.
-   Check that it matches the code Buzz shows, then approve.
-   You should see **Connected**, your email *(staff)* if you are staff, and a
+3. **Sign in.** Once the plugin is on, Buzz opens **Settings → Black 4** by
+   itself with **Sign in to Black 4** ready (press Return or click it). Your
+   browser opens with the code already filled in: check that it matches the
+   large code Buzz shows, then approve. Buzz updates by itself.
+   While you are signed out, the same **Sign in to Black 4** button also sits
+   on Reviews (a dot marks the Reviews entry), on review previews in messages
+   and in the Black 4 hardware form. You should see **Connected**, your email *(staff)* if you are staff, and a
    number of agent tools. **Agent access** says **Linked**.
 4. **New agent** (staff). Go to **Agents → New agent → Black 4 hardware**.
    Give it a name, choose what it runs (Claude Code if unsure) and who it
@@ -61,7 +64,9 @@ Terminal, Node, Tailscale or an SSH key.
   token: opening a collection starts relay sync queries, a collection belongs
   to one identity and one community, and it is stored as plaintext on disk
   where local agents can read it. The cost is one browser approval per
-  launch. Access tokens are refreshed before they expire. Tokens never go into
+  launch: Buzz opens **Settings → Black 4** at its Sign in once after each
+  launch (dismiss it and it stays away until the next launch), and once more
+  if a sign-in ends while Buzz runs. Access tokens are refreshed before they expire. Tokens never go into
   logs, into the Settings card or to any agent.
 - **Until you sign in after a launch**, Buzz's own agents can't use Black 4
   tools, and **Black 4 hardware** isn't offered. Your existing hardware agents
@@ -98,9 +103,10 @@ sign-in.
 
 - **The plugin does nothing after Install.** It starts off: turn it on in
   **Settings → Plugins**.
-- **Settings → Black 4 says *Not signed in*.** Choose **Sign in**. A message
-  under the status says why the last sign-in ended: the code expired, the
-  sign-in was declined, or *Your Black 4 sign-in ended*.
+- **Settings → Black 4 shows only Sign in to Black 4.** You are signed out:
+  choose it. A line above it says why the last sign-in ended, if it did: the
+  code expired, the sign-in was declined, or *Your Black 4 sign-in ended*.
+  If your browser did not open, choose **Open sign-in page**.
 - **No Black 4 hardware in New agent.** It appears once **Settings → Black 4**
   says **Connected** with a *(staff)* account. If the card instead says
   *Black 4 hardware is unavailable in this Buzz*, this Buzz version changed the

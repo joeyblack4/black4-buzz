@@ -69,8 +69,10 @@ Tailscale runs as a system daemon, and Funnel publishes only the door's port on 
 
 ```sh
 TS="/usr/local/bin/tailscale --socket=/var/run/tailscaled.socket"
-$TS funnel --bg 8411     # dev door; the released door is 8410
+$TS funnel --bg 8410     # the released door; a dev door would be 8411
 $TS funnel status
 ```
 
-To move from the dev door to the released one, run `$TS funnel --bg 8410` and then `$TS funnel --https=443 off` for the old mapping if it remains. These two release commands haven't been run yet, because Funnel isn't enabled. Check `funnel status` after each one. Funnel must be enabled once for the tailnet in the Tailscale admin console; the command prints the link when it isn't.
+Since 2026-11-15 the Commerce Mac runs the released door from `~/workforce` on 8410, and Funnel publishes `/` on `https://black4-commerce-01.tail50b7f0.ts.net` to `127.0.0.1:8410`. The dev door on 8411 is stopped and its cron lines are gone. Funnel is enabled for the tailnet. On a new machine, the command prints the admin-console link to enable it.
+
+To test a dev door again, point Funnel at it with `$TS funnel --bg 8411`, and point it back with `$TS funnel --bg 8410` afterwards. Check `funnel status` after each one.

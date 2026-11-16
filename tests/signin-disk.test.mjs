@@ -222,24 +222,3 @@ test("a disk that cannot delete writes an empty record instead, read as no sign-
   assert.equal(stored(storage), null);
   assert.equal(await diskStore({ storage: () => storage }).load(), null);
 });
-
-test("a fresh approval (step up) keeps the current sign-in in use and kept; cancelling it changes nothing", async () => {
-  const authkit = fakeAuthKit({ polls: ["authorization_pending"], interval: 0.001 });
-  const storage = fakeStorage();
-  storage.setItem(SIGNIN_KEY, JSON.stringify({ v: 1, refresh: authkit.issue().refresh_token }));
-  const session = windowOn(authkit, storage);
-  await session.restore();
-  const kept = stored(storage);
-  const flow = session.signIn({ stepUp: true });
-  await new Promise((resolve) => setTimeout(resolve, 5));
-  assert.equal(stored(storage), kept, "kept while approving");
-  assert.match(await session.accessToken(), /^access-/, "still usable while approving");
-  session.cancel();
-  await assert.rejects(flow, /Cancelled/);
-  assert.equal(session.snapshot().status, "signed-in");
-  assert.equal(stored(storage), kept);
-  authkit.polls = ["ok"];
-  await session.signIn({ stepUp: true });
-  assert.equal(session.snapshot().status, "signed-in");
-  assert.notEqual(stored(storage), kept, "approved: the new sign-in replaces it");
-});

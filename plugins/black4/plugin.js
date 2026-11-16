@@ -29,15 +29,31 @@ const QUEUE_TIMEOUT_MS = 30 * 1000;
 const LINK_TIMEOUT_MS = 30 * 1000;
 const LINK_UNAVAILABLE = "This Black 4 server can't link agents yet.";
 const PASS_TOOL = "sign_hardware_request";
-/** What Platform Control answers (error code) when a pass needs a recent
- * browser approval: a sign-in kept on disk alone may not mint hardware
- * passes once it has been idle. Proposed name; until the server sends it,
- * nothing here changes. */
-export const FRESH_APPROVAL_CODE = "fresh_approval_required";
-const FRESH_APPROVAL_TEXT = "Black 4 hardware needs a fresh approval in your browser.";
+/** Limits Platform Control keeps on a sign-in kept on disk (black4-mcp-
+ * stored-signins.ts in Platform Control). Both are renewed only through the
+ * MCP tool `renew_signin`, a browser approval Platform Control runs itself;
+ * signing in again on the device renews nothing.
+ * - APPROVAL_CODE: `sign_hardware_request`'s tool error when no approval was
+ *   seen in the last 24 hours.
+ * - IDLE_CODE: HTTP 403 `{"error":"signin_idle","message"}` on every MCP
+ *   message but initialize, ping, tools/list, notifications and a direct
+ *   `tools/call renew_signin`, after 14 unused days. */
+export const APPROVAL_CODE = "signin_approval_required";
+export const IDLE_CODE = "signin_idle";
+export const RENEW_TOOL = "renew_signin";
+const APPROVAL_TEXT = "Black 4 hardware needs your approval in your browser.";
 const PASS_REFUSED = "Agents cannot mint Black 4 hardware passes. Only the Black 4 plugin's hardware agent type does, for its own requests.";
 /** Whether a tool call (directly, or through call_tool, however nested) asks
  * for a hardware pass. */
+/** Whether a tool call (directly or through call_tool) asks to renew the
+ * person's sign-in. Only the person does that, from this plugin's Approve. */
+export function renews(name, args, depth = 0) {
+  const tool = String(name ?? "").trim().toLowerCase();
+  if (tool === RENEW_TOOL) return true;
+  if (tool === "call_tool" && depth < 4 && args && typeof args === "object") return renews(args.name, args.arguments, depth + 1);
+  return false;
+}
+const RENEW_REFUSED = "Agents cannot renew the person's Black 4 sign-in. The person approves it in Buzz (Settings → Black 4).";
 export function mintsPass(name, args, depth = 0) {
   const tool = String(name ?? "").trim().toLowerCase();
   if (tool === PASS_TOOL) return true;
@@ -179,8 +195,6 @@ export function createSession({ request, store = signInStore, now = () => Date.n
   let refreshing = null;
   let restored = null;
   let flow = 0; // the current device sign-in; a newer one or cancel retires it
-  let stepping = 0; // the flow of a fresh approval made while signed in
-  let steppedFrom = null; // the view before it, put back when it ends without replacing the sign-in
   let view = Object.freeze({ status: "signed-out" }); // signed-out | starting | waiting | signed-in
   const listeners = new Set();
   const set = (next) => { view = Object.freeze(next); for (const listener of [...listeners]) listener(view); };
@@ -297,18 +311,11 @@ export function createSession({ request, store = signInStore, now = () => Date.n
     /** Starts a device sign-in. `onCode({ url, userCode, expiresAt })` hears
      * what to show; resolves once signed in, rejects with a sentence. Once
      * approved, the new sign-in replaces any kept on this computer; until then
-     * the store is left alone (another window may be using it). `stepUp`: a
-     * fresh approval while signed in; the current sign-in stays in use until
-     * the new one replaces it, and a stepUp that fails or is cancelled leaves
-     * the person signed in. */
-    async signIn({ onCode, stepUp = false } = {}) {
+     * the store is left alone (another window may be using it). */
+    async signIn({ onCode } = {}) {
       const mine = ++flow;
       const live = () => mine === flow;
-      const keepCurrent = stepUp;
-      const before = view;
-      stepping = keepCurrent ? mine : 0;
-      steppedFrom = before;
-      set({ status: "starting", ...(keepCurrent ? { stepUp: true } : {}) });
+      set({ status: "starting" });
       try {
         const started = await post("/oauth2/device_authorization", { client_id: authkit.clientId, scope: authkit.scope, ...authkit.params });
         if (!live()) throw Object.assign(new Error("Cancelled."), { code: "cancelled" });
@@ -321,7 +328,7 @@ export function createSession({ request, store = signInStore, now = () => Date.n
         if (!link) throw new Error("Black 4 sign-in returned no link to open.");
         const userCode = typeof code.user_code === "string" ? plain(code.user_code, 32) : "";
         const expiresAt = now() + (Number(code.expires_in) > 0 ? Number(code.expires_in) : 600) * 1000;
-        set({ status: "waiting", url: link, userCode, expiresAt, ...(keepCurrent ? { stepUp: true } : {}) });
+        set({ status: "waiting", url: link, userCode, expiresAt });
         onCode?.({ url: link, userCode, expiresAt });
         let interval = Number(code.interval) > 0 ? Number(code.interval) : DEVICE_INTERVAL_S;
         for (;;) {
@@ -346,20 +353,12 @@ export function createSession({ request, store = signInStore, now = () => Date.n
         }
         set({ status: "signed-in" });
       } catch (error) {
-        if (live()) set(keepCurrent ? before : { status: "signed-out", ...(error.code === "cancelled" ? {} : { detail: error.message }) });
+        if (live()) set({ status: "signed-out", ...(error.code === "cancelled" ? {} : { detail: error.message }) });
         throw error;
-      } finally {
-        if (stepping === mine) stepping = 0;
       }
     },
-    cancel() {
-      const wasStepUp = stepping !== 0;
-      flow += 1;
-      stepping = 0;
-      // A cancelled fresh approval leaves the sign-in as it was.
-      if (view.status === "starting" || view.status === "waiting") set(wasStepUp && steppedFrom ? steppedFrom : { status: "signed-out" });
-    },
-    async signOut() { flow += 1; stepping = 0; await forget(); set({ status: "signed-out" }); },
+    cancel() { flow += 1; if (view.status === "starting" || view.status === "waiting") set({ status: "signed-out" }); },
+    async signOut() { flow += 1; await forget(); set({ status: "signed-out" }); },
   };
 }
 
@@ -393,6 +392,12 @@ export function createMcp({ request, session, url = MCP_URL, clientInfo = { name
       throw Object.assign(new Error(`Could not reach Black 4 (${plain(error?.message ?? error, 120)}).`), { code: "offline" });
     }
     if (response.status === 401 && !retried) return post(message, { timeoutMs, retried: true, reopened });
+    if (response.status === 403 && jsonOf(response.body)?.error === IDLE_CODE) {
+      // Unused too long: the sign-in is still good, but Black 4 wants it
+      // approved again (renew_signin). Refreshing would not help.
+      const said = plain(jsonOf(response.body)?.message ?? "");
+      throw Object.assign(new Error(said || "Approve your Black 4 sign-in again in your browser."), { code: "idle" });
+    }
     if (response.status === 401 || response.status === 403) {
       const body = jsonOf(response.body);
       const said = plain(body?.error_description ?? body?.error?.message ?? body?.error ?? "");
@@ -593,7 +598,7 @@ export function reviewSurface(React, read, HumanView, useConnection = () => "con
     if (human) return h("div", { className: "b4-review", style: { display: "flex", flexDirection: "column", flex: 1, minHeight: 0, height: "100%" } }, h("style", null, styles), button("← Back to brief · refresh status", () => { showHuman(null); refresh(v => v + 1); }), h(HumanView, { url: human }));
     // Recovery happens where the person is. Connect only shows once nothing is
     // in progress, so a click never restarts a sign-in the browser is holding.
-    if (SignInPrompt && (connection === "signed-out" || connection === "signing-in")) return wrap(h(SignInPrompt, { compact }));
+    if (SignInPrompt && ["signed-out", "signing-in", "idle"].includes(connection)) return wrap(h(SignInPrompt, { compact }));
     if (connection !== "connected") return wrap(
       h("p", { role: "status" }, CONNECTION_TEXT[connection] ?? `Black 4: ${connection}.`),
       link.detail ? h("p", { className: "b4-muted" }, link.detail) : null,
@@ -655,16 +660,18 @@ export function apply(ctx) {
     agentLink: { status: "idle" },
     hardware: "hidden", // hidden | offered: the Black 4 hardware agent type
     hardwareError: "", // one sentence when the hardware type failed
-    // Black 4 asked for a fresh browser approval before more hardware passes:
-    // null | { status: "needed" | "starting" | "waiting", code?, detail? }
-    freshApproval: null,
-    approvals: 0, // fresh approvals made: hardware views read again on each
+    // Black 4 asked for this sign-in to be approved again in a browser
+    // (renew_signin): "idle" (unused too long; status is "idle" too) or
+    // "hardware" (a pass needs a recent approval).
+    // null | { reason, status: "needed" | "starting" | "waiting", code?, detail? }
+    renewal: null,
+    approvals: 0, // approvals given: hardware views read again on each
   };
   const listeners = new Set();
   const update = (patch) => {
     // Any status other than connected makes the count unknown: no stale badge
     // survives a disconnect, a failed refresh or a reconnect to another account.
-    if (patch.status && patch.status !== "connected") patch = { ...patch, waiting: null, agentLink: { status: "idle" }, freshApproval: null };
+    if (patch.status && patch.status !== "connected") patch = { ...patch, waiting: null, agentLink: { status: "idle" }, renewal: patch.renewal ?? null };
     state = { ...state, ...patch };
     for (const listener of listeners) listener();
   };
@@ -695,6 +702,9 @@ export function apply(ctx) {
     const call = mcp.request(method, params, { timeoutMs }).then((value) => {
       if (attempt !== generation) throw new Error("Black 4 reconnected; ask again.");
       return value;
+    }, (error) => {
+      if (error?.code === "idle") becomeIdle(error.message);
+      throw error;
     });
     if (!signal) return call;
     return new Promise((resolve, reject) => {
@@ -770,10 +780,13 @@ export function apply(ctx) {
     // Only this plugin's own hardware provider mints door passes. An agent's
     // call carries the person's sign-in, so Black 4 cannot tell it apart.
     if (mintsPass(name, args)) throw new Error(PASS_REFUSED);
+    if (renews(name, args)) throw new Error(RENEW_REFUSED);
     if (state.status !== "connected") {
       throw new Error(
         `Black 4 is not connected in Buzz (${state.status}${state.detail ? `: ${state.detail}` : ""}). ` +
-          "Ask the owner to open Settings → Black 4 and choose Sign in.",
+          (state.status === "idle"
+            ? "Ask the owner to choose Approve in browser in Settings → Black 4."
+            : "Ask the owner to open Settings → Black 4 and choose Sign in."),
       );
     }
     let input = args ?? {};
@@ -796,7 +809,7 @@ export function apply(ctx) {
     for (const tool of tools) {
       const name = PREFIX + tool.name;
       if (registered.has(name)) continue;
-      if (mintsPass(tool.name)) continue; // never offered to agents
+      if (mintsPass(tool.name) || renews(tool.name)) continue; // never offered to agents
       if (!/^[a-z][a-z0-9_]{0,63}$/.test(name)) {
         note(`Skipped a tool whose name Buzz refuses: ${tool.name}`);
         continue;
@@ -976,7 +989,7 @@ export function apply(ctx) {
       link: () => linkAgents(),
       // While signed out, the form and Settings show the same Sign in.
       signIn: { use: () => useBridgeState().status, Prompt: SignInPrompt },
-      approval: { use: () => { const current = useBridgeState(); return { needed: !!current.freshApproval, epoch: current.approvals }; }, Prompt: ApprovalPrompt },
+      approval: { use: () => { const current = useBridgeState(); return { needed: !!current.renewal, epoch: current.approvals }; }, Prompt: ApprovalPrompt },
     },
     // One 60-second pass per door request, minted as the signed-in person.
     // ownerKey: this Buzz identity's key, which becomes the pass's owner, so an
@@ -990,11 +1003,11 @@ export function apply(ctx) {
       try {
         answer = await callBlack4(PASS_TOOL, { ...input, ...(ownerKey ? { ownerKey } : {}) }, { unavailable: "This Black 4 server can't sign hardware requests yet." });
       } catch (error) {
-        if (error?.serverCode === FRESH_APPROVAL_CODE || String(error?.message).includes(FRESH_APPROVAL_CODE)) {
-          // Not a sign-out: the sign-in stays. Ask for a fresh approval in
-          // place; hardware views read again once it is given.
-          if (!state.freshApproval) update({ freshApproval: { status: "needed" } });
-          throw Object.assign(new Error(FRESH_APPROVAL_TEXT), { code: "fresh-approval" });
+        if (error?.serverCode === APPROVAL_CODE) {
+          // Not a sign-out: the sign-in stays. Offer Approve in place;
+          // hardware views read again once it is given.
+          if (!state.renewal) update({ renewal: { reason: "hardware", status: "needed" } });
+          throw Object.assign(new Error(APPROVAL_TEXT), { code: "approval" });
         }
         if (error?.serverCode === "owner_key_not_linked" || /owner_key_not_linked/.test(String(error?.message))) {
           void checkLink();
@@ -1123,39 +1136,100 @@ export function apply(ctx) {
     linkOnConnect = true;
     reconnect();
   };
-  /** A fresh approval while signed in (Black 4 asked for one before more
-   * hardware passes): the same device sign-in, as a step up. The person stays
-   * signed in throughout, and a cancelled or failed one changes nothing but
-   * the prompt. Once approved, hardware views read again. */
-  let approvalTicket = 0;
-  const approve = async () => {
-    if (stopped || state.status !== "connected" || state.freshApproval?.status !== "needed") return;
-    const mine = ++approvalTicket;
-    const before = state.account?.email;
-    update({ freshApproval: { status: "starting" } });
+  // ---- approving the sign-in again (renew_signin) --------------------------
+  // Platform Control asks for it after 14 unused days (idle: every request
+  // but renew_signin is refused) and before a hardware pass when no approval
+  // was seen in 24 hours. Platform Control runs the browser approval itself:
+  // renew_signin with {} answers a code and link; asked again with the
+  // approvalId every `interval` seconds it says pending, approved, denied or
+  // expired. The person stays signed in throughout and the kept sign-in is
+  // never cleared for either; the plugin only shows the code, as at sign-in.
+
+  /** Idle: the sign-in is good, but Black 4 refuses it until approved again. */
+  const becomeIdle = (message) => {
+    if (stopped || state.status === "idle" || state.status === "signed-out" || state.status === "signing-in") return;
+    generation += 1; // in-flight answers and any connect under way stop here
+    starting = false;
+    clearTimeout(retryTimer);
+    stopQueuePolling();
+    update({ status: "idle", detail: plain(message, 300), renewal: { reason: "idle", status: "needed" } });
+  };
+
+  let renewTicket = 0;
+  const RENEW_ENDED = {
+    denied: "The approval was declined.",
+    expired: "The approval code expired. Approve again.",
+    signin_approval_mismatch: "That approval came from a different account. Approve again as yourself.",
+    signin_approval_not_found: "That approval is no longer known to Black 4. Approve again.",
+    signin_approval_unavailable: "Black 4 couldn't start the approval just now. Try again shortly.",
+  };
+  const askRenew = async (args) => {
+    let result;
     try {
-      await session.signIn({ stepUp: true, onCode: (code) => {
-        if (mine !== approvalTicket || !state.freshApproval) return;
-        update({ freshApproval: { status: "waiting", code: { url: code.url, userCode: code.userCode } } });
-        openInBrowser(code.url);
-      } });
+      // Directly, never through call_tool: an idle sign-in may call only it.
+      result = await mcp.request("tools/call", { name: RENEW_TOOL, arguments: args }, { timeoutMs: LINK_TIMEOUT_MS });
     } catch (error) {
-      if (mine === approvalTicket && state.freshApproval) update({ freshApproval: { status: "needed", detail: error?.code === "cancelled" ? "" : error?.message ?? "" } });
-      return;
+      // A server without renew_signin (before Platform Control's stored
+      // sign-in limits) answers a JSON-RPC error for an unknown tool.
+      if (error?.code === "rpc") throw Object.assign(new Error("This Black 4 server can't approve sign-ins yet."), { code: "unsupported" });
+      throw Object.assign(new Error("Couldn't reach Black 4. Try again."), { code: "retry" });
     }
-    if (stopped || mine !== approvalTicket) return;
-    update({ freshApproval: null, approvals: state.approvals + 1 });
-    // Approved as someone else: everything here follows the new account.
+    try { return readAnswer(result); } catch (error) {
+      if (error.code === "unavailable") throw Object.assign(new Error("This Black 4 server can't approve sign-ins yet."), { code: "unsupported" });
+      if (error.serverCode === "signin_approval_unavailable") throw Object.assign(new Error(error.message), { code: "retry", serverCode: error.serverCode });
+      throw error;
+    }
+  };
+  const renewDone = () => {
+    const idle = state.status === "idle";
+    update({ renewal: null, approvals: state.approvals + 1 });
+    if (idle) reconnect();
+  };
+  /** Approve in browser: the renewal, shown in place on every surface. */
+  const approve = async () => {
+    if (stopped || !state.renewal || state.renewal.status !== "needed") return;
+    const mine = ++renewTicket;
+    const live = () => mine === renewTicket && !stopped && !!state.renewal;
+    const reason = state.renewal.reason;
+    const setRenewal = (patch) => { if (live()) update({ renewal: { reason, ...patch } }); };
+    setRenewal({ status: "starting" });
     try {
-      const who = readAnswer(await request("tools/call", { name: "whoami", arguments: {} }, { timeoutMs: LINK_TIMEOUT_MS }));
-      const email = (who?.data ?? who)?.email;
-      if (before && email && email !== before) reconnect();
-    } catch {}
+      const started = await askRenew({});
+      if (!live()) return;
+      if (started?.state === "approved") return renewDone();
+      const approvalId = typeof started?.approvalId === "string" ? started.approvalId : "";
+      // Only a link on the sign-in origin is ever shown or opened.
+      const link = [started?.verificationUriComplete, started?.verificationUri].find((value) => {
+        try { const url = new URL(value); return url.origin === AUTHKIT.origin && !url.username && !url.password; } catch { return false; }
+      });
+      if (started?.state !== "pending" || !approvalId || !link) throw new Error("Black 4 could not start the approval. Try again.");
+      const userCode = typeof started.userCode === "string" ? plain(started.userCode, 32) : "";
+      const ends = Date.parse(started.expiresAt) || Date.now() + 10 * 60 * 1000;
+      setRenewal({ status: "waiting", code: { url: link, userCode } });
+      openInBrowser(link);
+      let interval = Number(started.interval) > 0 ? Number(started.interval) : DEVICE_INTERVAL_S;
+      for (;;) {
+        await new Promise((resolve) => setTimeout(resolve, interval * 1000));
+        if (!live()) return;
+        if (Date.now() > ends) throw new Error(RENEW_ENDED.expired);
+        let polled;
+        try { polled = await askRenew({ approvalId }); } catch (error) {
+          if (error.code === "retry") continue; // asked again next time
+          throw error;
+        }
+        if (!live()) return;
+        if (polled?.state === "pending") { if (Number(polled.interval) > 0) interval = Number(polled.interval); continue; }
+        if (polled?.state === "approved") return renewDone();
+        throw new Error(RENEW_ENDED[polled?.state] ?? "Black 4 could not finish the approval. Try again.");
+      }
+    } catch (error) {
+      if (error?.serverCode === "signin_approval_not_needed") { if (live()) renewDone(); return; }
+      setRenewal({ status: "needed", detail: RENEW_ENDED[error?.serverCode] ?? plain(error?.message ?? error, 200) });
+    }
   };
   const cancelApproval = () => {
-    approvalTicket += 1;
-    session.cancel();
-    if (state.freshApproval) update({ freshApproval: { status: "needed" } });
+    renewTicket += 1;
+    if (state.renewal) update({ renewal: { reason: state.renewal.reason, status: "needed" } });
   };
   const cancelSignIn = () => {
     signInTicket += 1;
@@ -1220,6 +1294,7 @@ export function apply(ctx) {
     starting: "Connecting…",
     "signed-out": "Not signed in",
     "signing-in": "Waiting for you to sign in",
+    idle: "Waiting for your approval",
     connected: "Connected",
     stopped: "Stopped",
     failed: "Not connected",
@@ -1269,7 +1344,7 @@ export function apply(ctx) {
   // so signing in never reloads it.
   function ReviewsWorkspace() {
     const current = useBridgeState();
-    const out = current.status === "signed-out" || current.status === "signing-in";
+    const out = ["signed-out", "signing-in", "idle"].includes(current.status);
     return ctx.browser.available
       ? h("div", { style: { height: "100%", minHeight: 0, display: "flex", flexDirection: "column" } },
           out ? h("div", { style: { padding: "var(--space-2) var(--space-panel-inset, 1.5rem)", borderBottom: `1px solid ${HOST_BORDER}` } }, h(SignInPrompt, { compact: true })) : null,
@@ -1283,6 +1358,10 @@ export function apply(ctx) {
   // Signed out, a dot: the same cue as a waiting count, with its reason on hover.
   function ReviewsBadge() {
     const current = useBridgeState();
+    if (current.status === "idle") return h("span", {
+      role: "img", "aria-label": "Approve your Black 4 sign-in in your browser", title: "Approve your Black 4 sign-in",
+      style: { display: "inline-block", width: ".5em", height: ".5em", borderRadius: "50%", background: "var(--affordance-prominent, CanvasText)" },
+    });
     if (current.status === "signed-out") return h("span", {
       role: "img", "aria-label": current.detail ? `Sign in to Black 4. ${current.detail}` : "Sign in to Black 4", title: "Sign in to Black 4",
       style: { display: "inline-block", width: ".5em", height: ".5em", borderRadius: "50%", background: "var(--affordance-prominent, CanvasText)" },
@@ -1404,31 +1483,49 @@ export function apply(ctx) {
     `.b4-signin .b4-spin{display:inline-block;flex-shrink:0;width:.8em;height:.8em;border-radius:50%;border:2px solid currentColor;border-right-color:transparent;animation:b4-spin .8s linear infinite}`,
     `@keyframes b4-spin{to{transform:rotate(360deg)}}@media(prefers-reduced-motion:reduce){.b4-signin .b4-spin{animation:none}}`,
   ].join("");
-  function SignInPrompt({ compact = false, focus = false }) {
+  // One component for every "approve in your browser" moment: signing in,
+  // and approving the sign-in again (renew_signin), so both look the same.
+  // `renewal`: also show a hardware renewal (the hardware views); an idle
+  // sign-in shows its renewal everywhere.
+  function SignInPrompt({ compact = false, focus = false, renewal = false }) {
     const current = useBridgeState();
     const [copied, setCopied] = React.useState(false);
     const wrap = (...children) => h("div", { className: "b4-signin" }, h("style", null, SIGNIN_STYLES), ...children);
     const bar = (...children) => h("div", { className: "b4-bar" }, ...children);
     const button = (text, onClick, props = {}) => h("button", { type: "button", onClick, ...props }, text);
     const spinner = () => h("span", { className: "b4-spin", "aria-hidden": true });
-    if (current.status === "signing-in") {
-      const code = current.signIn;
-      if (!code) return wrap(bar(h("button", { type: "button", className: "b4-go", disabled: true, "aria-busy": true }, "Signing in…"), button("Cancel", cancelSignIn)));
+    const busy = (text, cancel) => wrap(bar(h("button", { type: "button", className: "b4-go", disabled: true, "aria-busy": true }, text), button("Cancel", cancel)));
+    // The code to confirm while the browser asks: large and copyable, or one line.
+    const waiting = (code, cancel) => {
       const link = h("a", { href: code.url, target: "_blank", rel: "noopener noreferrer" }, "Open sign-in page");
-      const waiting = code.userCode
+      const words = code.userCode
         ? (compact ? ["Confirm ", h("code", { key: "code" }, code.userCode), " in your browser"] : ["Confirm it in your browser"])
         : ["Approve it in your browser"];
-      const status = h("span", { role: "status", className: "b4-bar b4-muted" }, spinner(), ...waiting);
-      if (compact) return wrap(bar(status, link, button("Cancel", cancelSignIn)));
+      const status = h("span", { role: "status", className: "b4-bar b4-muted" }, spinner(), ...words);
+      if (compact) return wrap(bar(status, link, button("Cancel", cancel)));
       return wrap(
         code.userCode ? bar(
-          h("span", { className: "b4-code", "aria-label": `Sign-in code ${code.userCode}` }, code.userCode),
+          h("span", { className: "b4-code", "aria-label": `Code ${code.userCode}` }, code.userCode),
           button(copied ? "Copied" : "Copy", () => {
             Promise.resolve(globalThis.navigator?.clipboard?.writeText?.(code.userCode))
               .then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }, () => {});
           })) : null,
-        bar(status, link, button("Cancel", cancelSignIn)));
+        bar(status, link, button("Cancel", cancel)));
+    };
+    const renewing = current.status === "idle" || (renewal && current.status === "connected") ? current.renewal : null;
+    if (renewing) {
+      if (renewing.status === "starting" || (renewing.status === "waiting" && !renewing.code)) return busy("Approving…", cancelApproval);
+      if (renewing.status === "waiting") return waiting(renewing.code, cancelApproval);
+      return wrap(
+        renewing.detail ? h("span", { className: "b4-muted" }, renewing.detail) : null,
+        button("Approve in browser", () => void approve(), {
+          className: "b4-go", autoFocus: focus || undefined,
+          title: renewing.reason === "idle"
+            ? "Black 4 asks you to approve this sign-in again after a while unused. You stay signed in."
+            : "Black 4 hardware asks for a recent approval of this sign-in. You stay signed in.",
+        }));
     }
+    if (current.status === "signing-in") return current.signIn ? waiting(current.signIn, cancelSignIn) : busy("Signing in…", cancelSignIn);
     if (current.status !== "signed-out") return null;
     // Why the last sign-in ended is announced once, from Settings (which a
     // sign-in that ended opens, its button focused and described by it), not
@@ -1441,39 +1538,8 @@ export function apply(ctx) {
         title: "Gives every agent in Buzz the Black 4 tools, as you",
       }));
   }
-
-  /** Black 4 hardware asked for a fresh approval: the device sign-in, offered
-   * in place, while the person stays signed in. */
-  function ApprovalPrompt() {
-    const current = useBridgeState();
-    const [copied, setCopied] = React.useState(false);
-    const approval = current.freshApproval;
-    if (!approval) return null;
-    const wrap = (...children) => h("div", { className: "b4-signin" }, h("style", null, SIGNIN_STYLES), ...children);
-    const bar = (...children) => h("div", { className: "b4-bar" }, ...children);
-    const button = (text, onClick, props = {}) => h("button", { type: "button", onClick, ...props }, text);
-    if (approval.status === "starting" || (approval.status === "waiting" && !approval.code)) {
-      return wrap(bar(h("button", { type: "button", className: "b4-go", disabled: true, "aria-busy": true }, "Approving…"), button("Cancel", cancelApproval)));
-    }
-    if (approval.status === "waiting") {
-      const code = approval.code;
-      return wrap(
-        code.userCode ? bar(
-          h("span", { className: "b4-code", "aria-label": `Approval code ${code.userCode}` }, code.userCode),
-          button(copied ? "Copied" : "Copy", () => {
-            Promise.resolve(globalThis.navigator?.clipboard?.writeText?.(code.userCode))
-              .then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }, () => {});
-          })) : null,
-        bar(h("span", { role: "status", className: "b4-bar b4-muted" }, h("span", { className: "b4-spin", "aria-hidden": true }), "Confirm it in your browser"),
-          h("a", { href: code.url, target: "_blank", rel: "noopener noreferrer" }, "Open sign-in page"),
-          button("Cancel", cancelApproval)));
-    }
-    return wrap(
-      approval.detail ? h("span", { className: "b4-muted" }, approval.detail) : null,
-      button("Approve in browser", () => void approve(), {
-        className: "b4-go", title: "Black 4 hardware asks for a recent approval. You stay signed in.",
-      }));
-  }
+  /** The hardware views' prompt: also shows a hardware renewal. */
+  function ApprovalPrompt(props) { return h(SignInPrompt, { ...props, renewal: true }); }
 
   function Black4Settings() {
     const current = useBridgeState();
@@ -1487,13 +1553,14 @@ export function apply(ctx) {
     const bar = (...children) => h("div", { style: { display: "flex", gap: "var(--space-2)", flexWrap: "wrap", alignItems: "center" } }, ...children);
     const button = (text, onClick) => h("button", { type: "button", onClick }, text);
     const card = (...children) => h("section", { className: "ui-card", style: { padding: "var(--space-panel-inset)", display: "flex", flexDirection: "column", gap: "var(--space-2)" } }, ...children);
-    const out = current.status === "signed-out" || current.status === "signing-in";
+    const out = ["signed-out", "signing-in", "idle"].includes(current.status);
     return h(
       "div",
       { style: { display: "flex", flexDirection: "column", gap: "var(--space-2)", width: "100%" } },
       out
         // Signed out, the card is the one thing to do; Buzz opens it here.
-        ? card(h(SignInPrompt, { focus: true }))
+        ? card(h(SignInPrompt, { focus: true }),
+          current.status === "idle" ? bar(button("Sign out", () => void signOut())) : null)
         : card(
           row("Status", STATUS_TEXT[current.status] ?? current.status),
           current.detail ? h("span", { role: current.status === "connected" ? "status" : "alert" }, current.detail) : null,
@@ -2237,7 +2304,8 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
   const useBlack4 = () => {
     const status = access?.signIn ? access.signIn.use?.() : "connected";
     const approval = access?.approval?.use?.() ?? { needed: false, epoch: 0 };
-    return { signedOut: status === "signed-out" || status === "signing-in", reachable: status === "connected", needsApproval: approval.needed, epoch: approval.epoch };
+    // Idle shows the same prompt as signed out (its Approve); neither reaches the machine.
+    return { signedOut: status === "signed-out" || status === "signing-in" || status === "idle", reachable: status === "connected", needsApproval: approval.needed, epoch: approval.epoch };
   };
   const useSignedOut = () => useBlack4().signedOut;
 

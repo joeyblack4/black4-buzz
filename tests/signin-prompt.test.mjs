@@ -11,7 +11,7 @@ const QUEUE = "https://app.black4.ai/reviews";
 const SECTION = "ai.black4/connection";
 
 const whoami = (message) => message.method === "tools/list"
-  ? { result: { tools: [{ name: "whoami", inputSchema: { type: "object" } }, { name: "review_queue", inputSchema: { type: "object" } }, { name: "call_tool", inputSchema: { type: "object" } }] } }
+  ? { result: { tools: [{ name: "whoami", inputSchema: { type: "object" } }, { name: "review_queue", inputSchema: { type: "object" } }, { name: "call_tool", inputSchema: { type: "object" } }, { name: "renew_signin", inputSchema: { type: "object" } }] } }
   : message.params?.name === "whoami" ? { result: { content: [{ type: "text", text: JSON.stringify({ data: { kind: "staff", email: "person@example.test" } }) }] } }
     : message.params?.name === "review_queue" ? { result: { content: [{ type: "text", text: JSON.stringify({ kind: "black4_review_queue", total: 0, reviews: [] }) }] } }
       : { result: { content: [{ type: "text", text: "{}" }] } };
@@ -605,42 +605,146 @@ test("Sign in uses a sign-in another window kept meanwhile, with no browser", as
   assert.equal(app.authkit.calls.filter((call) => call.path === "/oauth2/device_authorization").length, 0, "no device sign-in");
 });
 
-// ---- Black 4 hardware asks for a fresh approval ----
+// ---- approving the sign-in again (renew_signin): Platform Control's limits ----
 
-test("a hardware pass refused with fresh_approval_required offers Approve in place, keeps the person signed in, then reads again", async (t) => {
+const PUBKEY = "a".repeat(64);
+const hardwareForm = (app) => expand({ type: app.regs.hardware.CreateConfiguration, props: { config: {}, onChange() {}, harnessControl: "type-picker" }, children: [] });
+const renewCalls = (app) => app.mcp.renew.calls;
+
+test("hardware: signin_approval_required (directly or through call_tool) offers Approve in place; renew_signin approves and the read works again", async (t) => {
   const device = deviceStorage(t);
-  const app = await harness(t, { signedIn: true, polls: ["authorization_pending", "authorization_pending", "authorization_pending", "ok"] });
+  const app = await harness(t, { signedIn: true });
   await app.connected();
-  await until(() => app.regs.hardware, { what: "the hardware type (staff)" });
+  await until(() => app.regs.hardware, { timeoutMs: 6000, what: "the hardware type (staff)" });
   const hardware = app.regs.hardware;
-  const form = () => expand({ type: hardware.CreateConfiguration, props: { config: {}, onChange() {}, harnessControl: "type-picker" }, children: [] });
-  assert.equal(button(form(), "Approve in browser"), null, "nothing to approve until Black 4 asks");
-  assert.equal(await hardware.remote.instructions.get({ pubkey: "a".repeat(64) }), "Be brief.", "without the server's ask, passes work as before");
+  assert.equal(button(hardwareForm(app), "Approve in browser"), null, "nothing to approve until Black 4 asks");
+  assert.equal(await hardware.remote.instructions.get({ pubkey: PUBKEY }), "Be brief.", "passes work as before");
+  assert.ok(app.mcp.calls.some((call) => call.params?.name === "call_tool" && call.params.arguments?.name === "sign_hardware_request"), "the pass went through call_tool, the server's error shape included");
 
-  app.mcp.freshApproval = true;
-  await assert.rejects(hardware.remote.instructions.get({ pubkey: "a".repeat(64) }), /needs a fresh approval in your browser/);
+  app.mcp.approvalRequired = true;
+  const kept = device.get(KEY);
+  await assert.rejects(hardware.remote.instructions.get({ pubkey: PUBKEY }), /needs your approval in your browser/);
   assert.match(text(app.settings()), /Status Connected/, "not signed out");
-  assert.equal(button(app.settings(), "Sign in to Black 4"), null);
   assert.deepEqual(app.opened, [], "no Settings takeover");
-  assert.ok(button(form(), "Approve in browser"), "the hardware form offers it in place");
-  const keptBefore = JSON.parse(device.get(KEY)).refresh;
+  assert.ok(button(hardwareForm(app), "Approve in browser"));
+  assert.equal(button(app.panel(), "Approve in browser"), null, "a hardware approval shows only where hardware is");
 
-  // Cancel changes nothing but the prompt.
-  app.click("Approve in browser", form());
-  await until(() => /WDJB-MJHT/.test(text(form())), { what: "the approval code" });
-  assert.equal(JSON.parse(device.get(KEY)).refresh, keptBefore, "the kept sign-in stays while approving");
-  app.click("Cancel", form());
+  app.click("Approve in browser", hardwareForm(app));
+  await until(() => /RNEW-CODE/.test(text(hardwareForm(app))), { timeoutMs: 6000, what: "the approval code" });
+  assert.deepEqual(renewCalls(app)[0], {}, "renew_signin started with no input");
+  const big = find(hardwareForm(app), (n) => n.props?.className === "b4-code");
+  assert.deepEqual(big.children, ["RNEW-CODE"], "the code, large");
+  assert.ok(button(hardwareForm(app), "Copy"));
+  assert.equal(find(hardwareForm(app), (n) => n.type === "a").props.href, `${AUTHKIT}/device?user_code=RNEW-CODE`);
+  await until(() => /Runs on/.test(text(hardwareForm(app))), { timeoutMs: 6000, what: "approved: the form is back" });
+  assert.match(renewCalls(app)[1].approvalId, /^ssa_/, "polled with its approvalId");
+  assert.equal(device.get(KEY), kept, "the kept sign-in is untouched");
+  assert.equal(app.authkit.calls.filter((call) => call.path === "/oauth2/device_authorization").length, 0, "no device sign-in: renew_signin does it");
+  assert.equal(await hardware.remote.instructions.get({ pubkey: PUBKEY }), "Be brief.", "retried, it works");
+});
+
+test("idle (HTTP 403 signin_idle): signed in still, every surface offers Approve; approving reconnects; the kept sign-in stays", async (t) => {
+  const device = deviceStorage(t);
+  const app = await harness(t, { signedIn: true, browser: false });
+  await app.connected();
+  const kept = device.get(KEY);
+  app.mcp.idle = true;
+  app.click("Reconnect");
+  await until(() => button(app.settings(), "Approve in browser"), { timeoutMs: 6000, what: "idle" });
+  for (const view of [app.settings(), app.panel(), app.preview(), app.workspace()]) {
+    assert.ok(button(view, "Approve in browser"), "the same action everywhere");
+    assert.equal(button(view, "Sign in to Black 4"), null, "not signed out");
+  }
+  assert.ok(button(app.settings(), "Sign out"), "Sign out stays possible");
+  assert.match(app.badge().props["aria-label"], /Approve your Black 4 sign-in/);
+  assert.equal(device.get(KEY), kept, "kept");
+  assert.deepEqual(app.opened, []);
+  await assert.rejects(app.tools.get("black4_whoami").call({}, {}, {}), /Approve in browser/, "agents are told what the person does");
+
+  app.click("Approve in browser", app.preview());
+  await until(() => /RNEW-CODE/.test(text(app.preview())), { timeoutMs: 6000, what: "the code in the preview" });
+  assert.match(text(app.preview()), /Confirm\s+RNEW-CODE\s+in your browser/, "compact: one line");
+  assert.match(text(app.settings()), /RNEW-CODE/, "the same approval in Settings");
+  await app.connected();
+  assert.equal(button(app.settings(), "Approve in browser"), null);
+  assert.equal(device.get(KEY), kept);
+  assert.ok(renewCalls(app).length >= 2);
+});
+
+test("an idle sign-in at launch comes up waiting for approval, not signed out", async (t) => {
+  const device = deviceStorage(t);
+  const authkit = fakeAuthKit({ interval: 0.02 });
+  device.set(KEY, JSON.stringify({ v: 1, refresh: authkit.issue().refresh_token }));
+  const app = await harness(t, { authkit, revision: "rev-1" });
+  app.mcp.idle = true;
+  await until(() => button(app.settings(), "Approve in browser"), { timeoutMs: 6000, what: "idle at launch" });
+  assert.match(text(app.settings()), /Approve in browser/);
+  assert.ok(device.has(KEY));
+  assert.deepEqual(app.opened, [], "no first-start prompt");
+});
+
+test("renew_signin's endings: declined, expired, someone else, unavailable (retried), not needed; Cancel; each leaves the person signed in", async (t) => {
+  deviceStorage(t);
+  const cases = [
+    { polls: ["denied"], says: /declined/ },
+    { polls: ["expired"], says: /expired/ },
+    { polls: ["signin_approval_mismatch"], says: /different account/ },
+    { polls: ["signin_approval_unavailable", "approved"], done: true },
+    { start: "signin_approval_not_needed", done: true },
+    { start: "signin_approval_unavailable", says: /Try again|try again/i },
+  ];
+  for (const [i, { polls, start, says, done }] of cases.entries()) {
+    const app = await harness(t, { signedIn: true, revision: `r${i}` });
+    await app.connected();
+    await until(() => app.regs.hardware, { timeoutMs: 6000, what: "hardware" });
+    app.mcp.approvalRequired = true;
+    Object.assign(app.mcp.renew, polls ? { polls } : {}, start ? { start } : {});
+    await assert.rejects(app.regs.hardware.remote.instructions.get({ pubkey: PUBKEY }));
+    app.click("Approve in browser", hardwareForm(app));
+    if (done) await until(() => !button(hardwareForm(app), "Approve in browser") && !/Approving|RNEW-CODE/.test(text(hardwareForm(app))), { timeoutMs: 6000, what: `case ${i} done` });
+    else await until(() => button(hardwareForm(app), "Approve in browser") && says.test(text(hardwareForm(app))), { timeoutMs: 6000, what: `case ${i}: ${says}` });
+    assert.match(text(app.settings()), /Status Connected/, `case ${i}: still signed in`);
+    app.click("Sign out");
+    await settle();
+  }
+  const app = await harness(t, { signedIn: true, revision: "cancel" });
+  await app.connected();
+  await until(() => app.regs.hardware, { timeoutMs: 6000, what: "hardware" });
+  app.mcp.approvalRequired = true;
+  app.mcp.renew.polls = ["pending"];
+  await assert.rejects(app.regs.hardware.remote.instructions.get({ pubkey: PUBKEY }));
+  app.click("Approve in browser", hardwareForm(app));
+  await until(() => /RNEW-CODE/.test(text(hardwareForm(app))), { timeoutMs: 6000, what: "waiting" });
+  app.click("Cancel", hardwareForm(app));
   await settle();
-  assert.ok(button(form(), "Approve in browser"));
-  assert.match(text(app.settings()), /Status Connected/);
+  assert.ok(button(hardwareForm(app), "Approve in browser"), "Cancel brings back Approve");
+  const asked = renewCalls(app).length;
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(renewCalls(app).length, asked, "and stops asking");
+});
 
-  app.authkit.polls = ["authorization_pending", "ok"];
-  app.click("Approve in browser", form());
-  await until(() => /Runs on/.test(text(form())), { what: "approved: the form is back" });
-  assert.notEqual(JSON.parse(device.get(KEY)).refresh, keptBefore, "the approval's sign-in replaces the kept one");
-  assert.match(text(app.settings()), /Status Connected/, "never signed out");
-  app.mcp.freshApproval = false; // the server accepts the recent approval
-  assert.equal(await hardware.remote.instructions.get({ pubkey: "a".repeat(64) }), "Be brief.", "retried, it works");
+test("today's server, without renew_signin: nothing changes until it is needed, and then it says so plainly", async (t) => {
+  deviceStorage(t);
+  const app = await harness(t, { signedIn: true });
+  app.mcp.renew.supported = false;
+  await app.connected();
+  await until(() => app.regs.hardware, { timeoutMs: 6000, what: "hardware" });
+  assert.equal(await app.regs.hardware.remote.instructions.get({ pubkey: PUBKEY }), "Be brief.");
+  assert.deepEqual(renewCalls(app), [], "never asked unprompted");
+  app.mcp.approvalRequired = true; // only a server with the limits sends this; tolerate one anyway
+  await assert.rejects(app.regs.hardware.remote.instructions.get({ pubkey: PUBKEY }));
+  app.click("Approve in browser", hardwareForm(app));
+  await until(() => /can't approve sign-ins yet/.test(text(hardwareForm(app))), { timeoutMs: 6000, what: "unsupported" });
+  assert.match(text(app.settings()), /Status Connected/);
+});
+
+test("agents never see or call renew_signin, directly or through call_tool", async (t) => {
+  deviceStorage(t);
+  const app = await harness(t, { signedIn: true });
+  await app.connected();
+  assert.equal(app.tools.has("black4_renew_signin"), false);
+  await assert.rejects(app.tools.get("black4_call_tool").call({}, {}, { name: "renew_signin", arguments: {} }), /Agents cannot renew/);
+  assert.deepEqual(renewCalls(app), []);
 });
 
 test("nothing token-like reaches the state, the rendered surfaces or the hardware form", async (t) => {
@@ -650,7 +754,7 @@ test("nothing token-like reaches the state, the rendered surfaces or the hardwar
   await until(() => app.regs.hardware, { what: "the hardware type" });
   const views = [app.settings(), app.panel(), app.preview(), app.workspace(), app.badge(), expand({ type: app.regs.hardware.CreateConfiguration, props: { config: {}, onChange() {} }, children: [] })];
   for (const view of views) assert.doesNotMatch(JSON.stringify(view ?? null), tokenText);
-  app.mcp.freshApproval = true;
+  app.mcp.approvalRequired = true;
   await assert.rejects(app.regs.hardware.remote.instructions.get({ pubkey: "a".repeat(64) }));
   assert.doesNotMatch(JSON.stringify(expand({ type: app.regs.hardware.CreateConfiguration, props: { config: {}, onChange() {} }, children: [] })), tokenText);
 });

@@ -82,11 +82,17 @@ Terminal, Node, Tailscale or an SSH key.
     Black 4** wherever you are; a dot on the Reviews entry reminds you.
   - Access tokens are refreshed before they expire. Tokens never go into
     logs, into the Settings card or to any agent.
-- **Black 4 hardware may ask for a fresh approval.** If Platform Control
-  answers a hardware request with `fresh_approval_required`, the hardware form
-  and the agent's Settings show **Approve in browser**: the same browser
-  approval as signing in, while you stay signed in. Once you approve, they
-  read the machine again; an action such as **Create** is chosen again.
+- **Black 4 may ask you to approve your sign-in again.** Platform Control
+  limits a sign-in kept on disk, and only its `renew_signin` approval renews
+  it (signing in again does not):
+  - **Hardware:** a hardware pass needs an approval from the last 24 hours.
+    The hardware form and the agent's Settings show **Approve in browser**.
+  - **Unused for 14 days:** Black 4 refuses everything until you approve.
+    Every surface shows **Approve in browser** and the Reviews entry a dot.
+  Either way you stay signed in and the kept sign-in is not removed. Approve
+  shows a code, large and copyable, and opens your browser, as signing in
+  does; once you approve, Buzz carries on by itself (an action such as
+  **Create** is chosen again).
 - **Until you sign in after a launch**, Buzz's own agents can't use Black 4
   tools, and **Black 4 hardware** isn't offered. Your existing hardware agents
   keep running on the machine, but Buzz shows them as *Harness unavailable*

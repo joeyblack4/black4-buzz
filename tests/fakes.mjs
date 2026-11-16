@@ -82,8 +82,26 @@ export function fakeAuthKit({ polls = ["ok"], expiresIn = 3600, interval = 0.001
  * passes the door below accepts. */
 export function fakeMcp(authkit, { answer = () => ({ result: {} }), sse = false, instructions = "People decide." } = {}) {
   // `ownerKeys`: when set, a sign_hardware_request ownerKey outside it is refused (owner_key_not_linked).
-  // `freshApproval`: when true, every sign_hardware_request is refused with fresh_approval_required.
-  const self = { calls: [], passes: new Map(), sessions: new Set(), signed: [], tokens: [], ownerKeys: null, freshApproval: false };
+  // Platform Control's limits on a stored sign-in, in its real wire shapes
+  // (black4-mcp-stored-signins.ts, black4-mcp-tool.ts `failure`/`result`):
+  // `approvalRequired`: sign_hardware_request (directly or via call_tool) is
+  //   refused with the tool error signin_approval_required;
+  // `idle`: every message but initialize, ping, tools/list, notifications and
+  //   a direct tools/call renew_signin gets HTTP 403 {"error":"signin_idle"};
+  // `renew`: renew_signin. `supported: false` is today's server (unknown
+  //   tool); `start` is what {} answers ("pending" or an error code); `polls`
+  //   is what {approvalId} answers in order, the last repeating: a state
+  //   ("pending", "approved", "denied", "expired") or an error code. An
+  //   approval clears `idle` and `approvalRequired`.
+  const self = {
+    calls: [], passes: new Map(), sessions: new Set(), signed: [], tokens: [], ownerKeys: null,
+    approvalRequired: false, idle: false,
+    renew: { supported: true, start: "pending", polls: ["pending", "approved"], interval: 0.02, calls: [] },
+  };
+  const toolFailure = (id, headers, code, message) =>
+    json(200, { jsonrpc: "2.0", id, result: { isError: true, content: [{ type: "text", text: JSON.stringify({ error: { code, message } }) }] } }, headers);
+  const toolResult = (data) => ({ result: { structuredContent: { data }, content: [{ type: "text", text: JSON.stringify(data) }] } });
+  const RENEW_STATES = new Set(["pending", "approved", "denied", "expired"]);
   self.handle = async (input) => {
     const url = new URL(input.url);
     if (url.pathname !== "/mcp" || input.method !== "POST") return json(404, { error: "not found" });
@@ -92,6 +110,10 @@ export function fakeMcp(authkit, { answer = () => ({ result: {} }), sse = false,
     if (!authkit.valid(token)) return json(401, { error: "invalid_token", error_description: "The access token expired." });
     const message = JSON.parse(input.body);
     self.calls.push(message);
+    const renewing = message.method === "tools/call" && message.params?.name === "renew_signin";
+    if (self.idle && !(["initialize", "ping", "tools/list"].includes(message.method) || String(message.method).startsWith("notifications/") || renewing)) {
+      return json(403, { error: "signin_idle", message: "This Black 4 sign-in has not been used for 14 days. Approve it again in a browser with renew_signin to keep using it." });
+    }
     let headers = {};
     if (message.method === "initialize") {
       const id = randomUUID();
@@ -106,10 +128,29 @@ export function fakeMcp(authkit, { answer = () => ({ result: {} }), sse = false,
     else {
       let { name, arguments: args } = message.params ?? {};
       if (message.method === "tools/call" && name === "call_tool" && args?.name === "sign_hardware_request") ({ name, arguments: args } = args);
-      if (message.method === "tools/call" && name === "sign_hardware_request") {
-        if (self.freshApproval) {
-          const error = { code: "fresh_approval_required", message: "Approve again in your browser to use Black 4 hardware." };
-          return json(200, { jsonrpc: "2.0", id: message.id, result: { isError: true, structuredContent: { error }, content: [{ type: "text", text: JSON.stringify({ error }) }] } }, headers);
+      if (message.method === "tools/call" && name === "renew_signin") {
+        const renew = self.renew;
+        renew.calls.push(args ?? {});
+        if (!renew.supported) return json(200, { jsonrpc: "2.0", id: message.id, error: { code: -32602, message: "MCP error -32602: Tool renew_signin not found" } }, headers);
+        const answerWith = (step, approvalId) => {
+          if (!RENEW_STATES.has(step)) return toolFailure(message.id, headers, step, `fake ${step}`);
+          if (step === "approved") { self.idle = false; self.approvalRequired = false; return null; }
+          return null;
+        };
+        if (!args?.approvalId) {
+          const failed = answerWith(renew.start);
+          if (failed) return failed;
+          renew.id = `ssa_${"a".repeat(21)}${renew.calls.length}`.slice(0, 26);
+          reply = toolResult({ state: "pending", approvalId: renew.id, userCode: "RNEW-CODE", verificationUri: `${AUTHKIT}/device`, verificationUriComplete: `${AUTHKIT}/device?user_code=RNEW-CODE`, expiresAt: new Date(Date.now() + 600_000).toISOString(), interval: renew.interval });
+        } else {
+          const step = renew.polls.length > 1 ? renew.polls.shift() : renew.polls[0];
+          const failed = answerWith(step);
+          if (failed) return failed;
+          reply = toolResult({ state: step, approvalId: args.approvalId, ...(step === "pending" ? { interval: renew.interval } : {}), ...(step === "approved" ? { approvedAt: new Date().toISOString() } : {}) });
+        }
+      } else if (message.method === "tools/call" && name === "sign_hardware_request") {
+        if (self.approvalRequired) {
+          return toolFailure(message.id, headers, "signin_approval_required", "Hardware passes need a browser approval of this sign-in within the last 24 hours. Approve it with renew_signin, then try again.");
         }
         if (self.ownerKeys && args?.ownerKey !== undefined && !self.ownerKeys.includes(args.ownerKey)) {
           const error = { code: "owner_key_not_linked", message: "That owner key is not one of your live links." };

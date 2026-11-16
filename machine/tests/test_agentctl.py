@@ -1435,7 +1435,9 @@ class ModelAndEffort(DeviceBase):
         self.assertTrue(self.req(op="heartbeat.set", pubkey=agent.name, minutes=30)["ok"])
         self.assertIn('model "claude-fable-5-2"', (agent / "heartbeat.md").read_text())
         self.assertTrue(self.req(op="settings.set", pubkey=agent.name, model="opus")["ok"])
-        self.assertIn("model set to your exact model id", (agent / "heartbeat.md").read_text(), "an alias: the agent names it exactly")
+        self.assertIn("(your exact model id)", (agent / "heartbeat.md").read_text(), "an alias: the agent names it exactly")
+        self.assertTrue(self.req(op="settings.set", pubkey=agent.name, model="")["ok"])
+        self.assertIn('model "claude-fable-5-2"', self.req(op="heartbeat.get", pubkey=agent.name)["prompt"], "the form shows what it runs")
 
     def claude_calls(self):
         path = self.home / "claude-calls.txt"

@@ -829,8 +829,16 @@ def heartbeat_prompt(s):
     return DEFAULT_HEARTBEAT_PROMPT.format(name=name, model=f'"{model}"' if model else "(your exact model id)")
 
 
+def exact_model(picked):
+    """The model an agent runs, for its heartbeat, when that is an exact id;
+    an alias such as opus is left for the agent to name exactly."""
+    model = picked.get("model") or ""
+    return model if "-" in model else ""
+
+
 def heartbeat_view(s):
     """What the agent form shows: on or off, how often, and what each heartbeat does."""
+    s = {**s, "model": exact_model(choice(s.get("harness") or "claude", s))}
     return {"heartbeat": heartbeat_minutes(s), "prompt": heartbeat_prompt(s).strip(),
             "custom": bool((s.get("heartbeatPrompt") or "").strip()),
             "defaultPrompt": heartbeat_prompt({**s, "heartbeatPrompt": ""}).strip()}
@@ -1203,10 +1211,7 @@ def _start(d):
         # skips a heartbeat while its model process sleeps, so a heartbeat
         # agent keeps it on, and runs two turns so a person can still talk
         # to it while a scheduled run is going.
-        # The model it runs, when that is an exact id (an alias such as
-        # opus is left for the agent to name exactly).
-        exact = picked.get("model") if "-" in (picked.get("model") or "") else ""
-        (d / "heartbeat.md").write_text(heartbeat_prompt({**s, "model": exact}))
+        (d / "heartbeat.md").write_text(heartbeat_prompt({**s, "model": exact_model(picked)}))
         env.update({
             "BUZZ_ACP_LAZY_POOL": "false",
             "BUZZ_ACP_HEARTBEAT_INTERVAL": str(minutes * 60),

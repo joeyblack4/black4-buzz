@@ -426,6 +426,13 @@ class Start(Base):
         self.assertEqual((r["heartbeat"], r["custom"]), (15, False), "an empty prompt is the default; minutes left out stay")
         self.assertEqual(self.req(op="heartbeat.set", pubkey=d.name, prompt=5)["ok"], False)
 
+    def test_the_agent_name_reaches_the_black4_connector(self):
+        self.sign_in()
+        d = self.make_agent()
+        self.assertTrue(self.req(op="start", pubkey=d.name)["ok"])
+        env = self.wait_env(d)
+        self.assertEqual(env["BUZZ_ACP_DISPLAY_NAME"], self.a.read_settings(d)["name"])
+
     def wait_env(self, d):
         for _ in range(30):
             if (d / "work" / "env.json").exists(): break

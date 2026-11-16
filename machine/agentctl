@@ -1204,6 +1204,9 @@ def _start(d):
         "BUZZ_ACP_RESPOND_TO": s.get("respondTo") or "owner-only",
         "BUZZ_ACP_LAZY_POOL": "true",
     })
+    # buzz-acp forwards this to the Black 4 connector, which sends it as the
+    # agent's name: the agent and every worker it fans out log as this agent.
+    if (s.get("name") or "").strip(): env["BUZZ_ACP_DISPLAY_NAME"] = s["name"].strip()
     minutes = heartbeat_minutes(s)
     if minutes:
         # A heartbeat agent wakes on its own and asks Black 4 what is due
@@ -1948,11 +1951,14 @@ def handle(req):
         return {"ok": True, "pid": pid, "profilePublished": ok, **({} if ok else {"profileError": detail})}
 
     if op == "profile":
+        renamed = bool(req.get("name")) and req["name"].strip() != (s.get("name") or "")
         if req.get("name"): s["name"] = req["name"].strip()
         if "picture" in req: s["picture"] = req.get("picture")
         write_settings(d, s)
         ok, detail = publish_profile(d)
         if not ok: fail("profile was not published: " + detail)
+        # A new name reaches Black 4's records from the agent's next start.
+        if renamed and s.get("auth") and running(d): start(d)
         return {"ok": True}
 
     if op == "heartbeat.get":

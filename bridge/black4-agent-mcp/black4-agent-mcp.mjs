@@ -18,7 +18,8 @@
 // call answers with a plain sentence. Nothing is retried on its own.
 //
 // Environment: BUZZ_PRIVATE_KEY (hex or nsec) and BUZZ_AUTH_TAG (JSON) from
-// buzz-acp; BLACK4_MCP_URL (default https://api.black4.ai/mcp),
+// buzz-acp, and BUZZ_ACP_DISPLAY_NAME (the agent's name, sent as
+// X-Black4-Agent); BLACK4_MCP_URL (default https://api.black4.ai/mcp),
 // BLACK4_MCP_TOOLS (default: every tool, as for any agent), BLACK4_MCP_TIMEOUT_MS
 // (default 15 minutes). Nothing is read from disk. The key, the attestation
 // and the signed header are never logged.
@@ -145,6 +146,13 @@ async function serverMessage(res) {
   return plain(text);
 }
 
+/** A header-safe agent name: printable ASCII, spaces collapsed, at most 80
+ * characters (Black 4 keeps 80); null when nothing is left. */
+export function agentLabel(name) {
+  const label = String(name ?? "").replace(/[^\x20-\x7e]/g, "").replace(/\s+/g, " ").trim().slice(0, 80).trim();
+  return label || null;
+}
+
 export function createConnector({ env = process.env, write, fetchFn = fetch, log = () => {}, now = Date.now } = {}) {
   const base = env.BLACK4_MCP_URL || DEFAULT_URL;
   // Every tool, as every other agent sees the Black 4 MCP (Joey, 2026-11-16: no
@@ -153,6 +161,10 @@ export function createConnector({ env = process.env, write, fetchFn = fetch, log
   const endpoint = new URL(base);
   if (tools && !endpoint.searchParams.has("tools")) endpoint.searchParams.set("tools", tools);
   const timeoutMs = Number(env.BLACK4_MCP_TIMEOUT_MS) > 0 ? Number(env.BLACK4_MCP_TIMEOUT_MS) : 15 * 60_000;
+  // The agent's own name (buzz-acp forwards BUZZ_ACP_DISPLAY_NAME to its MCP
+  // server), sent as X-Black4-Agent: Black 4 records it ahead of whatever name a
+  // model types, so the agent and every worker it fans out log as the agent.
+  const agentName = agentLabel(env.BUZZ_ACP_DISPLAY_NAME);
   // The status tool asks Black 4 again at most this often (tests shorten it).
   const recheckMs = Number(env.BLACK4_MCP_RECHECK_MS) >= 0 && env.BLACK4_MCP_RECHECK_MS ? Number(env.BLACK4_MCP_RECHECK_MS) : 30_000;
 
@@ -198,6 +210,7 @@ export function createConnector({ env = process.env, write, fetchFn = fetch, log
       accept: "application/json, text/event-stream",
       authorization: signRequest({ secret, authTag, url: endpoint.href, body, now: now() }).header,
     };
+    if (agentName) headers["x-black4-agent"] = agentName;
     if (protocolVersion) headers["mcp-protocol-version"] = protocolVersion;
     if (sessionId) headers["mcp-session-id"] = sessionId;
     const controller = new AbortController();

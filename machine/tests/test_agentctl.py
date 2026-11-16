@@ -1426,6 +1426,14 @@ class ModelAndEffort(DeviceBase):
         row = next(h for h in self.req(op="models")["harnesses"] if h["id"] == "codex")
         self.assertEqual((row["models"], row["checked"]), ([], False))
 
+    def test_a_heartbeat_names_the_exact_model_it_runs(self):
+        self.listed()
+        agent = self.make_agent("claude")
+        self.assertTrue(self.req(op="heartbeat.set", pubkey=agent.name, minutes=30)["ok"])
+        self.assertIn('model "claude-fable-5-2"', (agent / "heartbeat.md").read_text())
+        self.assertTrue(self.req(op="settings.set", pubkey=agent.name, model="opus")["ok"])
+        self.assertIn("model set to your exact model id", (agent / "heartbeat.md").read_text(), "an alias: the agent names it exactly")
+
     def test_doctor_says_what_new_agents_run(self):
         self.listed()
         rows = {h["id"]: h for h in self.req(op="doctor")["harnesses"]}

@@ -116,7 +116,7 @@ async function harness(t, black4, { viewer = VIEWER, plugin = true, register, si
     click: async (label) => { const found = find(view(), label); assert.ok(found, `no "${label}" button in: ${texts(view()).join(" ")}`); assert.ok(!found.props.disabled, `"${label}" is disabled`); found.props.onClick(); await settle(); },
     /** Settings → Black 4 → Sign in, until connected and Agent access settled. */
     signIn: async () => {
-      const found = find(whole(), "Sign in");
+      const found = find(whole(), "Sign in to Black 4");
       assert.ok(found, "no Sign in button");
       found.props.onClick();
       await until(() => /Status Connected/.test(texts(whole()).join(" ")) && !/Checking…|Linking…/.test(texts(view()).join(" ")), { what: "the sign-in" });
@@ -240,8 +240,9 @@ test("before the Black 4 sign-in finishes there is nothing to click", async (t) 
   const black4 = server();
   const ui = await harness(t, black4, { signedIn: false });
   await settle();
-  assert.match(ui.text(), /Sign in to Black 4 first/);
-  assert.equal(find(ui.view(), "Link my agents"), null);
+  assert.equal(ui.view(), null, "no Agent access step until signed in");
+  assert.ok(find(ui.whole(), "Sign in to Black 4"), "the one thing to do is Sign in");
+  assert.equal(find(ui.whole(), "Link my agents"), null);
   assert.equal(black4.calls.length, 0);
 });
 

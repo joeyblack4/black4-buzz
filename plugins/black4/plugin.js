@@ -88,6 +88,31 @@ export function memoryStore() {
   return { load: async () => value, save: async (token) => { value = token; }, clear: async () => { value = null; } };
 }
 export const signInMemory = memoryStore(); // this Buzz run's sign-in (tests seed it)
+/** Whether the plugin may still open Settings → Black 4 by itself in this Buzz
+ * run: once, until a sign-in succeeds (module memory, like the sign-in). */
+export const signInPrompt = { due: true, connected: false };
+/** Remembers, on this device, which installed revision already opened its
+ * Sign in by itself: one revision opens Settings once, on its first
+ * activation, never on every launch. Not a secret: a revision string only.
+ * Module memory backs it within a run; without working storage nothing can
+ * be remembered across launches, so the install prompt is not shown at all. */
+export const PROMPTED_KEY = "ai.black4.signin-prompted";
+const shownThisRun = new Set();
+const promptedRevision = {
+  /** true: already shown; false: not yet; null: cannot be remembered. */
+  seen(revision) {
+    if (shownThisRun.has(revision)) return true;
+    try {
+      const storage = globalThis.localStorage;
+      if (!storage) return null;
+      return storage.getItem(PROMPTED_KEY) === revision;
+    } catch { return null; }
+  },
+  remember(revision) {
+    shownThisRun.add(revision);
+    try { globalThis.localStorage?.setItem(PROMPTED_KEY, revision); } catch {}
+  },
+};
 
 /** One person's Black 4 sign-in. `request` is `ctx.host.request`. The state
  * it reports (`subscribe`/`snapshot`) never holds a token. */
@@ -252,7 +277,8 @@ export function createMcp({ request, session, url = MCP_URL, clientInfo = { name
   const post = async (message, { timeoutMs = 60 * 1000, retried = false, reopened = false } = {}) => {
     let token;
     try { token = await session.accessToken({ force: retried }); } catch (error) {
-      throw Object.assign(new Error(error.message), { code: "signin" });
+      // A refresh that could not reach the sign-in server is offline, not signed out.
+      throw Object.assign(new Error(error.message), { code: error?.code === "offline" ? "offline" : "signin" });
     }
     const headers = {
       "content-type": "application/json",
@@ -399,7 +425,9 @@ export function reviewReader(call) {
 // `useConnection` returns the connection status string or `{ status, detail, connect }`.
 const HOST_BORDER = "var(--border-standard,color-mix(in srgb,currentColor 14%,transparent))";
 const HOST_ACCENT = "var(--border-accent,var(--border-focus,currentColor))";
-export function reviewSurface(React, read, HumanView, useConnection = () => "connected") {
+/** `SignInPrompt` (optional) takes the place of the brief while signed out or
+ * signing in: the same one action as every other Black 4 surface. */
+export function reviewSurface(React, read, HumanView, useConnection = () => "connected", SignInPrompt = null) {
   const h = React.createElement;
   const styles = [
     `.b4-review{color:var(--text-standard,var(--color-text-primary,inherit));font:inherit;line-height:1.5;overflow-wrap:anywhere;width:100%;min-width:0}`,
@@ -434,7 +462,7 @@ export function reviewSurface(React, read, HumanView, useConnection = () => "con
   const CONNECTION_TEXT = {
     starting: "Connecting to Black 4…",
     "signing-in": "Waiting for you to sign in to Black 4.",
-    "signed-out": "Sign in to Black 4 in Settings → Black 4.",
+    "signed-out": "Not signed in to Black 4.",
     stopped: "Black 4 is stopped.",
     failed: "Black 4 is not connected.",
   };
@@ -466,6 +494,7 @@ export function reviewSurface(React, read, HumanView, useConnection = () => "con
     if (human) return h("div", { className: "b4-review", style: { display: "flex", flexDirection: "column", flex: 1, minHeight: 0, height: "100%" } }, h("style", null, styles), button("← Back to brief · refresh status", () => { showHuman(null); refresh(v => v + 1); }), h(HumanView, { url: human }));
     // Recovery happens where the person is. Connect only shows once nothing is
     // in progress, so a click never restarts a sign-in the browser is holding.
+    if (SignInPrompt && (connection === "signed-out" || connection === "signing-in")) return wrap(h(SignInPrompt, { compact }));
     if (connection !== "connected") return wrap(
       h("p", { role: "status" }, CONNECTION_TEXT[connection] ?? `Black 4: ${connection}.`),
       link.detail ? h("p", { className: "b4-muted" }, link.detail) : null,
@@ -572,6 +601,54 @@ export function apply(ctx) {
       call.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
     });
   };
+  // ---- the sign-in prompt -------------------------------------------------
+  // Nothing works until the person signs in, so the plugin opens Settings →
+  // Black 4, its Sign in button focused, by itself in two cases only:
+  // - "installed": the first activation of an installed revision (a fresh
+  //   install, or an update, which also starts signed out), once per device;
+  //   skipped when the revision is unknown or cannot be remembered;
+  // - "ended": a sign-in that worked in this Buzz run was refused later.
+  // An ordinary launch opens nothing: every surface shows Sign in in place
+  // and the Reviews dock entry carries a dot. Once per Buzz run; a successful
+  // sign-in arms it again. Sign out, Cancel, a declined or expired code and a
+  // dropped network never prompt. It is never retried later: an open that did
+  // not show (the person was busy elsewhere) is left to the in-place Sign in.
+  // Navigation is optional: a host without it still activates.
+  const settingsSection = `${ctx.pluginOwner?.id ?? "ai.black4"}/connection`;
+  const revision = typeof ctx.pluginOwner?.revision === "string" && ctx.pluginOwner.revision ? ctx.pluginOwner.revision : null;
+  const navigation = () => {
+    try { return ctx.reflect?.get?.("navigation") ?? undefined; } catch { return undefined; }
+  };
+  const promptSignIn = (reason) => {
+    if (reason === "installed" && (!revision || promptedRevision.seen(revision) !== false)) return;
+    const nav = navigation();
+    if (!signInPrompt.due || stopped || typeof nav?.open !== "function") return;
+    signInPrompt.due = false;
+    const shown = (result) => {
+      if (reason === "installed" && !(result?.status === "failed" && !result.presented)) promptedRevision.remember(revision);
+    };
+    try {
+      Promise.resolve(nav.open({ version: 1, kind: "settings", section: settingsSection })).then(shown, () => {});
+    } catch {}
+  };
+  const signedOutWhy = () => (signInPrompt.connected ? "ended" : "installed");
+  /** Opens a sign-in link in the default browser, as a click on it would:
+   * Buzz sends a link with target _blank to the system browser. */
+  const openInBrowser = (url) => {
+    try {
+      const doc = globalThis.document;
+      if (!doc?.body?.appendChild) return;
+      const anchor = doc.createElement("a");
+      anchor.href = url;
+      anchor.target = "_blank";
+      anchor.rel = "noopener noreferrer";
+      anchor.style.display = "none";
+      doc.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+    } catch {}
+  };
+
   // ---- agent tools --------------------------------------------------------
   const relayFor = (client) => {
     try {
@@ -791,7 +868,12 @@ export function apply(ctx) {
       console.warn("[black4] Black 4 hardware failed:", error);
       update({ hardwareError: `Black 4 hardware is unavailable in this Buzz: ${String(error?.message ?? error).slice(0, 200)}` });
     },
-    access: { use: () => useBridgeState().agentLink, link: () => linkAgents() },
+    access: {
+      use: () => useBridgeState().agentLink,
+      link: () => linkAgents(),
+      // While signed out, the form and Settings show the same Sign in.
+      signIn: { use: () => useBridgeState().status, Prompt: SignInPrompt },
+    },
     // One 60-second pass per door request, minted as the signed-in person.
     // ownerKey: this Buzz identity's key, which becomes the pass's owner, so an
     // activate matches the attestation this Buzz signs.
@@ -843,7 +925,7 @@ export function apply(ctx) {
         update({ status: "starting", detail: "" });
         const restored = await session.restore();
         if (attempt !== generation || stopped) return;
-        if (!restored) { update({ status: "signed-out", detail: session.snapshot().detail ?? "" }); return; }
+        if (!restored) { update({ status: "signed-out", detail: session.snapshot().detail ?? "" }); promptSignIn("installed"); return; }
       }
       update({ status: "starting", detail: "" });
       mcp.reset();
@@ -862,6 +944,7 @@ export function apply(ctx) {
       } catch {}
       if (attempt !== generation || stopped) return;
       retry = 0;
+      signInPrompt.connected = true; // from here, signed out means a sign-in ended
       update({ status: "connected", detail: "", account, instructions: init?.instructions ?? "" });
       syncHardware();
       void pollQueue();
@@ -870,7 +953,9 @@ export function apply(ctx) {
       void checkLink({ link });
     } catch (error) {
       if (attempt !== generation || stopped) return;
-      if (error?.code === "signin" || !session.signedIn) update({ status: "signed-out", detail: error?.message ?? "" });
+      // Signed out only when the sign-in server refused the grant (the session
+      // says so); anything else, a dropped network included, is retried.
+      if (session.snapshot().status === "signed-out") { update({ status: "signed-out", detail: session.snapshot().detail ?? error?.message ?? "" }); promptSignIn(signedOutWhy()); }
       else scheduleRetry(error?.message ?? String(error));
     } finally {
       if (attempt === generation) starting = false;
@@ -898,12 +983,17 @@ export function apply(ctx) {
     starting = false;
     update({ status: "signing-in", detail: "", signIn: null });
     try {
-      await session.signIn({ onCode: (code) => { if (mine === signInTicket) update({ status: "signing-in", signIn: { url: code.url, userCode: code.userCode } }); } });
+      await session.signIn({ onCode: (code) => {
+        if (mine !== signInTicket) return;
+        update({ status: "signing-in", signIn: { url: code.url, userCode: code.userCode } });
+        openInBrowser(code.url); // the link carries the code: the person only confirms it
+      } });
     } catch (error) {
       if (!stopped && mine === signInTicket && state.status === "signing-in") update({ status: "signed-out", signIn: null, detail: error?.code === "cancelled" ? "" : error?.message ?? String(error) });
       return;
     }
     if (stopped || mine !== signInTicket) return;
+    signInPrompt.due = true; // a sign-in that ends later may prompt once more
     update({ signIn: null });
     linkOnConnect = true;
     reconnect();
@@ -913,23 +1003,26 @@ export function apply(ctx) {
     session.cancel();
     update({ status: "signed-out", signIn: null, detail: "" });
   };
+  let signingOut = false; // the person's own Sign out: never a prompt
   const signOut = async () => {
     signInTicket += 1;
     generation += 1;
     starting = false;
     clearTimeout(retryTimer);
     stopQueuePolling();
-    await session.signOut();
+    signingOut = true;
+    try { await session.signOut(); } finally { signingOut = false; }
     hardware.withdraw();
     update({ status: "signed-out", detail: "", account: null, hardware: "hidden" });
   };
 
   // A refresh the sign-in server refused ends the session: say so in place.
   ctx.effect(() => session.subscribe((view) => {
-    if (view.status === "signed-out" && state.status === "connected") {
+    if (view.status === "signed-out" && state.status === "connected" && !signingOut) {
       generation += 1;
       stopQueuePolling();
       update({ status: "signed-out", detail: view.detail ?? "" });
+      promptSignIn("ended");
     }
   }));
 
@@ -999,7 +1092,8 @@ export function apply(ctx) {
     ctx.browser.available ? function HumanReview({ url }) {
       return h(ctx.browser.View, { url, storage: "black4-reviews", label: "Black 4: view work and decide" });
     } : null,
-    () => { const current = useBridgeState(); return { status: current.status, detail: current.detail, connect: reconnect }; });
+    () => { const current = useBridgeState(); return { status: current.status, detail: current.detail, connect: reconnect }; },
+    SignInPrompt);
 
   // Queue → exact review → back, inside one native composition.
   function ReviewPanel({ target }) {
@@ -1012,17 +1106,28 @@ export function apply(ctx) {
   // MCP remains the agent transport and never receives decision capabilities.
   // Without an embedded browser the page is the native queue and brief; its
   // "View work & decide" link opens the website in the default browser.
+  // While signed out, Sign in sits above the inbox; the inbox keeps its place,
+  // so signing in never reloads it.
   function ReviewsWorkspace() {
+    const current = useBridgeState();
+    const out = current.status === "signed-out" || current.status === "signing-in";
     return ctx.browser.available
-      ? h("div", { style: { height: "100%", minHeight: 0, display: "flex" } },
-          h(ctx.browser.View, { url: "https://app.black4.ai/reviews?experience=buzz", storage: "black4-reviews", label: "Black 4 decision inbox" }))
+      ? h("div", { style: { height: "100%", minHeight: 0, display: "flex", flexDirection: "column" } },
+          out ? h("div", { style: { padding: "var(--space-2) var(--space-panel-inset, 1.5rem)", borderBottom: `1px solid ${HOST_BORDER}` } }, h(SignInPrompt, { compact: true })) : null,
+          h("div", { style: { flex: 1, minHeight: 0, display: "flex" } },
+            h(ctx.browser.View, { url: "https://app.black4.ai/reviews?experience=buzz", storage: "black4-reviews", label: "Black 4 decision inbox" })))
       : h("div", { style: { height: "100%", minHeight: 0, overflow: "auto", boxSizing: "border-box" } },
           h(ReviewPanel, { target: "https://app.black4.ai/reviews" }));
   }
 
   // Shown beside the dock entry: decisions waiting on the connected account.
+  // Signed out, a dot: the same cue as a waiting count, with its reason on hover.
   function ReviewsBadge() {
     const current = useBridgeState();
+    if (current.status === "signed-out") return h("span", {
+      role: "img", "aria-label": current.detail ? `Sign in to Black 4. ${current.detail}` : "Sign in to Black 4", title: "Sign in to Black 4",
+      style: { display: "inline-block", width: ".5em", height: ".5em", borderRadius: "50%", background: "var(--affordance-prominent, CanvasText)" },
+    });
     if (current.status !== "connected" || !current.waiting) return null;
     const count = current.waiting > 99 ? "99+" : String(current.waiting);
     return h("span", {
@@ -1123,30 +1228,59 @@ export function apply(ctx) {
     );
   }
 
-  // Sign in, the code to approve while it waits, and what to do once in.
-  // Not a <form>: nothing here submits anything of Buzz's.
-  function SignInControls({ current }) {
+  // ---- Sign in: one action, the same on every surface -----------------------
+  // Signed out: one button. Signing in: the code, large and copyable, while the
+  // browser (opened by Sign in) asks the person to confirm it; the surface turns
+  // signed-in by itself once they do. `compact` is one line, for link previews
+  // and the bar above the inbox. Not a <form>: it sits inside Buzz's own forms.
+  const SIGNIN_STYLES = [
+    `.b4-signin{display:flex;flex-direction:column;align-items:flex-start;gap:var(--space-2,.5em);width:100%;min-width:0}`,
+    `.b4-signin .b4-bar{display:flex;align-items:center;gap:var(--space-2,.5em);flex-wrap:wrap}`,
+    `.b4-signin .b4-go{cursor:pointer;font:inherit;font-weight:600;min-height:2.5em;padding:.5em 1.1em;border:0;border-radius:var(--radius-control,.5em);background:var(--affordance-prominent,CanvasText);color:var(--text-on-prominent,Canvas)}`,
+    `.b4-signin .b4-go:hover{background:var(--affordance-prominent-hover,color-mix(in srgb,CanvasText 85%,Canvas))}`,
+    `.b4-signin .b4-go[disabled]{cursor:default;opacity:.75}`,
+    `.b4-signin button:focus-visible,.b4-signin a:focus-visible{outline:2px solid var(--border-focus,currentColor);outline-offset:3px}`,
+    `.b4-signin .b4-code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:1.75em;font-weight:600;line-height:1.2;letter-spacing:.12em;user-select:all}`,
+    `.b4-signin .b4-muted{color:var(--text-subtle,color-mix(in srgb,currentColor 65%,transparent))}`,
+    `.b4-signin .b4-spin{display:inline-block;flex-shrink:0;width:.8em;height:.8em;border-radius:50%;border:2px solid currentColor;border-right-color:transparent;animation:b4-spin .8s linear infinite}`,
+    `@keyframes b4-spin{to{transform:rotate(360deg)}}@media(prefers-reduced-motion:reduce){.b4-signin .b4-spin{animation:none}}`,
+  ].join("");
+  function SignInPrompt({ compact = false, focus = false }) {
+    const current = useBridgeState();
     const [copied, setCopied] = React.useState(false);
-    const button = (text, onClick, primary = false) => h("button", { type: "button", onClick, className: primary ? "b4-primary" : undefined }, text);
-    const bar = (...children) => h("div", { style: { display: "flex", gap: "var(--space-2)", flexWrap: "wrap", alignItems: "center" } }, ...children);
+    const wrap = (...children) => h("div", { className: "b4-signin" }, h("style", null, SIGNIN_STYLES), ...children);
+    const bar = (...children) => h("div", { className: "b4-bar" }, ...children);
+    const button = (text, onClick, props = {}) => h("button", { type: "button", onClick, ...props }, text);
+    const spinner = () => h("span", { className: "b4-spin", "aria-hidden": true });
     if (current.status === "signing-in") {
       const code = current.signIn;
-      if (!code) return bar(h("span", { role: "status" }, "Starting sign-in…"), button("Cancel", cancelSignIn));
-      return h("div", { style: { display: "flex", flexDirection: "column", gap: "var(--space-2)" } },
-        bar(
-          h("a", { href: code.url, target: "_blank", rel: "noopener noreferrer" }, "Open Black 4 sign-in"),
-          button(copied ? "Copied" : "Copy link", () => {
-            Promise.resolve(globalThis.navigator?.clipboard?.writeText?.(code.url))
+      if (!code) return wrap(bar(h("button", { type: "button", className: "b4-go", disabled: true, "aria-busy": true }, "Signing in…"), button("Cancel", cancelSignIn)));
+      const link = h("a", { href: code.url, target: "_blank", rel: "noopener noreferrer" }, "Open sign-in page");
+      const waiting = code.userCode
+        ? (compact ? ["Confirm ", h("code", { key: "code" }, code.userCode), " in your browser"] : ["Confirm it in your browser"])
+        : ["Approve it in your browser"];
+      const status = h("span", { role: "status", className: "b4-bar b4-muted" }, spinner(), ...waiting);
+      if (compact) return wrap(bar(status, link, button("Cancel", cancelSignIn)));
+      return wrap(
+        code.userCode ? bar(
+          h("span", { className: "b4-code", "aria-label": `Sign-in code ${code.userCode}` }, code.userCode),
+          button(copied ? "Copied" : "Copy", () => {
+            Promise.resolve(globalThis.navigator?.clipboard?.writeText?.(code.userCode))
               .then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }, () => {});
-          })),
-        code.userCode ? bar(h("span", null, "Check that the page shows this code:"), h("code", { style: { fontSize: "1.1em", letterSpacing: "0.08em" } }, code.userCode)) : null,
-        bar(h("span", { role: "status" }, "Waiting for you to approve it in your browser…"), button("Cancel", cancelSignIn)));
+          })) : null,
+        bar(status, link, button("Cancel", cancelSignIn)));
     }
-    if (current.status === "signed-out") return bar(button("Sign in", () => void signIn(), true));
-    if (current.status === "stopped") return null;
-    return bar(
-      button(current.status === "connected" ? "Reconnect" : "Try again", reconnect),
-      button("Sign out", () => void signOut()));
+    if (current.status !== "signed-out") return null;
+    // Why the last sign-in ended is announced once, from Settings (which a
+    // sign-in that ended opens, its button focused and described by it), not
+    // as an alert from every surface showing Sign in.
+    const described = focus && current.detail ? "b4-signin-detail" : undefined;
+    return wrap(
+      current.detail ? h("span", { id: described, className: "b4-muted" }, current.detail) : null,
+      button("Sign in to Black 4", () => void signIn(), {
+        className: "b4-go", autoFocus: focus || undefined, "aria-describedby": described,
+        title: "Gives every agent in Buzz the Black 4 tools, as you",
+      }));
   }
 
   function Black4Settings() {
@@ -1158,27 +1292,28 @@ export function apply(ctx) {
         h("strong", { style: { minWidth: "9em" } }, label),
         h("span", null, value),
       );
+    const bar = (...children) => h("div", { style: { display: "flex", gap: "var(--space-2)", flexWrap: "wrap", alignItems: "center" } }, ...children);
+    const button = (text, onClick) => h("button", { type: "button", onClick }, text);
+    const card = (...children) => h("section", { className: "ui-card", style: { padding: "var(--space-panel-inset)", display: "flex", flexDirection: "column", gap: "var(--space-2)" } }, ...children);
+    const out = current.status === "signed-out" || current.status === "signing-in";
     return h(
       "div",
       { style: { display: "flex", flexDirection: "column", gap: "var(--space-2)", width: "100%" } },
-      h(
-        "p",
-        null,
-        "Every agent in this Buzz app gets the Black 4 MCP as black4_* tools, signed in as you. " +
-          "People decide material changes in Black 4 Reviews; agents never approve.",
-      ),
-      h(
-        "section",
-        { className: "ui-card", style: { padding: "var(--space-panel-inset)", display: "flex", flexDirection: "column", gap: "var(--space-2)" } },
-        row("Status", STATUS_TEXT[current.status] ?? current.status),
-        current.detail ? h("span", { role: current.status === "connected" ? "status" : "alert" }, current.detail) : null,
-        current.account && current.status === "connected"
-          ? row("Signed in as", `${current.account.email ?? "unknown"}${current.account.kind ? ` (${current.account.kind})` : ""}`)
-          : null,
-        current.status === "connected" ? row("Agent tools", String(current.tools)) : null,
-        h(SignInControls, { current }),
-      ),
-      h(AgentAccess, { link: current.agentLink, connected: current.status === "connected", hardware: current.hardware === "offered" }),
+      out
+        // Signed out, the card is the one thing to do; Buzz opens it here.
+        ? card(h(SignInPrompt, { focus: true }))
+        : card(
+          row("Status", STATUS_TEXT[current.status] ?? current.status),
+          current.detail ? h("span", { role: current.status === "connected" ? "status" : "alert" }, current.detail) : null,
+          current.account && current.status === "connected"
+            ? row("Signed in as", `${current.account.email ?? "unknown"}${current.account.kind ? ` (${current.account.kind})` : ""}`)
+            : null,
+          current.status === "connected" ? row("Agent tools", String(current.tools)) : null,
+          current.status === "stopped" ? null : bar(
+            button(current.status === "connected" ? "Reconnect" : "Try again", reconnect),
+            button("Sign out", () => void signOut())),
+        ),
+      current.status === "connected" ? h(AgentAccess, { link: current.agentLink, connected: true, hardware: current.hardware === "offered" }) : null,
       current.hardwareError ? h("p", { role: "alert" }, current.hardwareError) : null,
       current.log.length
         ? h(
@@ -1897,6 +2032,19 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
   const muted = { color: "var(--text-secondary, inherit)", opacity: 0.8 };
   const row = { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" };
 
+  // The person's Black 4 sign-in, and its Sign in, from the plugin. A sign-in
+  // that ended leaves this type registered; its views then show Sign in, and
+  // read the machine again once signed in.
+  const SignInPrompt = access?.signIn?.Prompt;
+  // Signed out (or signing in): show Sign in. Reachable: Black 4 is
+  // connected, so the door can mint passes. In between (starting, failed)
+  // the machine is not asked; it is asked once connected.
+  const useBlack4 = () => {
+    const status = access?.signIn ? access.signIn.use?.() : "connected";
+    return { signedOut: status === "signed-out" || status === "signing-in", reachable: status === "connected" };
+  };
+  const useSignedOut = () => useBlack4().signedOut;
+
   const Select = ({ label, value, options, onChange, disabled, title }) =>
     h("label", { style: { display: "grid", gap: 4 } }, label,
       h("select", { value, disabled, title, onChange: (event) => onChange(event.target.value) },
@@ -1904,14 +2052,18 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
 
   /** The machine's status (or its models), read in an effect and shared across views. */
   const useReader = (reader, machineId) => {
+    const { reachable } = useBlack4();
     const [status, setStatus] = React.useState(() => reader.peek(machineId));
+    const wasReachable = React.useRef(reachable);
     React.useEffect(() => {
       let live = true;
+      const back = !wasReachable.current && reachable; // just connected: anything read before is stale
+      wasReachable.current = reachable;
       setStatus(reader.peek(machineId));
       const off = reader.subscribe((id) => { if (live && id === machineOf(machineId).id) setStatus(reader.peek(machineId)); });
-      if (ask) void reader.read(machineId).then((next) => { if (live) setStatus(next); });
+      if (ask && reachable) void reader.read(machineId, back ? { force: true } : undefined).then((next) => { if (live) setStatus(next); });
       return () => { live = false; off(); };
-    }, [machineId]);
+    }, [machineId, reachable]);
     return status;
   };
   const useStatus = (machineId) => useReader(statuses, machineId);
@@ -2045,9 +2197,12 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
       if (status?.kind === "ok" && usable.length && !usable.some((entry) => entry.id === value.harness))
         onChange({ ...value, harness: usable[0].id, model: "", effort: "" }, { suggested: true });
     }, [status, value.harness]);
-    const isReady = readyToCreate(state) && (status?.kind !== "ok" || usable.some((entry) => entry.id === value.harness));
+    const signedOut = useSignedOut();
+    const isReady = !signedOut && readyToCreate(state) && (status?.kind !== "ok" || usable.some((entry) => entry.id === value.harness));
     React.useEffect(() => { onReadyChange?.(isReady); }, [onReadyChange, isReady]);
     React.useEffect(() => () => onReadyChange?.(false), [onReadyChange]);
+
+    if (signedOut && SignInPrompt) return h("div", { style: { display: "grid", gap: 12 } }, harnessControl, h(SignInPrompt, null));
 
     return h("div", { style: { display: "grid", gap: 12 } },
       harnessControl,
@@ -2060,7 +2215,7 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
       h(Select, { label: "Answers", value: value.respondTo, options: ANSWERS, disabled, onChange: (respondTo) => onChange({ ...value, respondTo }) }),
       ask
         ? h(SignIn, { machineId: machine.id, harness: value.harness, status, disabled })
-        : h("p", { role: "alert" }, "Sign in to Black 4 in Settings → Black 4 to reach Black 4 hardware."));
+        : SignInPrompt ? h(SignInPrompt, null) : h("p", { role: "alert" }, "Sign in to Black 4 in Settings → Black 4 to reach Black 4 hardware."));
   };
 
   const Create = ({ config, onChange, disabled }) => {
@@ -2086,9 +2241,11 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
     const [beat, setBeat] = React.useState({ loading: true, minutes: 0, base: "", draft: "", custom: false, defaultPrompt: "" });
     const [beatBusy, setBeatBusy] = React.useState(false);
     const [picking, setPicking] = React.useState({ saving: false });
+    const { signedOut, reachable } = useBlack4();
 
     React.useEffect(() => directory.subscribe(() => setSeen(directory.peek(pubkey))), [pubkey]);
     React.useEffect(() => {
+      if (!reachable) return undefined; // read once connected (Sign in shows while signed out)
       const controller = new AbortController();
       const { signal } = controller;
       setRun((prior) => ({ ...prior, loading: true, error: undefined }));
@@ -2115,7 +2272,7 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
         else setBeat({ loading: false, minutes: 0, base: "", draft: "", custom: false, defaultPrompt: "", error: String(heartbeat.reason?.message ?? heartbeat.reason) });
       })().catch((error) => { if (!signal.aborted) setRun({ loading: false, error: String(error?.message ?? error) }); });
       return () => controller.abort();
-    }, [pubkey, revision]);
+    }, [pubkey, revision, reachable]);
 
     const machine = machineOf(machineId);
     const harness = run.harness ?? seen?.harness;
@@ -2179,6 +2336,8 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
       : run.error ? h("span", { role: "alert" }, run.error)
         : h("span", null, run.running ? "Running" : run.activated === false ? "Not set up" : "Stopped");
     const dirty = text.draft !== text.base;
+    if (signedOut && SignInPrompt) return h("div", { style: { display: "grid", gap: 16 } },
+      settingsHost?.typeControl?.(false), h(SignInPrompt, null), settingsContent);
     return h("div", { style: { display: "grid", gap: 16 } },
       settingsHost?.typeControl?.(false),
       h("div", { style: { display: "grid", gap: 10 } },

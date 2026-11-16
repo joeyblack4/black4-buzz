@@ -1768,6 +1768,32 @@ export function hardwareProvider(ask, requestId = () => crypto.randomUUID(), dir
   };
 }
 
+/** The heartbeat: whether a hardware agent wakes on its own to run the standing
+ * jobs due in Black 4, and what it does each time (agentctl heartbeat.get/.set).
+ * Kept apart from hardwareProvider, whose shape is the agent type Buzz knows. */
+export function heartbeatRemote(ask, directory = agentDirectory(ask)) {
+  return {
+    async get({ pubkey, signal }) {
+      return askMachine(ask, await directory.machine(pubkey), { op: "heartbeat.get", pubkey }, { signal });
+    },
+    async set({ pubkey, minutes, prompt, signal }) {
+      return askMachine(ask, await directory.machine(pubkey), {
+        op: "heartbeat.set", pubkey, ...(minutes === undefined ? {} : { minutes }), ...(prompt === undefined ? {} : { prompt }),
+      }, { signal });
+    },
+  };
+}
+
+/** How often a hardware agent with its heartbeat on wakes. */
+export const HEARTBEAT_MINUTES = 15;
+
+/** The agent form's heartbeat state from agentctl's heartbeat.get or .set reply. */
+export function beatFrom(reply) {
+  const prompt = String(reply?.prompt ?? "");
+  return { loading: false, minutes: Number(reply?.heartbeat ?? 0), base: prompt, draft: prompt,
+    custom: !!reply?.custom, defaultPrompt: String(reply?.defaultPrompt ?? "") };
+}
+
 /** Registers the "Black 4 hardware" agent type on `ctx`. `report(error)` hears
  * any failure of its components, so the plugin's Settings card can say so;
  * `sign` mints a door pass (the MCP's `sign_hardware_request`);
@@ -1782,6 +1808,7 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
   const statuses = statusReader(ask);
   const directory = agentDirectory(ask);
   const remote = hardwareProvider(ask, undefined, directory);
+  const beats = heartbeatRemote(ask, directory);
 
   // Learn each agent's machine and harness once, off the render path, so
   // summaries and later steps have them.
@@ -1960,6 +1987,8 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
     const [text, setText] = React.useState({ loading: true, base: "", draft: "" });
     const [saving, setSaving] = React.useState(false);
     const [revision, setRevision] = React.useState(0);
+    const [beat, setBeat] = React.useState({ loading: true, minutes: 0, base: "", draft: "", custom: false, defaultPrompt: "" });
+    const [beatBusy, setBeatBusy] = React.useState(false);
 
     React.useEffect(() => directory.subscribe(() => setSeen(directory.peek(pubkey))), [pubkey]);
     React.useEffect(() => {
@@ -1970,9 +1999,10 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
         const machine = await directory.machine(pubkey);
         if (signal.aborted) return;
         setMachineId(machine.id);
-        const [status, instructions] = await Promise.allSettled([
+        const [status, instructions, heartbeat] = await Promise.allSettled([
           askMachine(ask, machine, { op: "status", pubkey }, { signal, timeoutMs: STATUS_TIMEOUT_MS }),
           remote.instructions.get({ pubkey, signal }),
+          beats.get({ pubkey, signal }),
         ]);
         if (signal.aborted) return;
         if (status.status === "fulfilled") {
@@ -1982,6 +2012,8 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
         } else setRun({ loading: false, error: String(status.reason?.message ?? status.reason) });
         if (instructions.status === "fulfilled") setText({ loading: false, base: instructions.value, draft: instructions.value });
         else setText({ loading: false, base: "", draft: "", error: String(instructions.reason?.message ?? instructions.reason) });
+        if (heartbeat.status === "fulfilled") setBeat(beatFrom(heartbeat.value));
+        else setBeat({ loading: false, minutes: 0, base: "", draft: "", custom: false, defaultPrompt: "", error: String(heartbeat.reason?.message ?? heartbeat.reason) });
       })().catch((error) => { if (!signal.aborted) setRun({ loading: false, error: String(error?.message ?? error) }); });
       return () => controller.abort();
     }, [pubkey, revision]);
@@ -2018,6 +2050,19 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
       } finally { setSaving(false); }
     };
 
+    // Each change restarts the agent on its machine, so it applies at once.
+    const saveBeat = async (change) => {
+      if (beatBusy) return;
+      setBeatBusy(true);
+      try {
+        setBeat(beatFrom(await beats.set({ pubkey, ...change })));
+        setRevision((value) => value + 1);
+      } catch (error) {
+        setBeat((prior) => ({ ...prior, error: String(error?.message ?? error) }));
+      } finally { setBeatBusy(false); }
+    };
+    const beatDirty = beat.draft !== beat.base;
+
     const running = run.loading ? h("span", { style: { ...row, ...muted } }, h(Spinner), "Checking…")
       : run.error ? h("span", { role: "alert" }, run.error)
         : h("span", null, run.running ? "Running" : run.activated === false ? "Not set up" : "Stopped");
@@ -2038,6 +2083,22 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
         dirty && h("button", { type: "button", disabled: saving, "aria-busy": saving, onClick: () => void save() }, saving ? h(Spinner) : "Save"),
         dirty && h("button", { type: "button", disabled: saving, onClick: () => setText({ ...text, draft: text.base, error: undefined }) }, "Discard"),
         text.error && h("span", { role: "alert" }, text.error)),
+      h("div", { style: { display: "grid", gap: 8 } },
+        h("label", { style: row },
+          h("input", { type: "checkbox", checked: beat.minutes > 0, disabled: beat.loading || beatBusy,
+            onChange: (event) => void saveBeat({ minutes: event.target.checked ? HEARTBEAT_MINUTES : 0 }) }),
+          "Heartbeat",
+          h("span", { style: muted }, beat.loading ? "…" : beat.minutes > 0 ? `every ${beat.minutes} minutes` : "off"),
+          beatBusy && h(Spinner)),
+        h("label", { style: { display: "grid", gap: 4 } },
+          h("span", { style: row }, "On each heartbeat", h("span", { style: muted }, beat.loading ? "" : beat.custom ? "yours" : "Black 4's standard")),
+          h("textarea", { rows: 8, maxLength: 8000, value: beat.draft, disabled: beat.loading || beatBusy,
+            placeholder: beat.loading ? "Loading…" : "", onChange: (event) => setBeat({ ...beat, draft: event.target.value, error: undefined }) })),
+        (beatDirty || beat.custom || beat.error) && h("div", { style: row },
+          beatDirty && h("button", { type: "button", disabled: beatBusy, onClick: () => void saveBeat({ prompt: beat.draft.trim() === beat.defaultPrompt.trim() ? "" : beat.draft }) }, "Save"),
+          beatDirty && h("button", { type: "button", disabled: beatBusy, onClick: () => setBeat({ ...beat, draft: beat.base, error: undefined }) }, "Discard"),
+          !beatDirty && beat.custom && h("button", { type: "button", disabled: beatBusy, onClick: () => void saveBeat({ prompt: "" }) }, "Use Black 4's standard"),
+          beat.error && h("span", { role: "alert" }, beat.error))),
       settingsContent);
   };
 

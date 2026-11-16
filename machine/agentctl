@@ -793,18 +793,30 @@ def heartbeat_minutes(s):
     return minutes if isinstance(minutes, int) and not isinstance(minutes, bool) and HEARTBEAT_MIN <= minutes <= HEARTBEAT_MAX else 0
 
 
+HEARTBEAT_PROMPT_MAX = 8000
+
+DEFAULT_HEARTBEAT_PROMPT = """Black 4 heartbeat: run whatever standing job is due for you.
+
+1. Call the Black 4 tool start_next_standing_run with agent "{name}" and model {model}. If your tool list does not show it, call it through the Black 4 call_tool (name and arguments). If due is false, end your turn and post nothing.
+2. Otherwise do the run completely, exactly as its instructions say, for every business marked run: read its skills and goals, do the work, and publish what it asks for. Post in Buzz only where the instructions say (buzz messages send).
+3. Finish with finish_standing_run (the same way): runId, agent "{name}", model {model}, and businesses: one entry per business marked run, each with businessId, outcome (done, no_action or failed), a one-line summary and its reviewIds. Use failed only when you truly cannot do the work, and say why.
+4. Call start_next_standing_run again and repeat. Do not start another run after 30 minutes of work, but never close a run undone to move on.
+"""
+
+
 def heartbeat_prompt(s):
+    custom = (s.get("heartbeatPrompt") or "").strip()
+    if custom: return custom + "\n"
     name = (s.get("name") or "a Black 4 agent").replace('"', "'")
     model = (s.get("model") or "").replace('"', "'")
-    model_text = f'model "{model}"' if model else "model set to your exact model id"
-    return (
-        "Black 4 heartbeat. Call the Black 4 tool start_next_standing_run with "
-        f'agent "{name}" and {model_text} (if your tool list does not show it, use the Black 4 call_tool '
-        "with that name and those arguments). If due is false, end your turn without posting anything. "
-        "Otherwise do the run exactly as its instructions say, post only where they say (with buzz messages send), "
-        "call finish_standing_run (the same way) with its runId and each business's outcome, then call "
-        "start_next_standing_run again. Stop asking after 30 minutes of work.\n"
-    )
+    return DEFAULT_HEARTBEAT_PROMPT.format(name=name, model=f'"{model}"' if model else "(your exact model id)")
+
+
+def heartbeat_view(s):
+    """What the agent form shows: on or off, how often, and what each heartbeat does."""
+    return {"heartbeat": heartbeat_minutes(s), "prompt": heartbeat_prompt(s).strip(),
+            "custom": bool((s.get("heartbeatPrompt") or "").strip()),
+            "defaultPrompt": heartbeat_prompt({**s, "heartbeatPrompt": ""}).strip()}
 
 
 # ---------------------------------------------------------------- start
@@ -1531,15 +1543,23 @@ def handle(req):
         if not ok: fail("profile was not published: " + detail)
         return {"ok": True}
 
+    if op == "heartbeat.get":
+        return {"ok": True, **heartbeat_view(s)}
     if op == "heartbeat.set":
-        minutes = req.get("minutes")
-        if minutes not in (0, None) and (not isinstance(minutes, int) or isinstance(minutes, bool)
-                                         or not HEARTBEAT_MIN <= minutes <= HEARTBEAT_MAX):
-            fail(f"minutes is 0 (off) or {HEARTBEAT_MIN} to {HEARTBEAT_MAX}")
-        s["heartbeat"] = minutes or 0
+        # minutes: 0 turns it off; prompt: what each heartbeat does, "" for the default.
+        if "minutes" in req:
+            minutes = req.get("minutes")
+            if minutes not in (0, None) and (not isinstance(minutes, int) or isinstance(minutes, bool)
+                                             or not HEARTBEAT_MIN <= minutes <= HEARTBEAT_MAX):
+                fail(f"minutes is 0 (off) or {HEARTBEAT_MIN} to {HEARTBEAT_MAX}")
+            s["heartbeat"] = minutes or 0
+        if "prompt" in req:
+            prompt = req.get("prompt")
+            if prompt is not None and not isinstance(prompt, str): fail("prompt is text")
+            s["heartbeatPrompt"] = (prompt or "").strip()[:HEARTBEAT_PROMPT_MAX]
         write_settings(d, s)
         if s.get("auth"): start(d)
-        return {"ok": True, "heartbeat": s["heartbeat"]}
+        return {"ok": True, **heartbeat_view(s)}
 
     if op == "instructions.get":
         return {"ok": True, "instructions": s.get("instructions") or ""}

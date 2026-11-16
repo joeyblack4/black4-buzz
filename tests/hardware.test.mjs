@@ -4,7 +4,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  askMachine, hardwareProvider, hardwareDefaults, MACHINES, machineOf, statusReader, harnessOptions, signInState, readyToCreate,
+  askMachine, hardwareProvider, hardwareDefaults, HEARTBEAT_MINUTES, beatFrom, heartbeatRemote, MACHINES, machineOf, statusReader, harnessOptions, signInState, readyToCreate,
   createLogin, agentDirectory, summaryOf, signInOf, doorTransport, bodySha256, createSession, createMcp, readAnswer, memoryStore,
 } from "../plugins/black4/plugin.js";
 import { fakeAuthKit, fakeMcp, fakeDoor, https, sha256url, DOOR } from "./fakes.mjs";
@@ -75,6 +75,22 @@ test("a retried creation asks for the same agent, and activation carries the att
   assert.deepEqual(box.seen[2].request, { op: "activate", pubkey: PUBKEY, community: input.community, auth: AUTH });
   await remote.provision(input);
   assert.equal(box.seen[3].request.requestId, "request-2");
+});
+
+test("the heartbeat is read and set on the agent's machine, sending only what changed", async () => {
+  const box = machine((request) => (request.op === "heartbeat.get"
+    ? { ok: true, heartbeat: 0, prompt: "Standard", custom: false, defaultPrompt: "Standard" }
+    : { ok: true, heartbeat: request.minutes ?? 15, prompt: request.prompt || "Standard", custom: !!request.prompt, defaultPrompt: "Standard" }));
+  const remote = heartbeatRemote(box.ask);
+  assert.deepEqual(beatFrom(await remote.get({ pubkey: PUBKEY })), { loading: false, minutes: 0, base: "Standard", draft: "Standard", custom: false, defaultPrompt: "Standard" });
+  await remote.set({ pubkey: PUBKEY, minutes: HEARTBEAT_MINUTES });
+  const mine = beatFrom(await remote.set({ pubkey: PUBKEY, prompt: "Watch the campaign." }));
+  assert.equal(mine.custom, true);
+  assert.deepEqual(box.seen.map((entry) => entry.request), [
+    { op: "heartbeat.get", pubkey: PUBKEY },
+    { op: "heartbeat.set", pubkey: PUBKEY, minutes: 15 },
+    { op: "heartbeat.set", pubkey: PUBKEY, prompt: "Watch the campaign." },
+  ]);
 });
 
 test("every step goes to the agent's machine, and a legacy agent goes to commerce", async () => {

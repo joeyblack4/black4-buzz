@@ -16,7 +16,7 @@ function gate() {
 }
 
 async function harness(t, options = {}) {
-  const { apply, signInMemory } = await freshPlugin();
+  const { apply, signInStore } = await freshPlugin();
   const registered = new Map();
   const authkit = fakeAuthKit();
   const held = gate();
@@ -32,7 +32,7 @@ async function harness(t, options = {}) {
   });
   const net = https({ authkit, mcp, offline: options.offline ?? new Set() });
   const request = async (input) => { await options.beforeRequest?.(input); return net.request(input); };
-  if (options.signedIn !== false) await signInMemory.save(authkit.issue().refresh_token);
+  if (options.signedIn !== false) await signInStore.save(authkit.issue().refresh_token);
   let cleanup;
   let card;
   let panel;

@@ -1350,8 +1350,9 @@ const STATUS_TTL_MS = 20 * 1000;
 const UNREACHABLE_TTL_MS = 4 * 1000;
 // The first `models` after a new Claude sign-in lists its models and proves the
 // default answers, which takes the machine some seconds; then it is cached.
-const MODELS_TIMEOUT_MS = 60 * 1000;
+const MODELS_TIMEOUT_MS = 30 * 1000;
 const MODELS_TTL_MS = 5 * 60 * 1000;
+const MODELS_RECHECK_MS = 15 * 1000;
 const LOGIN_TIMEOUT_MS = 120 * 1000; // the machine waits up to 90 s for a code, 85 s per wait for a device approval
 /** Sign-in flows this plugin can show. "code": open a link, paste the code its
  * page shows. "device": open a link and approve the short code shown here;
@@ -1447,14 +1448,17 @@ export async function askMachine(ask, machine, request, { signal, timeoutMs = MA
   return reply;
 }
 
-const unsupported = (error) => /unknown op/i.test(String(error?.message ?? error));
+/** A machine that predates an op: agentctl answers "unknown op", or, for an
+ * op it does not know that carries no pubkey (such as `models` on the runner
+ * released before it), takes it for a one-agent op and asks for the pubkey. */
+const unsupported = (error) => /unknown op|^pubkey must be 64 hex characters$/i.test(String(error?.message ?? error));
 
 /** Shared, briefly cached `machine.status` (or another op answering
  * `harnesses`, such as `models`) per machine. `read` never rejects:
  * it resolves `{ kind: "ok", harnesses }`, `{ kind: "unsupported" }` (the
  * machine predates the op) or `{ kind: "unreachable", error }`. Concurrent
  * reads share one request. */
-export function statusReader(ask, { op = "machine.status", ttlMs = STATUS_TTL_MS, timeoutMs = STATUS_TIMEOUT_MS, now = () => Date.now() } = {}) {
+export function statusReader(ask, { op = "machine.status", ttlMs = STATUS_TTL_MS, ttlFor, timeoutMs = STATUS_TIMEOUT_MS, now = () => Date.now() } = {}) {
   const cache = new Map(); // machine id -> { at, status }
   const flight = new Map(); // machine id -> promise
   const listeners = new Set();
@@ -1462,7 +1466,7 @@ export function statusReader(ask, { op = "machine.status", ttlMs = STATUS_TTL_MS
   const fresh = (id) => {
     const entry = cache.get(id);
     if (!entry) return undefined;
-    const ttl = entry.status.kind === "unreachable" ? Math.min(ttlMs, UNREACHABLE_TTL_MS) : ttlMs;
+    const ttl = entry.status.kind === "unreachable" ? Math.min(ttlMs, UNREACHABLE_TTL_MS) : (ttlFor?.(entry.status) ?? ttlMs);
     return now() - entry.at < ttl ? entry.status : undefined;
   };
   return {
@@ -1548,7 +1552,12 @@ export const readyToCreate = (state) => ["signed-in", "unknown", "unsupported"].
 
 /** Each machine's `models`: per harness, the models it offers ({ id, label,
  * efforts }, efforts least to most) and the default model and effort there. */
-export const modelsReader = (ask, options = {}) => statusReader(ask, { op: "models", ttlMs: MODELS_TTL_MS, timeoutMs: MODELS_TIMEOUT_MS, ...options });
+export const modelsReader = (ask, options = {}) => statusReader(ask, {
+  op: "models", ttlMs: MODELS_TTL_MS, timeoutMs: MODELS_TIMEOUT_MS,
+  // While the machine is still listing a harness's models, ask again soon.
+  ttlFor: (status) => (status.kind === "ok" && status.harnesses.some((row) => row?.checked === false) ? MODELS_RECHECK_MS : undefined),
+  ...options,
+});
 
 const EFFORT_LABELS = { none: "None", minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max", ultra: "Ultra" };
 
@@ -1564,7 +1573,9 @@ function defaultEffort(efforts, preferred) {
 /** The Model and Effort selects for one harness, or null when the machine
  * lists no models for it (an older runner, Goose, or not known yet).
  * `value.model` and `value.effort` are what the agent chose; "" is the
- * machine's default. A choice the machine no longer offers stays shown, as
+ * machine's default. `value.shown` and `value.shownEffort` (what a running
+ * agent was started with) are shown in place of today's default for an agent
+ * that chose none. A choice the machine no longer offers stays shown, as
  * unavailable, so the agent's real setting is never hidden. */
 export function modelChoices(models, harness, value = {}) {
   if (models?.kind !== "ok") return null;
@@ -1574,11 +1585,12 @@ export function modelChoices(models, harness, value = {}) {
   const options = list.map((entry) => ({ id: entry.id, label: typeof entry.label === "string" && entry.label ? entry.label : entry.id,
     efforts: (Array.isArray(entry.efforts) ? entry.efforts : []).filter((effort) => typeof effort === "string") }));
   const defaultModel = options.some((entry) => entry.id === row.model) ? row.model : options[0].id;
-  let model = value.model || defaultModel;
+  const shown = (id) => (id && options.some((entry) => entry.id === id) ? id : null);
+  let model = value.model || shown(value.shown) || defaultModel;
   if (!options.some((entry) => entry.id === model)) options.unshift({ id: model, label: `${model} (unavailable)`, unavailable: true, efforts: [] });
   const efforts = options.find((entry) => entry.id === model).efforts;
   const fallback = defaultEffort(efforts, row.effort);
-  let effort = value.effort || fallback;
+  let effort = value.effort || (!value.effort && value.shownEffort && efforts.includes(value.shownEffort) && model === (value.model || value.shown) ? value.shownEffort : null) || fallback;
   const effortOptions = efforts.map((id) => ({ id, label: EFFORT_LABELS[id] ?? id }));
   if (effort && !efforts.includes(effort)) effortOptions.push({ id: effort, label: `${EFFORT_LABELS[effort] ?? effort} (unavailable)`, unavailable: true });
   return { model, effort, models: options.map(({ efforts: _, ...rest }) => rest), efforts: effortOptions, defaultModel, defaultEffort: fallback };
@@ -1589,7 +1601,7 @@ export function modelChoices(models, harness, value = {}) {
  * keeps following it; an effort the new model does not take goes back to
  * that model's default. */
 export function applyPick(models, harness, value, change) {
-  const next = { model: value?.model ?? "", effort: value?.effort ?? "", ...change };
+  const next = { model: value?.model ?? "", effort: value?.effort ?? "", ...change }; // what is stored, never what is shown
   const before = modelChoices(models, harness, next);
   if (!before) return { model: next.model, effort: next.effort };
   if ("model" in change && next.effort && !before.efforts.some((entry) => entry.id === next.effort && !entry.unavailable)) next.effort = "";

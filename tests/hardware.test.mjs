@@ -192,6 +192,25 @@ test("models are read with their own op, once, and an older machine is unsupport
   await reader.read("commerce");
   assert.deepEqual(box.ops(), ["models"], "cached");
   assert.deepEqual(await modelsReader(machine(() => UNKNOWN).ask).read("commerce"), { kind: "unsupported" });
+  // What the runner released before `models` really answers it (it takes an
+  // op it does not know, carrying no pubkey, for a one-agent op).
+  const released = machine(() => ({ ok: false, error: "pubkey must be 64 hex characters" }));
+  assert.deepEqual(await modelsReader(released.ask).read("commerce"), { kind: "unsupported" });
+});
+
+test("models are asked again soon while the machine is still listing a harness", async () => {
+  let clock = 0;
+  let checked = false;
+  const box = machine(() => ({ ok: true, harnesses: [{ id: "claude", checked, models: [], model: "claude-fable-5-2", effort: "high" }] }));
+  const reader = modelsReader(box.ask, { now: () => clock });
+  await reader.read("commerce");
+  clock += 20 * 1000;
+  checked = true;
+  await reader.read("commerce");
+  assert.equal(box.ops().length, 2, "unchecked: read again after 15 s");
+  clock += 60 * 1000;
+  await reader.read("commerce");
+  assert.equal(box.ops().length, 2, "checked: kept for minutes");
 });
 
 test("Model and Effort start at the machine's defaults and follow the chosen model", () => {
@@ -209,6 +228,11 @@ test("Model and Effort start at the machine's defaults and follow the chosen mod
   const gone = modelChoices(listed, "claude", { model: "claude-gone-1", effort: "max" });
   assert.deepEqual(gone.models[0], { id: "claude-gone-1", label: "claude-gone-1 (unavailable)", unavailable: true });
   assert.equal(gone.model, "claude-gone-1", "the agent's real setting stays shown");
+  const started = modelChoices(listed, "claude", { model: "", effort: "", shown: "opus", shownEffort: "medium" });
+  assert.deepEqual([started.model, started.effort], ["opus", "medium"], "no choice: what it was started with, not today's default");
+  assert.deepEqual(applyPick(listed, "claude", { model: "", effort: "", shown: "opus", shownEffort: "medium" }, { effort: "max" }),
+    { model: "", effort: "max" }, "a pick stores the choice, never what was shown");
+  assert.equal(modelChoices(listed, "grok", { model: "grok-4.7", effort: "turbo" }).efforts.at(-1).label, "turbo (unavailable)");
 });
 
 test("a pick stores '' for the machine's default, and an effort the new model lacks goes back to its default", () => {
@@ -332,6 +356,16 @@ test("render: the Create agent form shows Model and Effort from the machine, at 
   const older = hardwareOn((request) => (request.op === "models" ? UNKNOWN : fleet(request)));
   const plain = await older.settle(older.React.createElement(older.type.CreateConfiguration, { config: hardwareDefaults(), onChange: () => {} }));
   assert.deepEqual(selectsIn(plain).map((entry) => entry.label), ["Runs on", "Runs", "Answers"], "an older machine: no Model or Effort");
+});
+
+test("render: Settings shows what an agent with no choice was started with, and its problem", async () => {
+  const { type, React, settle } = hardwareOn((request) => (request.op === "status"
+    ? { ok: true, running: false, activated: true, harness: "claude", respondTo: "anyone", model: "opus", effort: "medium",
+      modelChosen: false, effortChosen: false, modelProblem: "Claude Code does not offer the model x on this machine. Choose another model for this agent." }
+    : fleet(request)));
+  const tree = await settle(React.createElement(type.tabs[0].component, { agent: { pubkey: PUBKEY } }));
+  assert.deepEqual(selectsIn(tree).map((entry) => [entry.label, entry.value]), [["Model", "opus"], ["Effort", "medium"]]);
+  assert.match(textIn(tree), /does not offer the model x on this machine/);
 });
 
 test("render: Settings shows the agent's own model and effort, and a change is sent to its machine", async () => {

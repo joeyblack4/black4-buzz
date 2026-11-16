@@ -219,9 +219,14 @@ def read_settings(d):
 
 
 def write_settings(d, settings):
-    tmp = d / "agent.json.tmp"
-    tmp.write_text(json.dumps(settings, indent=2))
-    tmp.replace(d / "agent.json")
+    # A temp name of its own, so two writers never trip over each other's file.
+    tmp = d / f".agent.json.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+    try:
+        tmp.write_text(json.dumps(settings, indent=2))
+        tmp.replace(d / "agent.json")
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def process_command(pid):
@@ -863,7 +868,9 @@ EFFORT_ORDER = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ult
 MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\[\]/-]{0,79}$")
 EFFORT_ID = re.compile(r"^[a-z]{1,16}$")
 CLAUDE_MODELS_TTL = 24 * 3600  # the Claude listing is made again after this
-CLAUDE_MODELS_FAIL_TTL = 10 * 60
+CLAUDE_MODELS_FAIL_TTL = 10 * 60  # a failed one is tried again after this, doubling
+CLAUDE_MODELS_FAIL_MAX = 6 * 3600  # up to this
+MODELS_WAIT = 8.0  # the models op waits this long for a Claude listing under way
 
 
 def effort_sorted(levels):
@@ -879,6 +886,7 @@ def codex_models():
     if not isinstance(cache, dict) or not isinstance(cache.get("models"), list): return None
     rows = sorted((m for m in cache["models"] if isinstance(m, dict) and m.get("visibility") == "list" and m.get("slug")),
                   key=lambda m: m.get("priority") or 0)
+    rows = [m for m in rows if isinstance(m["slug"], str) and MODEL_ID.match(m["slug"])]
     return [{"id": m["slug"], "label": m.get("display_name") or m["slug"],
              "efforts": effort_sorted(r.get("effort") for r in m.get("supported_reasoning_levels") or [] if isinstance(r, dict))}
             for m in rows]
@@ -891,7 +899,7 @@ def grok_models():
     out = []
     for key, row in cache["models"].items():
         info = (row or {}).get("info") or {}
-        if info.get("hidden"): continue
+        if info.get("hidden") or not isinstance(info.get("id") or key, str) or not MODEL_ID.match(info.get("id") or key): continue
         efforts = [e.get("value") for e in info.get("reasoning_efforts") or [] if isinstance(e, dict)] if info.get("supports_reasoning_effort") else []
         out.append({"id": info.get("id") or key, "label": info.get("name") or key, "efforts": effort_sorted(efforts)})
     return out
@@ -907,7 +915,7 @@ def claude_label(model_id):
 def claude_efforts(cli):
     """The effort levels the pinned Claude Code takes, from its own --help."""
     try:
-        done = subprocess.run([cli, "--help"], env=base_env(), stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+        done = subprocess.run([cli, "--help"], env=base_env(), stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
     except (subprocess.TimeoutExpired, OSError):
         return []
     found = re.search(r"--effort <level>[^(]*\(([a-z, ]+)\)", done.stdout)
@@ -923,7 +931,7 @@ def claude_answers(cli, token, model):
     env["CLAUDE_CODE_OAUTH_TOKEN"] = token
     try:
         done = subprocess.run([cli, "-p", "Reply with the single word OK.", "--model", model, "--max-turns", "1", "--output-format", "json"],
-                              cwd=private_dir(RUN / "check"), env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=90)
+                              cwd=private_dir(RUN / "check"), env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=45)
         result = json.loads(done.stdout.strip().splitlines()[-1])
     except (subprocess.TimeoutExpired, OSError, ValueError, IndexError):
         return None
@@ -949,7 +957,7 @@ def list_claude_models():
     env["CLAUDE_CODE_OAUTH_TOKEN"] = token
     try:
         done = subprocess.run([str(BIN / "buzz-acp"), "models", "--json", "--agent-command", HARNESS["claude"][0], "--agent-args="],
-                              cwd=private_dir(RUN / "check"), env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+                              cwd=private_dir(RUN / "check"), env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
         listing = json.loads(done.stdout)
     except (subprocess.TimeoutExpired, OSError, ValueError):
         return None
@@ -958,7 +966,8 @@ def list_claude_models():
         if isinstance(option, dict) and option.get("category") == "model":
             options = [o for o in option.get("options") or [] if isinstance(o, dict) and o.get("value") not in (None, "default")]
     efforts = claude_efforts(cli)
-    rows = [{"id": o["value"], "label": o.get("name") or o["value"], "efforts": efforts} for o in options]
+    rows = [{"id": o["value"], "label": o.get("name") or o["value"], "efforts": efforts}
+            for o in options if isinstance(o["value"], str) and MODEL_ID.match(o["value"])]
     listed = {r["id"] for r in rows}
     extra = []
     for model in DEFAULTS["claude"][0]:
@@ -971,7 +980,10 @@ def list_claude_models():
 
 def refresh_claude_models(wait=False):
     """Makes the Claude listing again for the stored sign-in, at most one at a
-    time (run/claude-models.lock); returns at once if one is running, unless `wait`."""
+    time (run/claude-models.lock); returns at once if one is running, unless
+    `wait`. A listing that fails (a usage limit, offline) keeps the last good
+    one, and is tried again after 10 minutes, then 20, 40 ... up to 6 hours,
+    so the paid one-line call is not repeated while it cannot succeed."""
     lock = open(private_dir(RUN) / "claude-models.lock", "a")
     try:
         try: fcntl.flock(lock, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
@@ -979,29 +991,45 @@ def refresh_claude_models(wait=False):
         token = claude_token()
         if not token: return
         cache = read_json(RUN / "claude-models.json", {}) or {}
-        if cache.get("hash") == token_hash(token) and not claude_models_stale(cache): return
+        if cache.get("hash") != token_hash(token): cache = {}  # another sign-in: nothing of the last one holds
+        elif not claude_models_stale(cache): return
         models = list_claude_models()
-        write_private(RUN / "claude-models.json", json.dumps({"hash": token_hash(token), "at": time.time(), "models": models}))
+        now = time.time()
+        if models is not None:
+            cache = {"hash": token_hash(token), "at": now, "models": models}
+        else:
+            fails = (cache.get("fails") or 0) + 1
+            cache = {**cache, "hash": token_hash(token), "fails": fails, "failedAt": now,
+                     "retryAt": now + min(CLAUDE_MODELS_FAIL_TTL * 2 ** (fails - 1), CLAUDE_MODELS_FAIL_MAX)}
+        write_private(RUN / "claude-models.json", json.dumps(cache))
     finally:
         lock.close()
 
 
 def claude_models_stale(cache):
-    ttl = CLAUDE_MODELS_TTL if cache.get("models") else CLAUDE_MODELS_FAIL_TTL
-    return time.time() - (cache.get("at") or 0) >= ttl
+    if cache.get("retryAt"): return time.time() >= cache["retryAt"]
+    return not cache.get("models") or time.time() - (cache.get("at") or 0) >= CLAUDE_MODELS_TTL
 
 
-def claude_models():
-    """The last Claude listing for the stored sign-in, or None (none yet, or
-    another sign-in). A stale one is still used, and made again out of band."""
+def claude_models(spawn=True):
+    """The last good Claude listing for the stored sign-in, or None (none yet,
+    or another sign-in). A stale one is still used, and made again out of band."""
     token = claude_token()
     if not token: return None
     cache = read_json(RUN / "claude-models.json", {}) or {}
     if cache.get("hash") != token_hash(token):
-        spawn_models_refresh()
+        if spawn: spawn_models_refresh()
         return None
-    if claude_models_stale(cache): spawn_models_refresh()
+    if spawn and claude_models_stale(cache): spawn_models_refresh()
     return cache.get("models")
+
+
+def claude_listing_due():
+    """True when this sign-in has no Claude listing and none is waiting out a
+    failure: making one now is worth a few seconds of a start."""
+    token = claude_token()
+    cache = read_json(RUN / "claude-models.json", {}) or {}
+    return bool(token) and (cache.get("hash") != token_hash(token) or (not cache.get("models") and claude_models_stale(cache)))
 
 
 def spawn_models_refresh():
@@ -1057,7 +1085,8 @@ def choice(harness, settings, models=False):
     elif default_effort in entry["efforts"]:
         out["effort"] = default_effort
     else:  # the highest one below the default, else none
-        below = [e for e in entry["efforts"] if EFFORT_ORDER.index(e) < EFFORT_ORDER.index(default_effort)] if default_effort in EFFORT_ORDER else []
+        rank = EFFORT_ORDER.index(default_effort) if default_effort in EFFORT_ORDER else -1
+        below = [e for e in entry["efforts"] if e in EFFORT_ORDER and EFFORT_ORDER.index(e) < rank]
         out["effort"] = below[-1] if below else None
         out["note"] = ((out.get("note") or "") + f" {entry['label']} does not take {default_effort} effort; "
                        + (f"{out['effort']} instead." if out["effort"] else "it runs its own default.")).strip()
@@ -1067,6 +1096,10 @@ def choice(harness, settings, models=False):
 def launch(harness, picked):
     """(env, agent args) that make this harness run the picked model and effort."""
     model, effort = picked.get("model"), picked.get("effort")
+    # From a saved setting or a harness's own listing: checked again here,
+    # since Grok's go into comma-separated arguments.
+    if model and not MODEL_ID.match(model): fail(f"{LABEL[harness]}: {model[:80]!r} is not a model id.")
+    if effort and not EFFORT_ID.match(effort): fail(f"{LABEL[harness]}: {effort[:20]!r} is not an effort level.")
     command, args = HARNESS[harness]
     env = {}
     if harness == "claude":
@@ -1082,15 +1115,21 @@ def launch(harness, picked):
     return env, args
 
 
-def models_reply(wait_claude=True):
+def models_reply():
     """The `models` op: per installed harness that takes a model, what it
     offers ({id, label, efforts}), the default model and effort here, and
-    whether the machine could tell. Claude's listing is made here if missing."""
+    whether the machine could tell (`checked`). Quick: a Claude listing that
+    is missing is made out of band, and waited for only MODELS_WAIT seconds;
+    the plugin asks again soon while a harness is unchecked."""
     rows = []
     for hid in DEFAULTS:
         if not installed(hid): continue
-        if hid == "claude" and wait_claude: refresh_claude_models(wait=True)
         models = offered(hid)
+        if hid == "claude" and models is None and claude_token():
+            deadline = time.time() + MODELS_WAIT
+            while models is None and time.time() < deadline:
+                time.sleep(0.25)
+                models = claude_models(spawn=False)
         picked = choice(hid, {}, models)
         rows.append({"id": hid, "label": LABEL[hid], "models": models or [], "checked": models is not None,
                      "model": picked.get("model"), "effort": picked.get("effort"),
@@ -1138,6 +1177,10 @@ def _start(d):
         if known_bad(harness):
             fail(f"{LABEL[harness]} is not signed in on this machine. Sign in to {LABEL[harness]} from Buzz first.")
         env = device_env(harness)
+    # Right after a deploy or a new sign-in there is no Claude listing yet:
+    # make it now (a few seconds, once per sign-in) rather than start a model
+    # that may not be offered. One waiting out a failure is not retried here.
+    if harness == "claude" and claude_listing_due(): refresh_claude_models(wait=True)
     picked = choice(harness, s)
     if picked.get("problem"): fail(picked["problem"])
     model_env, args = launch(harness, picked)
@@ -1303,6 +1346,30 @@ def keeps_stopping(d):
     return restarts(d).get("count", 0) >= KEEPS_STOPPING
 
 
+def recheck_launch(d, s):
+    """An agent started before its harness's listing was known (launch.json
+    checked false) is checked once the listing is in: one that runs what it
+    should now is marked checked; one that should run another model or effort
+    is restarted on it; one whose own choice is not offered is stopped, so it
+    does not fail every turn unseen (status says why, and start refuses it
+    until the choice is changed)."""
+    launched = read_json(d / "launch.json")
+    if not isinstance(launched, dict) or launched.get("checked", True): return
+    harness = s.get("harness") or "claude"
+    models = offered(harness)
+    if models is None: return
+    picked = choice(harness, s, models)
+    if not picked.get("problem") and (picked.get("model"), picked.get("effort")) == (launched.get("model"), launched.get("effort")):
+        write_private(d / "launch.json", json.dumps({**launched, "checked": True}))
+        return
+    if picked.get("problem"):
+        with agent_lock(d): stop(d)
+        log_line("supervisor", f"stopped {d.name[:8]}: {picked['problem']}")
+        return
+    try: log_line("supervisor", f"restarted {d.name[:8]} on {picked.get('model')} pid {start(d)}")
+    except Exception as e: log_line("supervisor", f"restart {d.name[:8]} failed: {str(e)[:200]}")
+
+
 def supervise_pass(now=None):
     """One look at every agent: restart an activated agent that is not running,
     waiting 5, 10, 20 ... 300 s between restarts while it keeps stopping. One
@@ -1316,6 +1383,7 @@ def supervise_pass(now=None):
         r = restarts(d)
         if running(d):
             if r and now - r.get("at", now) > HEALTHY_AFTER: (d / "restarts.json").unlink(missing_ok=True)
+            recheck_launch(d, s)
             continue
         if now < r.get("next", 0): continue
         if known_bad(s.get("harness") or "claude"): continue  # waits for a sign-in
@@ -1670,6 +1738,7 @@ def claude_helper(login_id, d, info):
                 save_claude_token(token.group(0), account)
                 raw = b""
                 finish({"ok": True, "account": account})
+                refresh_claude_models(wait=True)  # what this sign-in offers, before its agents start
                 return restart_harness_agents("claude")  # after the reply is free to go
             err = re.search(r"OAuth error[^\n]*", text)
             if err:
@@ -1744,18 +1813,24 @@ def model_fields(s, cache=None, d=None):
     harness = s.get("harness") or "claude"
     if harness not in DEFAULTS: return {"model": None, "effort": None}
     chosen = {"modelChosen": bool(s.get("model")), "effortChosen": bool(s.get("effort"))}
-    if d is not None and running(d):
-        launched = read_json(d / "launch.json")
-        if not isinstance(launched, dict):
-            return {"model": None, "effort": None, **chosen,
-                    "modelNote": f"Started before agents had a model here; it runs {LABEL[harness]}'s own default until it restarts."}
-        return {"model": launched.get("model"), "effort": launched.get("effort"), **chosen,
-                **({"modelNote": launched["note"]} if launched.get("note") else {})}
     if cache is None: cache = {}
     if harness not in cache: cache[harness] = offered(harness)
     picked = choice(harness, s, cache[harness])
-    return {"model": picked.get("model"), "effort": picked.get("effort"), **chosen,
-            **({"modelNote": picked["note"]} if picked.get("note") else {}),
+    unchecked = f"The machine has not yet checked that {LABEL[harness]} offers this model on its sign-in."
+    if d is not None and running(d):
+        launched = read_json(d / "launch.json")
+        if not isinstance(launched, dict):
+            return {"model": None, "effort": None, **chosen, "modelChecked": False,
+                    "modelNote": f"Started before agents had a model here; it runs {LABEL[harness]}'s own default until it restarts."}
+        checked = launched.get("checked", True) is not False or picked.get("checked", True)
+        note = launched.get("note") or (None if checked else unchecked)
+        return {"model": launched.get("model"), "effort": launched.get("effort"), **chosen, "modelChecked": bool(checked),
+                **({"modelNote": note} if note else {}),
+                **({"modelProblem": picked["problem"]} if picked.get("problem") else {})}
+    checked = picked.get("checked", True)
+    note = picked.get("note") or (None if checked else unchecked)
+    return {"model": picked.get("model"), "effort": picked.get("effort"), **chosen, "modelChecked": checked,
+            **({"modelNote": note} if note else {}),
             **({"modelProblem": picked["problem"]} if picked.get("problem") else {})}
 
 
@@ -1896,20 +1971,24 @@ def handle(req):
     if op == "instructions.get":
         return {"ok": True, "instructions": s.get("instructions") or ""}
     if op == "instructions.set":
-        s["instructions"] = str(req.get("instructions") or "")[:20000]
-        write_settings(d, s)
-        if s.get("auth"): start(d)
+        with agent_lock(d):
+            s = read_settings(d)
+            s["instructions"] = str(req.get("instructions") or "")[:20000]
+            write_settings(d, s)
+            if s.get("auth"): _start(d)
         return {"ok": True}
 
     if op == "settings.set":
         # The agent's model and effort; "" is the harness's default here. A
         # field left out stays as it was. An activated agent restarts on them.
-        harness = s.get("harness") or "claude"
-        model = req["model"] if "model" in req else s.get("model")
-        effort = req["effort"] if "effort" in req else s.get("effort")
-        s["model"], s["effort"] = checked_choice(harness, model, effort)
-        write_settings(d, s)
-        if s.get("auth"): start(d)
+        with agent_lock(d):
+            s = read_settings(d)
+            harness = s.get("harness") or "claude"
+            model = req["model"] if "model" in req else s.get("model")
+            effort = req["effort"] if "effort" in req else s.get("effort")
+            s["model"], s["effort"] = checked_choice(harness, model, effort)
+            write_settings(d, s)
+            if s.get("auth"): _start(d)
         return {"ok": True, **model_fields(s, d=d)}
 
     if op == "start":

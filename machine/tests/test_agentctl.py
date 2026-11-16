@@ -1297,6 +1297,9 @@ class ModelAndEffort(DeviceBase):
             (home / "models_cache.json").write_text(json.dumps(cache))
             (home / "auth.json").write_text(json.dumps({"tokens": {"access_token": FAKE_CRED}}))
         self.sign_in()
+        # The out-of-band listing, made in this process.
+        self.a.spawn_models_refresh = lambda: self.a.refresh_claude_models()
+        self.a.MODELS_WAIT = 2
 
     def listed(self):
         self.a.refresh_claude_models(wait=True)
@@ -1433,6 +1436,99 @@ class ModelAndEffort(DeviceBase):
         self.assertIn('model "claude-fable-5-2"', (agent / "heartbeat.md").read_text())
         self.assertTrue(self.req(op="settings.set", pubkey=agent.name, model="opus")["ok"])
         self.assertIn("model set to your exact model id", (agent / "heartbeat.md").read_text(), "an alias: the agent names it exactly")
+
+    def claude_calls(self):
+        path = self.home / "claude-calls.txt"
+        return path.read_text().split() if path.exists() else []
+
+    def test_a_failed_listing_keeps_the_last_good_one_and_backs_off(self):
+        self.listed()
+        cache = json.loads((self.a.RUN / "claude-models.json").read_text())
+        cache["at"] -= self.a.CLAUDE_MODELS_TTL + 1  # due again
+        (self.a.RUN / "claude-models.json").write_text(json.dumps(cache))
+        (self.home / "busy-claude-fable-5-2").write_text("x")
+        self.a.refresh_claude_models(wait=True)
+        self.assertEqual(self.a.offered("claude")[0]["id"], "claude-fable-5-2", "the last good listing stands")
+        calls = len(self.claude_calls())
+        for _ in range(3): self.a.refresh_claude_models(wait=True)
+        self.assertEqual(len(self.claude_calls()), calls, "no paid call again until the back-off is over")
+        cache = json.loads((self.a.RUN / "claude-models.json").read_text())
+        self.assertEqual(cache["fails"], 1)
+        self.assertAlmostEqual(cache["retryAt"] - cache["failedAt"], self.a.CLAUDE_MODELS_FAIL_TTL, delta=1)
+        cache["retryAt"] = time.time() - 1
+        (self.a.RUN / "claude-models.json").write_text(json.dumps(cache))
+        self.a.refresh_claude_models(wait=True)
+        cache = json.loads((self.a.RUN / "claude-models.json").read_text())
+        self.assertEqual(cache["retryAt"] - cache["failedAt"], 2 * self.a.CLAUDE_MODELS_FAIL_TTL, "doubling")
+        (self.home / "busy-claude-fable-5-2").unlink()
+        cache["retryAt"] = time.time() - 1
+        (self.a.RUN / "claude-models.json").write_text(json.dumps(cache))
+        self.a.refresh_claude_models(wait=True)
+        self.assertNotIn("retryAt", json.loads((self.a.RUN / "claude-models.json").read_text()))
+
+    def test_a_start_with_no_listing_yet_makes_it_first(self):
+        self.a.spawn_models_refresh = lambda: None  # as after a deploy: nothing out of band has run
+        (self.home / "refuse-claude-fable-5-2").write_text("x")
+        agent = self.make_agent("claude")
+        env = self.env_of(agent)
+        self.assertEqual(env["ANTHROPIC_MODEL"], "fable", "never a model the sign-in lacks, unseen")
+        self.assertTrue(json.loads((agent / "launch.json").read_text())["checked"])
+
+    def test_an_agent_started_unchecked_is_put_right_once_the_listing_is_in(self):
+        self.a.spawn_models_refresh = lambda: None
+        self.a.claude_listing_due = lambda: False  # the listing could not be made at start (offline)
+        (self.home / "refuse-claude-fable-5-2").write_text("x")
+        agent = self.make_agent("claude")
+        old = self.a.start(agent)
+        status = self.req(op="status", pubkey=agent.name)
+        self.assertEqual((status["model"], status["modelChecked"]), ("claude-fable-5-2", False))
+        self.assertIn("not yet checked", status["modelNote"])
+        self.listed()
+        self.a.supervise_pass()
+        self.assertNotEqual(self.a.running(agent), old)
+        self.assertEqual(json.loads((agent / "work" / "env.json").read_text())["ANTHROPIC_MODEL"], "fable")
+        self.assertTrue(self.req(op="status", pubkey=agent.name)["modelChecked"])
+        # Its own choice, not offered: stopped and said, not left failing every turn.
+        other = self.make_agent("claude")
+        s = self.a.read_settings(other); s["model"] = "claude-gone-1"; self.a.write_settings(other, s)
+        real = self.a.claude_models
+        self.a.claude_models = lambda spawn=True: None  # started while nothing was known
+        self.a.start(other)
+        self.a.claude_models = real
+        self.a.supervise_pass(now=time.time() - 3600)  # restarts not yet due
+        self.assertIsNone(self.a.running(other))
+        row = next(a for a in self.req(op="list")["agents"] if a["pubkey"] == other.name)
+        self.assertIn("does not offer the model claude-gone-1", row["modelProblem"])
+
+    def test_an_effort_name_it_does_not_know_never_breaks_a_request(self):
+        cache = json.loads(json.dumps(GROK_MODELS))
+        cache["models"]["grok-4.7"]["info"]["reasoning_efforts"] = [{"value": "low"}, {"value": "turbo"}]
+        (self.a.HOMES / "grok" / "models_cache.json").write_text(json.dumps(cache))
+        agent = self.make_agent("grok")
+        self.assertEqual(self.req(op="status", pubkey=agent.name)["effort"], "low")
+        self.assertTrue(self.req(op="list")["ok"])
+        self.assertTrue(self.req(op="models")["ok"])
+        self.assertTrue(self.req(op="settings.set", pubkey=agent.name, effort="turbo")["ok"], "offered, so it may be chosen")
+
+    def test_ids_that_are_not_ids_never_reach_a_harness(self):
+        agent = self.make_agent("grok")
+        for bad in ("grok-4.7,--sandbox", "-rf", "a b"):
+            self.assertEqual(self.req(op="settings.set", pubkey=agent.name, model=bad)["error"], "model is not a model id")
+        self.assertEqual(self.req(op="settings.set", pubkey=agent.name, effort="high,x")["error"], "effort is not an effort level")
+        cache = json.loads(json.dumps(GROK_MODELS))
+        cache["models"]["grok-4.7,--x"] = {"info": {"id": "grok-4.7,--x", "name": "Odd", "hidden": False}}
+        (self.a.HOMES / "grok" / "models_cache.json").write_text(json.dumps(cache))
+        self.assertNotIn("grok-4.7,--x", [m["id"] for m in self.a.offered("grok")])
+        s = self.a.read_settings(agent); s["model"] = "grok,--x"; self.a.write_settings(agent, s)  # an old saved value
+        with self.assertRaises(self.a.Fail): self.a.launch("grok", {"model": "grok,--x", "effort": "high"})
+        self.assertIn("grok,--x", self.req(op="start", pubkey=agent.name)["error"])
+
+    def test_only_its_creator_changes_an_agents_model(self):
+        agent = self.make_agent("grok")
+        self.a.CALLER = "teammate"
+        self.addCleanup(setattr, self.a, "CALLER", None)
+        self.assertIn("Only they or a Black 4 admin can change it", self.req(op="settings.set", pubkey=agent.name, model="grok-4.5")["error"])
+        self.assertEqual(self.a.read_settings(agent)["model"], "")
 
     def test_doctor_says_what_new_agents_run(self):
         self.listed()

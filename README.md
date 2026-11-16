@@ -93,6 +93,10 @@ Terminal, Node, Tailscale or an SSH key.
   it (signing in again does not):
   - **Hardware:** a hardware pass needs an approval from the last 24 hours.
     The hardware form and the agent's Settings show **Approve in browser**.
+  - **Linking your agents** needs one too: Agent access shows **Approve in
+    browser** (*Linking waits for your approval*) and links by itself once
+    you approve. An agent whose call needs it is told to ask you, and
+    Settings → Black 4 shows the same Approve.
   - **Unused for 14 days:** Black 4 refuses everything until you approve.
     Every surface shows **Approve in browser** and the Reviews entry a dot.
   Either way you stay signed in and the kept sign-in is not removed. Approve

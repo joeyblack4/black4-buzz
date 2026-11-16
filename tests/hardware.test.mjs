@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import {
   askMachine, hardwareProvider, hardwareDefaults, HEARTBEAT_MINUTES, beatFrom, heartbeatRemote, MACHINES, machineOf, statusReader, harnessOptions, signInState, readyToCreate,
   createLogin, agentDirectory, summaryOf, signInOf, doorTransport, bodySha256, createSession, createMcp, readAnswer, memoryStore,
+  modelsReader, modelChoices, applyPick, setModel, applyHardware,
 } from "../plugins/black4/plugin.js";
 import { fakeAuthKit, fakeMcp, fakeDoor, https, sha256url, DOOR } from "./fakes.mjs";
 
@@ -162,6 +163,225 @@ test("status is read once, shared, cached briefly and turned into a kind", async
   const down = await statusReader(machine(() => undefined).ask).read("commerce");
   assert.equal(down.kind, "unreachable");
   assert.match(down.error, /Could not reach the Commerce Mac/);
+});
+
+// What agentctl's `models` answers (shape of the Commerce Mac's listing).
+const MODELS = {
+  ok: true,
+  harnesses: [
+    { id: "claude", label: "Claude Code", checked: true, model: "claude-fable-5-2", effort: "high", models: [
+      { id: "claude-fable-5-2", label: "Fable 5.2", efforts: ["low", "medium", "high", "xhigh", "max"] },
+      { id: "opus", label: "Opus 5.5", efforts: ["low", "medium", "high", "xhigh", "max"] },
+    ] },
+    { id: "grok", label: "Grok Build", checked: true, model: "grok-4.7", effort: "high", models: [
+      { id: "grok-4.7", label: "Grok 4.7", efforts: ["low", "medium", "high", "xhigh"] },
+      { id: "grok-4.5", label: "Grok 4.5", efforts: ["low", "medium"] },
+    ] },
+    { id: "codex", label: "Codex", checked: false, model: "gpt-6-astra", effort: "high", models: [] },
+  ],
+};
+const listed = { kind: "ok", harnesses: MODELS.harnesses };
+
+test("models are read with their own op, once, and an older machine is unsupported", async () => {
+  const box = machine(() => MODELS);
+  const reader = modelsReader(box.ask);
+  const [a, b] = await Promise.all([reader.read("commerce"), reader.read("commerce")]);
+  assert.equal(a.kind, "ok");
+  assert.equal(a, b);
+  assert.deepEqual(box.ops(), ["models"]);
+  await reader.read("commerce");
+  assert.deepEqual(box.ops(), ["models"], "cached");
+  assert.deepEqual(await modelsReader(machine(() => UNKNOWN).ask).read("commerce"), { kind: "unsupported" });
+  // What the runner released before `models` really answers it (it takes an
+  // op it does not know, carrying no pubkey, for a one-agent op).
+  const released = machine(() => ({ ok: false, error: "pubkey must be 64 hex characters" }));
+  assert.deepEqual(await modelsReader(released.ask).read("commerce"), { kind: "unsupported" });
+});
+
+test("models are asked again soon while the machine is still listing a harness", async () => {
+  let clock = 0;
+  let checked = false;
+  const box = machine(() => ({ ok: true, harnesses: [{ id: "claude", checked, models: [], model: "claude-fable-5-2", effort: "high" }] }));
+  const reader = modelsReader(box.ask, { now: () => clock });
+  await reader.read("commerce");
+  clock += 20 * 1000;
+  checked = true;
+  await reader.read("commerce");
+  assert.equal(box.ops().length, 2, "unchecked: read again after 15 s");
+  clock += 60 * 1000;
+  await reader.read("commerce");
+  assert.equal(box.ops().length, 2, "checked: kept for minutes");
+});
+
+test("Model and Effort start at the machine's defaults and follow the chosen model", () => {
+  const fresh = modelChoices(listed, "claude", { model: "", effort: "" });
+  assert.equal(fresh.model, "claude-fable-5-2");
+  assert.equal(fresh.effort, "high");
+  assert.deepEqual(fresh.models.map((entry) => entry.label), ["Fable 5.2", "Opus 5.5"]);
+  assert.deepEqual(fresh.efforts.map((entry) => entry.label), ["Low", "Medium", "High", "Extra high", "Max"]);
+  const older = modelChoices(listed, "grok", { model: "grok-4.5", effort: "" });
+  assert.equal(older.effort, "medium", "Grok 4.5 has no high: the highest below it");
+  assert.deepEqual(older.efforts.map((entry) => entry.id), ["low", "medium"]);
+  assert.equal(modelChoices(listed, "codex", {}), null, "nothing listed yet: no selects, the machine's default applies");
+  assert.equal(modelChoices(listed, "goose", {}), null);
+  assert.equal(modelChoices({ kind: "unsupported" }, "claude", {}), null, "an older machine: no selects");
+  const gone = modelChoices(listed, "claude", { model: "claude-gone-1", effort: "max" });
+  assert.deepEqual(gone.models[0], { id: "claude-gone-1", label: "claude-gone-1 (unavailable)", unavailable: true });
+  assert.equal(gone.model, "claude-gone-1", "the agent's real setting stays shown");
+  const started = modelChoices(listed, "claude", { model: "", effort: "", shown: "opus", shownEffort: "medium" });
+  assert.deepEqual([started.model, started.effort], ["opus", "medium"], "no choice: what it was started with, not today's default");
+  assert.deepEqual(applyPick(listed, "claude", { model: "", effort: "", shown: "opus", shownEffort: "medium" }, { effort: "max" }),
+    { model: "", effort: "max" }, "a pick stores the choice, never what was shown");
+  assert.equal(modelChoices(listed, "grok", { model: "grok-4.7", effort: "turbo" }).efforts.at(-1).label, "turbo (unavailable)");
+});
+
+test("a pick stores '' for the machine's default, and an effort the new model lacks goes back to its default", () => {
+  assert.deepEqual(applyPick(listed, "claude", { model: "", effort: "" }, { model: "opus" }), { model: "opus", effort: "" });
+  assert.deepEqual(applyPick(listed, "claude", { model: "opus", effort: "" }, { effort: "max" }), { model: "opus", effort: "max" });
+  assert.deepEqual(applyPick(listed, "claude", { model: "opus", effort: "max" }, { model: "claude-fable-5-2" }), { model: "", effort: "max" });
+  assert.deepEqual(applyPick(listed, "claude", { model: "", effort: "max" }, { effort: "high" }), { model: "", effort: "" });
+  assert.deepEqual(applyPick(listed, "grok", { model: "", effort: "xhigh" }, { model: "grok-4.5" }), { model: "grok-4.5", effort: "" });
+  assert.deepEqual(applyPick({ kind: "unsupported" }, "grok", { model: "", effort: "" }, { model: "x" }), { model: "x", effort: "" });
+});
+
+test("creation carries the model and effort; a change goes to the agent's machine as settings.set", async () => {
+  const box = machine((request) => (request.op === "provision" ? { ok: true, pubkey: PUBKEY } : { ok: true, model: "opus", effort: "max" }));
+  const directory = agentDirectory(box.ask);
+  const remote = hardwareProvider(box.ask, () => "request-1", directory);
+  await remote.provision({ name: "Picked", community: "wss://example.communities.buzz.xyz", config: { harness: "claude", model: "opus", effort: "max" } });
+  assert.deepEqual([box.seen[0].request.config.model, box.seen[0].request.config.effort], ["opus", "max"]);
+  assert.equal(hardwareDefaults().effort, "", "the machine's default unless one is picked");
+  await setModel(box.ask, directory, { pubkey: PUBKEY, model: "opus", effort: "max" });
+  assert.deepEqual(box.seen[1], { id: "commerce", request: { op: "settings.set", pubkey: PUBKEY, model: "opus", effort: "max" } });
+  const refused = machine(() => ({ ok: false, error: "Claude Code does not offer the model x on this machine. Choose another model for this agent." }));
+  await assert.rejects(setModel(refused.ask, agentDirectory(refused.ask), { pubkey: PUBKEY, model: "x", effort: "" }), /does not offer the model x/);
+});
+
+/** Just enough React to render the hardware forms in a test: elements as
+ * plain objects, hook state kept per position across renders, effects run
+ * after each render. `settle` renders until the machine's answers are in. */
+function testReact() {
+  const slots = new Map();
+  let effects = [];
+  let path = "";
+  let index = 0;
+  const slot = (make) => { const key = `${path}:${index++}`; if (!slots.has(key)) slots.set(key, make()); return key; };
+  const React = {
+    Fragment: "fragment",
+    Component: class { constructor(props) { this.props = props; this.state = {}; } },
+    createElement: (type, props, ...children) => ({ type, props: { ...(props ?? {}), children: children.flat() } }),
+    useState(init) {
+      const key = slot(() => (typeof init === "function" ? init() : init));
+      return [slots.get(key), (next) => slots.set(key, typeof next === "function" ? next(slots.get(key)) : next)];
+    },
+    useRef(value) { return slots.get(slot(() => ({ current: value }))); },
+    useEffect(effect, deps) {
+      const key = `${path}:${index++}`;
+      const before = slots.get(key);
+      if (!before || !deps || deps.some((dep, i) => dep !== before[i])) { slots.set(key, deps ?? []); effects.push(effect); }
+    },
+  };
+  const render = (node, at = "r") => {
+    if (!node || typeof node !== "object") return node;
+    if (typeof node.type === "function") {
+      if (node.type.prototype?.render) return render(new node.type(node.props).render(), `${at}c`);
+      path = at; index = 0;
+      return render(node.type(node.props), `${at}/`);
+    }
+    return { ...node, props: { ...node.props, children: node.props.children.map((child, i) => render(child, `${at}.${i}`)) } };
+  };
+  const settle = async (element) => {
+    let tree;
+    for (let pass = 0; pass < 6; pass++) {
+      tree = render(element);
+      const run = effects; effects = [];
+      for (const effect of run) effect();
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    return tree;
+  };
+  return { React, settle };
+}
+
+/** Every labelled select in a rendered tree: { label, value, options }. */
+function selectsIn(tree) {
+  const out = [];
+  const walk = (node) => {
+    if (!node || typeof node !== "object") return;
+    const kids = node.props?.children ?? [];
+    const select = node.type === "label" && kids.find((child) => child?.type === "select");
+    if (select) out.push({ label: kids.find((child) => typeof child === "string"), value: select.props.value,
+      options: select.props.children.map((option) => option.props.value) });
+    kids.forEach(walk);
+  };
+  walk(tree);
+  return out;
+}
+const textIn = (tree) => (!tree || typeof tree !== "object" ? (typeof tree === "string" ? tree : "") : (tree.props?.children ?? []).map(textIn).join(" "));
+
+/** The hardware type registered on a test host whose machine answers `reply`. */
+function hardwareOn(reply) {
+  const { React, settle } = testReact();
+  const asked = [];
+  let type;
+  const ctx = {
+    react: React,
+    host: { request: async ({ body }) => { const request = JSON.parse(body); asked.push(request); return { status: 200, body: JSON.stringify(await reply(request)) }; } },
+    agents: { register: (registered) => { type = registered; } },
+  };
+  applyHardware(ctx, { sign: async () => ({ pass: "test-pass" }) });
+  return { type, React, settle, asked };
+}
+
+const fleet = (request) => {
+  if (request.op === "machine.status") return { ok: true, machine: "commerce", harnesses: harnesses({ signedIn: true }) };
+  if (request.op === "models") return MODELS;
+  if (request.op === "list") return { ok: true, agents: [] };
+  if (request.op === "status") return { ok: true, running: true, activated: true, harness: "claude", respondTo: "anyone",
+    model: "opus", effort: "max", modelChosen: true, effortChosen: true };
+  if (request.op === "instructions.get") return { ok: true, instructions: "Be brief." };
+  return { ok: true };
+};
+
+test("render: the Create agent form shows Model and Effort from the machine, at its defaults", async () => {
+  const { type, React, settle } = hardwareOn(fleet);
+  const changes = [];
+  const tree = await settle(React.createElement(type.CreateConfiguration, {
+    config: { ...hardwareDefaults(), harness: "claude" }, onChange: (next) => changes.push(next), disabled: false }));
+  const selects = selectsIn(tree);
+  assert.deepEqual(selects.map((entry) => entry.label), ["Runs on", "Runs", "Model", "Effort", "Answers"]);
+  assert.deepEqual(selects[2], { label: "Model", value: "claude-fable-5-2", options: ["claude-fable-5-2", "opus"] });
+  assert.deepEqual(selects[3], { label: "Effort", value: "high", options: ["low", "medium", "high", "xhigh", "max"] });
+  assert.doesNotMatch(textIn(tree), /could not show/);
+  const older = hardwareOn((request) => (request.op === "models" ? UNKNOWN : fleet(request)));
+  const plain = await older.settle(older.React.createElement(older.type.CreateConfiguration, { config: hardwareDefaults(), onChange: () => {} }));
+  assert.deepEqual(selectsIn(plain).map((entry) => entry.label), ["Runs on", "Runs", "Answers"], "an older machine: no Model or Effort");
+});
+
+test("render: Settings shows what an agent with no choice was started with, and its problem", async () => {
+  const { type, React, settle } = hardwareOn((request) => (request.op === "status"
+    ? { ok: true, running: false, activated: true, harness: "claude", respondTo: "anyone", model: "opus", effort: "medium",
+      modelChosen: false, effortChosen: false, modelProblem: "Claude Code does not offer the model x on this machine. Choose another model for this agent." }
+    : fleet(request)));
+  const tree = await settle(React.createElement(type.tabs[0].component, { agent: { pubkey: PUBKEY } }));
+  assert.deepEqual(selectsIn(tree).map((entry) => [entry.label, entry.value]), [["Model", "opus"], ["Effort", "medium"]]);
+  assert.match(textIn(tree), /does not offer the model x on this machine/);
+});
+
+test("render: Settings shows the agent's own model and effort, and a change is sent to its machine", async () => {
+  const { type, React, settle, asked } = hardwareOn(fleet);
+  const tree = await settle(React.createElement(type.tabs[0].component, { agent: { pubkey: PUBKEY } }));
+  const selects = selectsIn(tree);
+  assert.deepEqual(selects.map((entry) => [entry.label, entry.value]), [["Model", "opus"], ["Effort", "max"]]);
+  const select = (function find(node) {
+    if (!node || typeof node !== "object") return null;
+    if (node.type === "select" && node.props.value === "opus") return node;
+    for (const child of node.props?.children ?? []) { const hit = find(child); if (hit) return hit; }
+    return null;
+  })(tree);
+  select.props.onChange({ target: { value: "claude-fable-5-2" } });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(asked.find((request) => request.op === "settings.set"), { op: "settings.set", pubkey: PUBKEY, model: "", effort: "max" });
 });
 
 test("harness choices follow what the machine has installed", () => {

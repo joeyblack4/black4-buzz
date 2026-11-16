@@ -45,10 +45,23 @@ if args[:1] == ["setup-token"]:
     out.write("\\r\\nOAuth error: Request failed with status code 400 Press Enter to retry.\\r\\n")
     out.flush()
     time.sleep(600)
+if args[:1] == ["--help"]:  # the line 2.1.303 prints
+    print("  --effort <level>                      Effort level for the current session\\n                                        (low, medium, high, xhigh, max)")
+    sys.exit(0)
 if "-p" in args:
     token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")
-    if token == {FAKE_TOKEN!r}:
-        print(json.dumps({{"is_error": False, "result": "OK"}}))
+    model = args[args.index("--model") + 1] if "--model" in args else "claude-sonnet-5-5"
+    home = os.environ["HOME"]
+    with open(os.path.join(home, "claude-calls.txt"), "a") as f: f.write(model + "\\n")
+    refused = os.path.exists(os.path.join(home, "refuse-" + model))
+    busy = os.path.exists(os.path.join(home, "busy-" + model))
+    if token == {FAKE_TOKEN!r} and refused:  # what 2.1.303 answered for a model the sign-in lacks
+        print(json.dumps({{"is_error": True, "subtype": "success", "api_error_status": 404, "modelUsage": {{}},
+                          "result": "There's an issue with the selected model (" + model + "). It may not exist or you may not have access to it."}}))
+    elif token == {FAKE_TOKEN!r} and busy:
+        print(json.dumps({{"is_error": True, "api_error_status": 429, "result": "API Error: 429 rate limited"}}))
+    elif token == {FAKE_TOKEN!r}:
+        print(json.dumps({{"is_error": False, "result": "OK", "modelUsage": {{model: {{}}}}}}))
     elif token:
         print(json.dumps({{"is_error": True, "api_error_status": 401, "result": "Failed to authenticate. API Error: 401 OAuth access token is invalid."}}))
     else:
@@ -64,10 +77,16 @@ if sys.argv[1:2] == ["auth-methods"]:  # buzz-acp's own ACP initialize with an a
     if os.path.exists(os.path.join(home, "handshake-fail.txt")):
         sys.stderr.write("error: initialize failed: -32602 Invalid params\\n"); sys.exit(1)
     print(json.dumps({{"methods": []}})); sys.exit(0)
+if sys.argv[1:2] == ["models"]:  # what 0.5.30 printed for claude-agent-acp 0.94.0
+    opts = [{{"value": "default", "name": "Default (recommended)"}}, {{"value": "sonnet", "name": "Sonnet 5.5"}},
+            {{"value": "fable", "name": "Fable 5.1"}}, {{"value": "opus", "name": "Opus 5.5"}}, {{"value": "haiku", "name": "Haiku 5.5"}}]
+    with open(os.path.join(home, "listings.txt"), "a") as f: f.write("claude\\n")
+    print(json.dumps({{"stable": {{"configOptions": [{{"id": "model", "category": "model", "type": "select", "currentValue": "default", "options": opts}}]}}}}))
+    sys.exit(0)
 if os.path.exists(os.path.join(home, "crash.txt")):
     print("buzz-acp: relay refused the connection", flush=True); sys.exit(1)
 with open("env.json", "w") as f:
-    json.dump({{k: v for k, v in os.environ.items() if k.startswith(("BUZZ_ACP", "CLAUDE_CODE", "PATH", "CODEX", "GROK", "NO_BROWSER", "OPENAI", "XAI", "INITIAL_AGENT_MODE", "GOOSE"))}}, f)
+    json.dump({{k: v for k, v in os.environ.items() if k.startswith(("BUZZ_ACP", "CLAUDE_CODE", "PATH", "CODEX", "GROK", "NO_BROWSER", "OPENAI", "XAI", "INITIAL_AGENT_MODE", "GOOSE", "ANTHROPIC"))}}, f)
 while True: time.sleep(1)
 """
 
@@ -172,6 +191,8 @@ class Base(unittest.TestCase):
         self.a.agent_path = lambda: f"{bin_}:/usr/bin:/bin"
         # Sign-in checks run in this process, not in a detached `agentctl check`.
         self.a.spawn_check = lambda harness: self.a.run_check(harness)
+        # Likewise the Claude model listing: tests make it with refresh_claude_models.
+        self.a.spawn_models_refresh = lambda: None
         self.crontab = ""  # never the test computer's own crontab
         self.a.read_crontab = lambda: self.crontab
 
@@ -917,7 +938,7 @@ class DeviceStatusAndStart(DeviceBase):
         self.assertTrue(self.req(op="start", pubkey=agent.name)["ok"])
         env = json.loads((agent / "work" / "env.json").read_text())
         self.assertEqual(env["BUZZ_ACP_AGENT_COMMAND"], "grok")
-        self.assertEqual(env["BUZZ_ACP_AGENT_ARGS"], "agent,--always-approve,stdio")
+        self.assertEqual(env["BUZZ_ACP_AGENT_ARGS"], "agent,--model,grok-4.7,--reasoning-effort,high,--always-approve,stdio")
         self.assertEqual(env["GROK_HOME"], str(self.a.HOMES / "grok"))
         self.assertIn("auto_update = false", (self.a.HOMES / "grok" / "config.toml").read_text())
         self.sign_in_device("codex")
@@ -1243,6 +1264,301 @@ class SetupPins(unittest.TestCase):
         curves = lock["packages"]["node_modules/@noble/curves"]
         self.assertEqual(curves["version"], "2.0.1")
         self.assertTrue(curves["integrity"].startswith("sha512-"))
+
+
+# The shapes Codex 0.160.1 and Grok 1.0.70 write to models_cache.json in their
+# homes (fields agentctl does not read left out).
+CODEX_MODELS = {"client_version": "0.160.1", "models": [
+    {"slug": "gpt-6.1-sol", "display_name": "GPT-6.1-Sol", "visibility": "list", "priority": 1, "default_reasoning_level": "low",
+     "supported_reasoning_levels": [{"effort": e} for e in ("low", "medium", "high", "xhigh", "max", "ultra")]},
+    {"slug": "gpt-6-astra", "display_name": "GPT-6-Astra", "visibility": "list", "priority": 2, "default_reasoning_level": "medium",
+     "supported_reasoning_levels": [{"effort": e} for e in ("low", "medium", "high", "xhigh", "max", "ultra")]},
+    {"slug": "gpt-6-luna", "display_name": "GPT-6-Luna", "visibility": "list", "priority": 6,
+     "supported_reasoning_levels": [{"effort": e} for e in ("low", "medium", "high", "xhigh", "max")]},
+    {"slug": "codex-auto-review", "display_name": "Codex Auto Review", "visibility": "hide", "priority": 10,
+     "supported_reasoning_levels": [{"effort": "medium"}]},
+]}
+GROK_MODELS = {"grok_version": "1.0.70", "models": {
+    "grok-4.7": {"info": {"id": "grok-4.7", "name": "Grok 4.7", "hidden": False, "supports_reasoning_effort": True,
+                          "reasoning_efforts": [{"value": e} for e in ("xhigh", "high", "medium", "low")]}},
+    "grok-4.5": {"info": {"id": "grok-4.5", "name": "Grok 4.5", "hidden": False, "supports_reasoning_effort": True,
+                          "reasoning_efforts": [{"value": e} for e in ("medium", "low")]}},
+    "grok-secret": {"info": {"id": "grok-secret", "name": "Hidden", "hidden": True}},
+}}
+
+
+class ModelAndEffort(DeviceBase):
+    """Each agent's model and effort: what each harness offers, the defaults,
+    how each harness is told, and refusing what it does not offer."""
+    def setUp(self):
+        super().setUp()
+        for harness, cache in (("codex", CODEX_MODELS), ("grok", GROK_MODELS)):
+            home = self.a.private_dir(self.a.HOMES / harness)
+            (home / "models_cache.json").write_text(json.dumps(cache))
+            (home / "auth.json").write_text(json.dumps({"tokens": {"access_token": FAKE_CRED}}))
+        self.sign_in()
+        # The out-of-band listing, made in this process.
+        self.a.spawn_models_refresh = lambda: self.a.refresh_claude_models()
+        self.a.MODELS_WAIT = 2
+
+    def listed(self):
+        self.a.refresh_claude_models(wait=True)
+
+    def env_of(self, agent):
+        self.assertTrue(self.req(op="start", pubkey=agent.name)["ok"])
+        return json.loads((agent / "work" / "env.json").read_text())
+
+    def test_each_harness_offers_what_its_own_listing_says(self):
+        r = self.req(op="models")
+        rows = {h["id"]: h for h in r["harnesses"]}
+        self.assertEqual(set(rows), {"claude", "codex", "grok"}, "Goose takes no model")
+        self.assertEqual([m["id"] for m in rows["claude"]["models"]], ["claude-fable-5-2", "sonnet", "fable", "opus", "haiku"])
+        self.assertEqual(rows["claude"]["models"][0]["label"], "Fable 5.2")
+        self.assertEqual(rows["claude"]["models"][0]["efforts"], ["low", "medium", "high", "xhigh", "max"])
+        self.assertEqual([m["id"] for m in rows["codex"]["models"]], ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-luna"], "hidden rows left out")
+        self.assertEqual(rows["codex"]["models"][2]["efforts"], ["low", "medium", "high", "xhigh", "max"])
+        self.assertEqual([m["id"] for m in rows["grok"]["models"]], ["grok-4.7", "grok-4.5"])
+        self.assertEqual(rows["grok"]["models"][0]["efforts"], ["low", "medium", "high", "xhigh"], "least to most")
+        for hid, model in (("claude", "claude-fable-5-2"), ("codex", "gpt-6-astra"), ("grok", "grok-4.7")):
+            self.assertEqual((rows[hid]["model"], rows[hid]["effort"], rows[hid]["checked"]), (model, "high", True))
+            self.assertNotIn("note", rows[hid])
+
+    def test_fable_5_2_is_offered_only_when_it_answers_on_this_sign_in(self):
+        (self.home / "refuse-claude-fable-5-2").write_text("x")
+        row = next(h for h in self.req(op="models")["harnesses"] if h["id"] == "claude")
+        self.assertNotIn("claude-fable-5-2", [m["id"] for m in row["models"]])
+        self.assertEqual((row["model"], row["effort"]), ("fable", "high"))
+        self.assertEqual(row["note"], "claude-fable-5-2 is not offered here; fable runs instead.")
+
+    def test_a_busy_api_proves_nothing_and_the_default_still_applies(self):
+        (self.home / "busy-claude-fable-5-2").write_text("x")
+        self.listed()
+        self.assertIsNone(self.a.offered("claude"), "a 429 is not 'not offered'")
+        env = self.env_of(self.make_agent("claude"))
+        self.assertEqual(env["ANTHROPIC_MODEL"], "claude-fable-5-2", "never 5.1 for a day because of one busy reply")
+
+    def test_status_reports_what_a_running_agent_was_started_with(self):
+        self.listed()
+        agent = self.make_agent("grok")
+        self.a.start(agent)
+        s = self.a.read_settings(agent); s["model"] = "grok-4.5"; self.a.write_settings(agent, s)  # not restarted
+        status = self.req(op="status", pubkey=agent.name)
+        self.assertEqual((status["model"], status["effort"], status["modelChosen"]), ("grok-4.7", "high", True))
+        (agent / "launch.json").unlink()  # as if the old runner had started it
+        status = self.req(op="status", pubkey=agent.name)
+        self.assertEqual((status["model"], status["effort"]), (None, None))
+        self.assertIn("runs Grok Build's own default until it restarts", status["modelNote"])
+        self.a.stop(agent)
+        self.assertEqual(self.req(op="status", pubkey=agent.name)["model"], "grok-4.5", "stopped: what it would start with")
+
+    def test_the_claude_listing_is_kept_per_sign_in(self):
+        self.listed(); self.listed()
+        self.assertEqual((self.home / "listings.txt").read_text().count("claude"), 1)
+        self.assertEqual((self.home / "claude-calls.txt").read_text().split(), ["claude-fable-5-2"], "one call proves the default")
+        self.a.save_claude_token(FAKE_TOKEN + "x", None)
+        self.assertIsNone(self.a.offered("claude"), "another sign-in: not known yet")
+
+    def test_a_new_agent_runs_the_most_capable_model_at_high_effort(self):
+        self.listed()
+        env = self.env_of(self.make_agent("claude"))
+        self.assertEqual((env["ANTHROPIC_MODEL"], env["CLAUDE_CODE_EFFORT_LEVEL"]), ("claude-fable-5-2", "high"))
+        self.assertNotIn("BUZZ_ACP_MODEL", env, "buzz-acp keeps the default model when the adapter refuses it, silently")
+        self.assertNotIn("BUZZ_ACP_EFFORT_LEVEL", env)
+        env = self.env_of(self.make_agent("codex"))
+        self.assertEqual(json.loads(env["CODEX_CONFIG"]), {"model": "gpt-6-astra", "model_reasoning_effort": "high"})
+        self.assertEqual(env["INITIAL_AGENT_MODE"], "agent-full-access")
+        env = self.env_of(self.make_agent("grok"))
+        self.assertEqual(env["BUZZ_ACP_AGENT_ARGS"], "agent,--model,grok-4.7,--reasoning-effort,high,--always-approve,stdio")
+
+    def test_a_chosen_model_and_effort_are_stored_applied_and_reported(self):
+        self.listed()
+        r = self.req(op="provision", name="Picked", community="wss://relay.example.com",
+                     config={"harness": "claude", "model": "opus", "effort": "max"})
+        self.assertTrue(r["ok"], r)
+        agent = self.a.AGENTS / r["pubkey"]
+        s = self.a.read_settings(agent)
+        self.assertEqual((s["model"], s["effort"]), ("opus", "max"))
+        s["auth"] = ["auth", "a" * 64, "", "b" * 128]; self.a.write_settings(agent, s)
+        env = self.env_of(agent)
+        self.assertEqual((env["ANTHROPIC_MODEL"], env["CLAUDE_CODE_EFFORT_LEVEL"]), ("opus", "max"))
+        status = self.req(op="status", pubkey=agent.name)
+        self.assertEqual((status["model"], status["effort"], status["modelChosen"], status["effortChosen"]), ("opus", "max", True, True))
+        row = next(a for a in self.req(op="list")["agents"] if a["pubkey"] == agent.name)
+        self.assertEqual((row["model"], row["effort"]), ("opus", "max"))
+
+    def test_changing_them_restarts_the_agent_and_empty_means_the_default(self):
+        self.listed()
+        agent = self.make_agent("grok")
+        old = self.a.start(agent)
+        r = self.req(op="settings.set", pubkey=agent.name, model="grok-4.5", effort="low")
+        self.assertTrue(r["ok"], r)
+        self.assertEqual((r["model"], r["effort"]), ("grok-4.5", "low"))
+        self.assertNotEqual(self.a.running(agent), old, "restarted on the change")
+        env = json.loads((agent / "work" / "env.json").read_text())
+        self.assertEqual(env["BUZZ_ACP_AGENT_ARGS"], "agent,--model,grok-4.5,--reasoning-effort,low,--always-approve,stdio")
+        r = self.req(op="settings.set", pubkey=agent.name, effort="")
+        self.assertEqual((r["model"], r["effort"]), ("grok-4.5", "medium"), "Grok 4.5 has no high: the highest below it")
+        self.assertIn("Grok 4.5 does not take high effort; medium instead.", r["modelNote"])
+        r = self.req(op="settings.set", pubkey=agent.name, model="")
+        self.assertEqual((r["model"], r["effort"], r["modelChosen"]), ("grok-4.7", "high", False))
+
+    def test_a_model_or_effort_it_does_not_offer_is_refused_loudly(self):
+        self.listed()
+        agent = self.make_agent("codex")
+        self.assertEqual(self.req(op="settings.set", pubkey=agent.name, model="gpt-9")["error"],
+                         "Codex does not offer the model gpt-9 on this machine. Choose another model for this agent.")
+        self.assertEqual(self.req(op="settings.set", pubkey=agent.name, model="gpt-6-luna", effort="ultra")["error"],
+                         "GPT-6-Luna does not take the effort ultra. Choose another effort for this agent.")
+        self.assertEqual(self.a.read_settings(agent)["model"], "", "nothing stored")
+        r = self.req(op="provision", name="Bad", community="wss://relay.example.com", config={"harness": "grok", "model": "grok-9"})
+        self.assertIn("does not offer the model grok-9", r["error"])
+        self.assertIn("takes its model from the machine", self.req(op="provision", name="G", community="wss://relay.example.com",
+                                                                   config={"harness": "goose", "model": "x"})["error"])
+        # A model the subscription stopped offering after it was chosen.
+        s = self.a.read_settings(agent); s["model"] = "gpt-5-gone"; self.a.write_settings(agent, s)
+        self.assertIn("does not offer the model gpt-5-gone", self.req(op="start", pubkey=agent.name)["error"])
+        self.assertIsNone(self.a.running(agent))
+        self.assertIn("gpt-5-gone", self.req(op="status", pubkey=agent.name)["modelProblem"])
+
+    def test_without_a_listing_yet_the_choice_still_applies_and_says_unchecked(self):
+        (self.a.HOMES / "codex" / "models_cache.json").unlink()
+        agent = self.make_agent("codex")
+        env = self.env_of(agent)
+        self.assertEqual(json.loads(env["CODEX_CONFIG"]), {"model": "gpt-6-astra", "model_reasoning_effort": "high"})
+        self.assertFalse(json.loads((agent / "launch.json").read_text())["checked"])
+        row = next(h for h in self.req(op="models")["harnesses"] if h["id"] == "codex")
+        self.assertEqual((row["models"], row["checked"]), ([], False))
+
+    def test_a_heartbeat_names_the_exact_model_it_runs(self):
+        self.listed()
+        agent = self.make_agent("claude")
+        self.assertTrue(self.req(op="heartbeat.set", pubkey=agent.name, minutes=30)["ok"])
+        self.assertIn('model "claude-fable-5-2"', (agent / "heartbeat.md").read_text())
+        self.assertTrue(self.req(op="settings.set", pubkey=agent.name, model="opus")["ok"])
+        self.assertIn("(your exact model id)", (agent / "heartbeat.md").read_text(), "an alias: the agent names it exactly")
+        self.assertTrue(self.req(op="settings.set", pubkey=agent.name, model="")["ok"])
+        self.assertIn('model "claude-fable-5-2"', self.req(op="heartbeat.get", pubkey=agent.name)["prompt"], "the form shows what it runs")
+
+    def claude_calls(self):
+        path = self.home / "claude-calls.txt"
+        return path.read_text().split() if path.exists() else []
+
+    def test_a_failed_listing_keeps_the_last_good_one_and_backs_off(self):
+        self.listed()
+        cache = json.loads((self.a.RUN / "claude-models.json").read_text())
+        cache["at"] -= self.a.CLAUDE_MODELS_TTL + 1  # due again
+        (self.a.RUN / "claude-models.json").write_text(json.dumps(cache))
+        (self.home / "busy-claude-fable-5-2").write_text("x")
+        self.a.refresh_claude_models(wait=True)
+        self.assertEqual(self.a.offered("claude")[0]["id"], "claude-fable-5-2", "the last good listing stands")
+        calls = len(self.claude_calls())
+        for _ in range(3): self.a.refresh_claude_models(wait=True)
+        self.assertEqual(len(self.claude_calls()), calls, "no paid call again until the back-off is over")
+        cache = json.loads((self.a.RUN / "claude-models.json").read_text())
+        self.assertEqual(cache["fails"], 1)
+        self.assertAlmostEqual(cache["retryAt"] - cache["failedAt"], self.a.CLAUDE_MODELS_FAIL_TTL, delta=1)
+        cache["retryAt"] = time.time() - 1
+        (self.a.RUN / "claude-models.json").write_text(json.dumps(cache))
+        self.a.refresh_claude_models(wait=True)
+        cache = json.loads((self.a.RUN / "claude-models.json").read_text())
+        self.assertEqual(cache["retryAt"] - cache["failedAt"], 2 * self.a.CLAUDE_MODELS_FAIL_TTL, "doubling")
+        (self.home / "busy-claude-fable-5-2").unlink()
+        cache["retryAt"] = time.time() - 1
+        (self.a.RUN / "claude-models.json").write_text(json.dumps(cache))
+        self.a.refresh_claude_models(wait=True)
+        self.assertNotIn("retryAt", json.loads((self.a.RUN / "claude-models.json").read_text()))
+
+    def test_a_start_with_no_listing_yet_makes_it_first(self):
+        self.a.spawn_models_refresh = lambda: None  # as after a deploy: nothing out of band has run
+        (self.home / "refuse-claude-fable-5-2").write_text("x")
+        agent = self.make_agent("claude")
+        env = self.env_of(agent)
+        self.assertEqual(env["ANTHROPIC_MODEL"], "fable", "never a model the sign-in lacks, unseen")
+        self.assertTrue(json.loads((agent / "launch.json").read_text())["checked"])
+
+    def test_an_agent_started_unchecked_is_put_right_once_the_listing_is_in(self):
+        self.a.spawn_models_refresh = lambda: None
+        self.a.claude_listing_due = lambda: False  # the listing could not be made at start (offline)
+        (self.home / "refuse-claude-fable-5-2").write_text("x")
+        agent = self.make_agent("claude")
+        old = self.a.start(agent)
+        status = self.req(op="status", pubkey=agent.name)
+        self.assertEqual((status["model"], status["modelChecked"]), ("claude-fable-5-2", False))
+        self.assertIn("not yet checked", status["modelNote"])
+        self.listed()
+        self.a.supervise_pass()
+        self.assertNotEqual(self.a.running(agent), old)
+        self.assertEqual(json.loads((agent / "work" / "env.json").read_text())["ANTHROPIC_MODEL"], "fable")
+        self.assertTrue(self.req(op="status", pubkey=agent.name)["modelChecked"])
+        # Its own choice, not offered: stopped and said, not left failing every turn.
+        other = self.make_agent("claude")
+        s = self.a.read_settings(other); s["model"] = "claude-gone-1"; self.a.write_settings(other, s)
+        real = self.a.claude_models
+        self.a.claude_models = lambda spawn=True: None  # started while nothing was known
+        self.a.start(other)
+        self.a.claude_models = real
+        self.a.supervise_pass(now=time.time() - 3600)  # restarts not yet due
+        self.assertIsNone(self.a.running(other))
+        row = next(a for a in self.req(op="list")["agents"] if a["pubkey"] == other.name)
+        self.assertIn("does not offer the model claude-gone-1", row["modelProblem"])
+
+    def test_an_effort_name_it_does_not_know_never_breaks_a_request(self):
+        cache = json.loads(json.dumps(GROK_MODELS))
+        cache["models"]["grok-4.7"]["info"]["reasoning_efforts"] = [{"value": "low"}, {"value": "turbo"}]
+        (self.a.HOMES / "grok" / "models_cache.json").write_text(json.dumps(cache))
+        agent = self.make_agent("grok")
+        self.assertEqual(self.req(op="status", pubkey=agent.name)["effort"], "low")
+        self.assertTrue(self.req(op="list")["ok"])
+        self.assertTrue(self.req(op="models")["ok"])
+        self.assertTrue(self.req(op="settings.set", pubkey=agent.name, effort="turbo")["ok"], "offered, so it may be chosen")
+
+    def test_ids_that_are_not_ids_never_reach_a_harness(self):
+        agent = self.make_agent("grok")
+        for bad in ("grok-4.7,--sandbox", "-rf", "a b"):
+            self.assertEqual(self.req(op="settings.set", pubkey=agent.name, model=bad)["error"], "model is not a model id")
+        self.assertEqual(self.req(op="settings.set", pubkey=agent.name, effort="high,x")["error"], "effort is not an effort level")
+        cache = json.loads(json.dumps(GROK_MODELS))
+        cache["models"]["grok-4.7,--x"] = {"info": {"id": "grok-4.7,--x", "name": "Odd", "hidden": False}}
+        (self.a.HOMES / "grok" / "models_cache.json").write_text(json.dumps(cache))
+        self.assertNotIn("grok-4.7,--x", [m["id"] for m in self.a.offered("grok")])
+        s = self.a.read_settings(agent); s["model"] = "grok,--x"; self.a.write_settings(agent, s)  # an old saved value
+        with self.assertRaises(self.a.Fail): self.a.launch("grok", {"model": "grok,--x", "effort": "high"})
+        self.assertIn("grok,--x", self.req(op="start", pubkey=agent.name)["error"])
+
+    def test_only_its_creator_changes_an_agents_model(self):
+        agent = self.make_agent("grok")
+        self.a.CALLER = "teammate"
+        self.addCleanup(setattr, self.a, "CALLER", None)
+        self.assertIn("Only they or a Black 4 admin can change it", self.req(op="settings.set", pubkey=agent.name, model="grok-4.5")["error"])
+        self.assertEqual(self.a.read_settings(agent)["model"], "")
+
+    def test_doctor_says_what_new_agents_run(self):
+        self.listed()
+        rows = {h["id"]: h for h in self.req(op="doctor")["harnesses"]}
+        self.assertEqual((rows["claude"]["model"], rows["claude"]["effort"]), ("claude-fable-5-2", "high"))
+        self.assertNotIn("model", rows["goose"])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out): self.a.print_doctor()
+        self.assertIn("new agents run gpt-6-astra at high effort", out.getvalue())
+
+
+class ModelLevers(unittest.TestCase):
+    def setUp(self):
+        self.a = load()
+
+    def test_launch_tells_each_harness_its_own_way(self):
+        pick = {"model": "m", "effort": "high"}
+        self.assertEqual(self.a.launch("claude", pick), ({"ANTHROPIC_MODEL": "m", "CLAUDE_CODE_EFFORT_LEVEL": "high"}, ""))
+        env, args = self.a.launch("codex", pick)
+        self.assertEqual((json.loads(env["CODEX_CONFIG"]), args), ({"model": "m", "model_reasoning_effort": "high"}, ""))
+        self.assertEqual(self.a.launch("grok", pick), ({}, "agent,--model,m,--reasoning-effort,high,--always-approve,stdio"))
+        self.assertEqual(self.a.launch("grok", {"model": None, "effort": None}), ({}, "agent,--always-approve,stdio"))
+        self.assertEqual(self.a.launch("goose", {"model": None, "effort": None}), ({}, "acp"))
+
+    def test_labels_and_effort_order(self):
+        self.assertEqual(self.a.claude_label("claude-fable-5-2"), "Fable 5.2")
+        self.assertEqual(self.a.claude_label("claude-opus-5"), "Opus 5")
+        self.assertEqual(self.a.effort_sorted(["max", "low", "bogus level", "high", "low"]), ["low", "high", "max"])
 
 
 if __name__ == "__main__":

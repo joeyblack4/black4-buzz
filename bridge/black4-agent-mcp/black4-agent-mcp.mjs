@@ -19,7 +19,7 @@
 //
 // Environment: BUZZ_PRIVATE_KEY (hex or nsec) and BUZZ_AUTH_TAG (JSON) from
 // buzz-acp; BLACK4_MCP_URL (default https://api.black4.ai/mcp),
-// BLACK4_MCP_TOOLS (default "core"; "" lists every tool), BLACK4_MCP_TIMEOUT_MS
+// BLACK4_MCP_TOOLS (default: every tool, as for any agent), BLACK4_MCP_TIMEOUT_MS
 // (default 15 minutes). Nothing is read from disk. The key, the attestation
 // and the signed header are never logged.
 import { createHash } from "node:crypto";
@@ -147,7 +147,9 @@ async function serverMessage(res) {
 
 export function createConnector({ env = process.env, write, fetchFn = fetch, log = () => {}, now = Date.now } = {}) {
   const base = env.BLACK4_MCP_URL || DEFAULT_URL;
-  const tools = env.BLACK4_MCP_TOOLS ?? "core";
+  // Every tool, as every other agent sees the Black 4 MCP (Joey, 2026-11-16: no
+  // different behavior for Buzz agents). BLACK4_MCP_TOOLS still narrows the list.
+  const tools = env.BLACK4_MCP_TOOLS ?? "";
   const endpoint = new URL(base);
   if (tools && !endpoint.searchParams.has("tools")) endpoint.searchParams.set("tools", tools);
   const timeoutMs = Number(env.BLACK4_MCP_TIMEOUT_MS) > 0 ? Number(env.BLACK4_MCP_TIMEOUT_MS) : 15 * 60_000;

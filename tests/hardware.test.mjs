@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import {
   askMachine, hardwareProvider, hardwareDefaults, HEARTBEAT_MINUTES, beatFrom, heartbeatRemote, MACHINES, machineOf, statusReader, harnessOptions, signInState, readyToCreate,
   createLogin, agentDirectory, summaryOf, signInOf, doorTransport, bodySha256, createSession, createMcp, readAnswer, memoryStore,
+  modelsReader, modelChoices, applyPick, setModel,
 } from "../plugins/black4/plugin.js";
 import { fakeAuthKit, fakeMcp, fakeDoor, https, sha256url, DOOR } from "./fakes.mjs";
 
@@ -162,6 +163,74 @@ test("status is read once, shared, cached briefly and turned into a kind", async
   const down = await statusReader(machine(() => undefined).ask).read("commerce");
   assert.equal(down.kind, "unreachable");
   assert.match(down.error, /Could not reach the Commerce Mac/);
+});
+
+// What agentctl's `models` answers (shape of the Commerce Mac's listing).
+const MODELS = {
+  ok: true,
+  harnesses: [
+    { id: "claude", label: "Claude Code", checked: true, model: "claude-fable-5-2", effort: "high", models: [
+      { id: "claude-fable-5-2", label: "Fable 5.2", efforts: ["low", "medium", "high", "xhigh", "max"] },
+      { id: "opus", label: "Opus 5.5", efforts: ["low", "medium", "high", "xhigh", "max"] },
+    ] },
+    { id: "grok", label: "Grok Build", checked: true, model: "grok-4.7", effort: "high", models: [
+      { id: "grok-4.7", label: "Grok 4.7", efforts: ["low", "medium", "high", "xhigh"] },
+      { id: "grok-4.5", label: "Grok 4.5", efforts: ["low", "medium"] },
+    ] },
+    { id: "codex", label: "Codex", checked: false, model: "gpt-6-astra", effort: "high", models: [] },
+  ],
+};
+const listed = { kind: "ok", harnesses: MODELS.harnesses };
+
+test("models are read with their own op, once, and an older machine is unsupported", async () => {
+  const box = machine(() => MODELS);
+  const reader = modelsReader(box.ask);
+  const [a, b] = await Promise.all([reader.read("commerce"), reader.read("commerce")]);
+  assert.equal(a.kind, "ok");
+  assert.equal(a, b);
+  assert.deepEqual(box.ops(), ["models"]);
+  await reader.read("commerce");
+  assert.deepEqual(box.ops(), ["models"], "cached");
+  assert.deepEqual(await modelsReader(machine(() => UNKNOWN).ask).read("commerce"), { kind: "unsupported" });
+});
+
+test("Model and Effort start at the machine's defaults and follow the chosen model", () => {
+  const fresh = modelChoices(listed, "claude", { model: "", effort: "" });
+  assert.equal(fresh.model, "claude-fable-5-2");
+  assert.equal(fresh.effort, "high");
+  assert.deepEqual(fresh.models.map((entry) => entry.label), ["Fable 5.2", "Opus 5.5"]);
+  assert.deepEqual(fresh.efforts.map((entry) => entry.label), ["Low", "Medium", "High", "Extra high", "Max"]);
+  const older = modelChoices(listed, "grok", { model: "grok-4.5", effort: "" });
+  assert.equal(older.effort, "medium", "Grok 4.5 has no high: the highest below it");
+  assert.deepEqual(older.efforts.map((entry) => entry.id), ["low", "medium"]);
+  assert.equal(modelChoices(listed, "codex", {}), null, "nothing listed yet: no selects, the machine's default applies");
+  assert.equal(modelChoices(listed, "goose", {}), null);
+  assert.equal(modelChoices({ kind: "unsupported" }, "claude", {}), null, "an older machine: no selects");
+  const gone = modelChoices(listed, "claude", { model: "claude-gone-1", effort: "max" });
+  assert.deepEqual(gone.models[0], { id: "claude-gone-1", label: "claude-gone-1 (unavailable)", unavailable: true });
+  assert.equal(gone.model, "claude-gone-1", "the agent's real setting stays shown");
+});
+
+test("a pick stores '' for the machine's default, and an effort the new model lacks goes back to its default", () => {
+  assert.deepEqual(applyPick(listed, "claude", { model: "", effort: "" }, { model: "opus" }), { model: "opus", effort: "" });
+  assert.deepEqual(applyPick(listed, "claude", { model: "opus", effort: "" }, { effort: "max" }), { model: "opus", effort: "max" });
+  assert.deepEqual(applyPick(listed, "claude", { model: "opus", effort: "max" }, { model: "claude-fable-5-2" }), { model: "", effort: "max" });
+  assert.deepEqual(applyPick(listed, "claude", { model: "", effort: "max" }, { effort: "high" }), { model: "", effort: "" });
+  assert.deepEqual(applyPick(listed, "grok", { model: "", effort: "xhigh" }, { model: "grok-4.5" }), { model: "grok-4.5", effort: "" });
+  assert.deepEqual(applyPick({ kind: "unsupported" }, "grok", { model: "", effort: "" }, { model: "x" }), { model: "x", effort: "" });
+});
+
+test("creation carries the model and effort; a change goes to the agent's machine as settings.set", async () => {
+  const box = machine((request) => (request.op === "provision" ? { ok: true, pubkey: PUBKEY } : { ok: true, model: "opus", effort: "max" }));
+  const directory = agentDirectory(box.ask);
+  const remote = hardwareProvider(box.ask, () => "request-1", directory);
+  await remote.provision({ name: "Picked", community: "wss://example.communities.buzz.xyz", config: { harness: "claude", model: "opus", effort: "max" } });
+  assert.deepEqual([box.seen[0].request.config.model, box.seen[0].request.config.effort], ["opus", "max"]);
+  assert.equal(hardwareDefaults().effort, "", "the machine's default unless one is picked");
+  await setModel(box.ask, directory, { pubkey: PUBKEY, model: "opus", effort: "max" });
+  assert.deepEqual(box.seen[1], { id: "commerce", request: { op: "settings.set", pubkey: PUBKEY, model: "opus", effort: "max" } });
+  const refused = machine(() => ({ ok: false, error: "Claude Code does not offer the model x on this machine. Choose another model for this agent." }));
+  await assert.rejects(setModel(refused.ask, agentDirectory(refused.ask), { pubkey: PUBKEY, model: "x", effort: "" }), /does not offer the model x/);
 });
 
 test("harness choices follow what the machine has installed", () => {

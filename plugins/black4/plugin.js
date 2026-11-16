@@ -1348,6 +1348,10 @@ const MACHINE_TIMEOUT_MS = 45 * 1000;
 const STATUS_TIMEOUT_MS = 12 * 1000;
 const STATUS_TTL_MS = 20 * 1000;
 const UNREACHABLE_TTL_MS = 4 * 1000;
+// The first `models` after a new Claude sign-in lists its models and proves the
+// default answers, which takes the machine some seconds; then it is cached.
+const MODELS_TIMEOUT_MS = 60 * 1000;
+const MODELS_TTL_MS = 5 * 60 * 1000;
 const LOGIN_TIMEOUT_MS = 120 * 1000; // the machine waits up to 90 s for a code, 85 s per wait for a device approval
 /** Sign-in flows this plugin can show. "code": open a link, paste the code its
  * page shows. "device": open a link and approve the short code shown here;
@@ -1367,7 +1371,7 @@ const ANSWERS = [
 ];
 
 export const hardwareDefaults = () => ({
-  machine: DEFAULT_MACHINE, harness: "claude", model: "", respondTo: "anyone", instructions: "",
+  machine: DEFAULT_MACHINE, harness: "claude", model: "", effort: "", respondTo: "anyone", instructions: "",
 });
 
 /** The machine an id or a config names. Unknown or missing (an agent made
@@ -1445,11 +1449,12 @@ export async function askMachine(ask, machine, request, { signal, timeoutMs = MA
 
 const unsupported = (error) => /unknown op/i.test(String(error?.message ?? error));
 
-/** Shared, briefly cached `machine.status` per machine. `read` never rejects:
+/** Shared, briefly cached `machine.status` (or another op answering
+ * `harnesses`, such as `models`) per machine. `read` never rejects:
  * it resolves `{ kind: "ok", harnesses }`, `{ kind: "unsupported" }` (the
  * machine predates the op) or `{ kind: "unreachable", error }`. Concurrent
  * reads share one request. */
-export function statusReader(ask, { ttlMs = STATUS_TTL_MS, timeoutMs = STATUS_TIMEOUT_MS, now = () => Date.now() } = {}) {
+export function statusReader(ask, { op = "machine.status", ttlMs = STATUS_TTL_MS, timeoutMs = STATUS_TIMEOUT_MS, now = () => Date.now() } = {}) {
   const cache = new Map(); // machine id -> { at, status }
   const flight = new Map(); // machine id -> promise
   const listeners = new Set();
@@ -1470,7 +1475,7 @@ export function statusReader(ask, { ttlMs = STATUS_TTL_MS, timeoutMs = STATUS_TI
         if (hit) return Promise.resolve(hit);
         if (flight.has(id)) return flight.get(id);
       }
-      const request = askMachine(ask, id, { op: "machine.status" }, { timeoutMs })
+      const request = askMachine(ask, id, { op }, { timeoutMs })
         .then((reply) => ({ kind: "ok", harnesses: Array.isArray(reply.harnesses) ? reply.harnesses : [] }))
         .catch((error) => (unsupported(error) ? { kind: "unsupported" } : { kind: "unreachable", error: String(error?.message ?? error) }))
         .then((status) => {
@@ -1540,6 +1545,60 @@ export function signInState(status, harness) {
 
 /** Whether the create dialog may go ahead with this sign-in state. */
 export const readyToCreate = (state) => ["signed-in", "unknown", "unsupported"].includes(state?.kind);
+
+/** Each machine's `models`: per harness, the models it offers ({ id, label,
+ * efforts }, efforts least to most) and the default model and effort there. */
+export const modelsReader = (ask, options = {}) => statusReader(ask, { op: "models", ttlMs: MODELS_TTL_MS, timeoutMs: MODELS_TIMEOUT_MS, ...options });
+
+const EFFORT_LABELS = { none: "None", minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max", ultra: "Ultra" };
+
+/** The effort a model runs at when none is chosen: the machine's default
+ * effort if the model takes it, else the highest it takes below that. */
+function defaultEffort(efforts, preferred) {
+  if (efforts.includes(preferred)) return preferred;
+  const order = Object.keys(EFFORT_LABELS);
+  const below = efforts.filter((effort) => order.indexOf(effort) >= 0 && order.indexOf(effort) < order.indexOf(preferred));
+  return below.length ? below[below.length - 1] : null;
+}
+
+/** The Model and Effort selects for one harness, or null when the machine
+ * lists no models for it (an older runner, Goose, or not known yet).
+ * `value.model` and `value.effort` are what the agent chose; "" is the
+ * machine's default. A choice the machine no longer offers stays shown, as
+ * unavailable, so the agent's real setting is never hidden. */
+export function modelChoices(models, harness, value = {}) {
+  if (models?.kind !== "ok") return null;
+  const row = models.harnesses.find((entry) => entry?.id === harness);
+  const list = (Array.isArray(row?.models) ? row.models : []).filter((entry) => typeof entry?.id === "string" && entry.id);
+  if (!list.length) return null;
+  const options = list.map((entry) => ({ id: entry.id, label: typeof entry.label === "string" && entry.label ? entry.label : entry.id,
+    efforts: (Array.isArray(entry.efforts) ? entry.efforts : []).filter((effort) => typeof effort === "string") }));
+  const defaultModel = options.some((entry) => entry.id === row.model) ? row.model : options[0].id;
+  let model = value.model || defaultModel;
+  if (!options.some((entry) => entry.id === model)) options.unshift({ id: model, label: `${model} (unavailable)`, unavailable: true, efforts: [] });
+  const efforts = options.find((entry) => entry.id === model).efforts;
+  const fallback = defaultEffort(efforts, row.effort);
+  let effort = value.effort || fallback;
+  const effortOptions = efforts.map((id) => ({ id, label: EFFORT_LABELS[id] ?? id }));
+  if (effort && !efforts.includes(effort)) effortOptions.push({ id: effort, label: `${EFFORT_LABELS[effort] ?? effort} (unavailable)`, unavailable: true });
+  return { model, effort, models: options.map(({ efforts: _, ...rest }) => rest), efforts: effortOptions, defaultModel, defaultEffort: fallback };
+}
+
+/** The model and effort to store after the person picks one (`change` is
+ * `{ model }` or `{ effort }`): "" for the machine's default, so the agent
+ * keeps following it; an effort the new model does not take goes back to
+ * that model's default. */
+export function applyPick(models, harness, value, change) {
+  const next = { model: value?.model ?? "", effort: value?.effort ?? "", ...change };
+  const before = modelChoices(models, harness, next);
+  if (!before) return { model: next.model, effort: next.effort };
+  if ("model" in change && next.effort && !before.efforts.some((entry) => entry.id === next.effort && !entry.unavailable)) next.effort = "";
+  const after = modelChoices(models, harness, next);
+  return {
+    model: after.model === after.defaultModel ? "" : after.model,
+    effort: !next.effort || next.effort === after.defaultEffort ? "" : next.effort,
+  };
+}
 
 /** One sign-in of a harness on a machine, as a small state machine the form
  * renders. The pasted code is passed straight to the machine and never kept
@@ -1794,6 +1853,12 @@ export function beatFrom(reply) {
     custom: !!reply?.custom, defaultPrompt: String(reply?.defaultPrompt ?? "") };
 }
 
+/** Sets an agent's model and effort ("" for the machine's default); the
+ * machine refuses one it does not offer, and restarts a running agent on it. */
+export async function setModel(ask, directory, { pubkey, model, effort, signal }) {
+  return askMachine(ask, await directory.machine(pubkey), { op: "settings.set", pubkey, model, effort }, { signal });
+}
+
 /** Registers the "Black 4 hardware" agent type on `ctx`. `report(error)` hears
  * any failure of its components, so the plugin's Settings card can say so;
  * `sign` mints a door pass (the MCP's `sign_hardware_request`);
@@ -1806,6 +1871,7 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
     ? doorTransport({ request: (input) => ctx.host.request(input), sign })
     : undefined;
   const statuses = statusReader(ask);
+  const modelLists = modelsReader(ask);
   const directory = agentDirectory(ask);
   const remote = hardwareProvider(ask, undefined, directory);
   const beats = heartbeatRemote(ask, directory);
@@ -1817,22 +1883,35 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
   const muted = { color: "var(--text-secondary, inherit)", opacity: 0.8 };
   const row = { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" };
 
-  const Select = ({ label, value, options, onChange, disabled }) =>
+  const Select = ({ label, value, options, onChange, disabled, title }) =>
     h("label", { style: { display: "grid", gap: 4 } }, label,
-      h("select", { value, disabled, onChange: (event) => onChange(event.target.value) },
+      h("select", { value, disabled, title, onChange: (event) => onChange(event.target.value) },
         ...options.map((option) => h("option", { key: option.id, value: option.id, disabled: !!option.unavailable && option.id !== value }, option.label))));
 
-  /** The machine's status, read in an effect and shared across views. */
-  const useStatus = (machineId) => {
-    const [status, setStatus] = React.useState(() => statuses.peek(machineId));
+  /** The machine's status (or its models), read in an effect and shared across views. */
+  const useReader = (reader, machineId) => {
+    const [status, setStatus] = React.useState(() => reader.peek(machineId));
     React.useEffect(() => {
       let live = true;
-      setStatus(statuses.peek(machineId));
-      const off = statuses.subscribe((id) => { if (live && id === machineOf(machineId).id) setStatus(statuses.peek(machineId)); });
-      if (ask) void statuses.read(machineId).then((next) => { if (live) setStatus(next); });
+      setStatus(reader.peek(machineId));
+      const off = reader.subscribe((id) => { if (live && id === machineOf(machineId).id) setStatus(reader.peek(machineId)); });
+      if (ask) void reader.read(machineId).then((next) => { if (live) setStatus(next); });
       return () => { live = false; off(); };
     }, [machineId]);
     return status;
+  };
+  const useStatus = (machineId) => useReader(statuses, machineId);
+  const useModels = (machineId) => useReader(modelLists, machineId);
+
+  /** Model and Effort for one harness, when the machine lists its models. */
+  const ModelPicker = ({ models, harness, value, onPick, disabled, note }) => {
+    const choices = modelChoices(models, harness, value);
+    if (!choices) return null;
+    return h(React.Fragment, null,
+      h(Select, { label: "Model", value: choices.model, options: choices.models, disabled, title: note || undefined,
+        onChange: (model) => onPick(applyPick(models, harness, value, { model })) }),
+      choices.efforts.length > 0 && h(Select, { label: "Effort", value: choices.effort ?? "", options: choices.efforts, disabled,
+        onChange: (effort) => onPick(applyPick(models, harness, value, { effort })) }));
   };
 
   // Buzz's own spinner class (the app ships Tailwind's `animate-spin`).
@@ -1939,6 +2018,7 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
     const value = { ...hardwareDefaults(), ...(config ?? {}) };
     const machine = machineOf(value.machine);
     const status = useStatus(machine.id);
+    const models = useModels(machine.id);
     const options = harnessOptions(status);
     const offered = options.length ? options : HARNESSES;
     const state = ask ? signInState(status, value.harness) : { kind: "unreachable" };
@@ -1948,7 +2028,7 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
     const usable = options.filter((entry) => !entry.unavailable);
     React.useEffect(() => {
       if (status?.kind === "ok" && usable.length && !usable.some((entry) => entry.id === value.harness))
-        onChange({ ...value, harness: usable[0].id }, { suggested: true });
+        onChange({ ...value, harness: usable[0].id, model: "", effort: "" }, { suggested: true });
     }, [status, value.harness]);
     const isReady = readyToCreate(state) && (status?.kind !== "ok" || usable.some((entry) => entry.id === value.harness));
     React.useEffect(() => { onReadyChange?.(isReady); }, [onReadyChange, isReady]);
@@ -1959,8 +2039,9 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
       access && h(LinkPrompt),
       h(Select, { label: "Runs on", value: machine.id, options: MACHINES, disabled, onChange: (id) => onChange({ ...value, machine: id }) }),
       h(Select, { label: "Runs", value: value.harness, options: status?.kind === "ok" && !options.length ? [] : offered, disabled: disabled || (status?.kind === "ok" && !options.length),
-        onChange: (harness) => onChange({ ...value, harness }) }),
+        onChange: (harness) => onChange({ ...value, harness, model: "", effort: "" }) }),
       status?.kind === "ok" && !options.length && h("span", { role: "alert" }, `No harness is installed on the ${machine.label}.`),
+      h(ModelPicker, { models, harness: value.harness, value, disabled, onPick: (pick) => onChange({ ...value, ...pick }) }),
       h(Select, { label: "Answers", value: value.respondTo, options: ANSWERS, disabled, onChange: (respondTo) => onChange({ ...value, respondTo }) }),
       ask
         ? h(SignIn, { machineId: machine.id, harness: value.harness, status, disabled })
@@ -1989,6 +2070,7 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
     const [revision, setRevision] = React.useState(0);
     const [beat, setBeat] = React.useState({ loading: true, minutes: 0, base: "", draft: "", custom: false, defaultPrompt: "" });
     const [beatBusy, setBeatBusy] = React.useState(false);
+    const [picking, setPicking] = React.useState({ saving: false });
 
     React.useEffect(() => directory.subscribe(() => setSeen(directory.peek(pubkey))), [pubkey]);
     React.useEffect(() => {
@@ -2008,7 +2090,9 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
         if (status.status === "fulfilled") {
           const reply = status.value;
           directory.remember(pubkey, { machine: machine.id, harness: reply.harness, respondTo: reply.respondTo });
-          setRun({ loading: false, running: !!reply.running, activated: !!reply.activated, harness: reply.harness, respondTo: reply.respondTo });
+          setRun({ loading: false, running: !!reply.running, activated: !!reply.activated, harness: reply.harness, respondTo: reply.respondTo,
+            ...("model" in reply ? { model: { model: reply.modelChosen ? reply.model : "", effort: reply.effortChosen ? reply.effort : "",
+              shown: reply.model, shownEffort: reply.effort, note: reply.modelNote, problem: reply.modelProblem } } : {}) });
         } else setRun({ loading: false, error: String(status.reason?.message ?? status.reason) });
         if (instructions.status === "fulfilled") setText({ loading: false, base: instructions.value, draft: instructions.value });
         else setText({ loading: false, base: "", draft: "", error: String(instructions.reason?.message ?? instructions.reason) });
@@ -2022,6 +2106,19 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
     const harness = run.harness ?? seen?.harness;
     const respondTo = run.respondTo ?? seen?.respondTo;
     const status = useStatus(machine.id);
+    const models = useModels(machine.id);
+
+    const pick = async (choice) => {
+      if (picking.saving) return;
+      setPicking({ saving: true });
+      try {
+        await setModel(ask, directory, { pubkey, ...choice });
+        setPicking({ saving: false });
+        setRevision((value) => value + 1);
+      } catch (error) {
+        setPicking({ saving: false, error: String(error?.message ?? error) });
+      }
+    };
 
     const restart = async () => {
       if (restarting) return;
@@ -2073,6 +2170,13 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
         h(Line, { title: "Runs on" }, machine.label),
         h(Line, { title: "Runs" }, harnessLabel(harness) ?? (run.loading ? "…" : "Unknown")),
         h(Line, { title: "Answers" }, ANSWERS.find((entry) => entry.id === respondTo)?.label ?? (run.loading ? "…" : "Unknown")),
+        run.model && (modelChoices(models, harness, run.model)
+          ? h("div", { style: { display: "grid", gap: 10 } },
+            h(ModelPicker, { models, harness, value: run.model, disabled: picking.saving || run.loading, note: run.model.note, onPick: (choice) => void pick(choice) }),
+            picking.saving && h("span", { role: "status", style: { ...row, ...muted } }, h(Spinner), "Restarting with it…"))
+          : run.model.shown && h(Line, { title: "Model" }, run.model.shownEffort ? `${run.model.shown} · ${EFFORT_LABELS[run.model.shownEffort] ?? run.model.shownEffort}` : run.model.shown)),
+        run.model?.problem && h("span", { role: "alert" }, run.model.problem),
+        picking.error && h("span", { role: "alert" }, picking.error),
         h(Line, { title: "Status" }, h("div", { style: row }, running,
           h("button", { type: "button", disabled: restarting || run.loading, "aria-busy": restarting, onClick: () => void restart() }, restarting ? h(Spinner) : "Restart"))),
         harness && h(Line, { title: "Sign-in" }, h(SignIn, { machineId: machine.id, harness, status, disabled: false }))),

@@ -7,10 +7,12 @@ holding its key (mode 600), settings and log (agent.log, cut over to
 agent.log.1 past 5 MB), and one buzz-acp process.
 
 Requests: {"op": ...} with op one of
-  provision, activate, profile, instructions.get, instructions.set, remove,
-  start, status, list                     (one agent)
+  provision, activate, profile, instructions.get, instructions.set,
+  settings.set (model, effort), remove, start, status, list   (one agent)
   identity                                (each agent's key and the owner it attests)
   machine.status                          (what this machine can run)
+  models                                  (the models and efforts each harness
+                                           offers, and the defaults here)
   doctor                                  (machine.status plus every check that
                                            an agent can run now; `agentctl doctor`
                                            prints it, deploy.sh runs that)
@@ -20,6 +22,7 @@ Not requests (run from cron or by agentctl itself):
   agentctl supervise          keeps activated agents running; cron starts it
   agentctl login-helper <id>  holds one sign-in open between SSH calls
   agentctl check <harness>    checks a stored sign-in, out of band for machine.status
+  agentctl models claude      makes Claude's model listing again, out of band
 
 Callers: a teammate reaches this machine with their own SSH key, whose
 authorized_keys entry forces `agentctl --caller <label>` (machine/teammates.sh
@@ -748,6 +751,12 @@ def doctor():
         if row["id"] in PINNED and row.get("problem"): problems.append(f"{row['label']}: {row['problem']}.")
         row["ready"] = bool(row["installed"] and row["signedIn"] and not row.get("problem"))
         row["access"] = ACCESS[row["id"]]
+        if row["id"] in DEFAULTS and row["installed"]:
+            # What a new agent runs: from the caches, so doctor stays cheap.
+            picked = choice(row["id"], {})
+            row["model"], row["effort"] = picked.get("model"), picked.get("effort")
+            row["modelsChecked"] = picked.get("checked", True)
+            if picked.get("note"): row["modelNote"] = picked["note"]
     connector = os.access(BLACK4_MCP, os.X_OK)
     if not connector: problems.append("The Black 4 connector (mcp/black4) is missing; run machine/deploy.sh again.")
     active = [d for d in agent_dirs() if read_settings(d).get("auth")]
@@ -770,7 +779,10 @@ def print_doctor():
         if not row["installed"]: continue
         state = "ready" if row["ready"] else row.get("problem") or (
             "signed out" if row["signedIn"] is False else "cannot be signed in from Buzz" if not row["signIn"] else "sign-in unknown")
-        print(f"  {row['label']}: {state}; {row['access']}")
+        model = (f"; new agents run {row['model'] or 'its own default'}" + (f" at {row['effort']} effort" if row.get("effort") else "")
+                 + ("" if row.get("modelsChecked", True) else " (not checked yet)")) if "model" in row else ""
+        print(f"  {row['label']}: {state}; {row['access']}{model}")
+        if row.get("modelNote"): print(f"  {row['label']}: {row['modelNote']}")
     print(f"  Black 4 connector: {'present' if r['connector'] else 'missing'}; cron: {r['cron']}; "
           f"supervisor: {'running' if r['supervisor'] else 'not running'}; disk free: {r['diskFreeGB']} GB")
     for a in r["agents"]:
@@ -819,6 +831,277 @@ def heartbeat_view(s):
             "defaultPrompt": heartbeat_prompt({**s, "heartbeatPrompt": ""}).strip()}
 
 
+# ---------------------------------------------------------------- model and effort
+# Each agent may name a model and a reasoning effort; an empty one takes the
+# harness's default here, the most capable model its subscription offers at
+# high effort (what the owner's own Claude Code runs). Each harness gets them
+# through its own lever, read from the pinned programs on the machine:
+#   Claude Code  ANTHROPIC_MODEL and CLAUDE_CODE_EFFORT_LEVEL. Both beat any
+#                settings file (an agent can write one in its own folder), and
+#                take a full model id the adapter's picker does not list.
+#                buzz-acp's BUZZ_ACP_MODEL does not: claude-agent-acp 0.94 cannot
+#                select claude-fable-5-2, and buzz-acp then keeps the default
+#                model without a word. So it is never set.
+#   Codex        CODEX_CONFIG (codex-acp's JSON config for every thread it
+#                starts): model and model_reasoning_effort.
+#   Grok Build   `grok agent --model M --reasoning-effort E ... stdio`.
+# None of them refuses an unknown model or effort before the first turn, so the
+# choice is checked here against what the harness offers: the models Codex and
+# Grok cache in their homes (they refresh it themselves), and for Claude a
+# listing of the adapter's models plus a one-line call that proves each default
+# full id answers on this sign-in (run/claude-models.json, per token). A model
+# or effort chosen for an agent that is not offered is refused, at the change
+# and at start; a default that is not offered falls back to the next one, and
+# status says so (`modelNote`).
+
+DEFAULTS = {  # harness -> (models to try, most capable first; effort)
+    "claude": (("claude-fable-5-2", "fable", "opus"), "high"),
+    "codex": (("gpt-6-astra", "gpt-6.1-sol"), "high"),
+    "grok": (("grok-4.7", "grok-4.6"), "high"),
+}
+EFFORT_ORDER = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\[\]/-]{0,79}$")
+EFFORT_ID = re.compile(r"^[a-z]{1,16}$")
+CLAUDE_MODELS_TTL = 24 * 3600  # the Claude listing is made again after this
+CLAUDE_MODELS_FAIL_TTL = 10 * 60
+
+
+def effort_sorted(levels):
+    rank = {e: i for i, e in enumerate(EFFORT_ORDER)}
+    seen = [e for e in dict.fromkeys(levels) if isinstance(e, str) and EFFORT_ID.match(e)]
+    return sorted(seen, key=lambda e: rank.get(e, len(rank)))
+
+
+def codex_models():
+    """Codex's own cached listing (models_cache.json in its home), listed rows
+    only, in Codex's order; None when Codex has not fetched one yet."""
+    cache = read_json(HOMES / "codex" / "models_cache.json")
+    if not isinstance(cache, dict) or not isinstance(cache.get("models"), list): return None
+    rows = sorted((m for m in cache["models"] if isinstance(m, dict) and m.get("visibility") == "list" and m.get("slug")),
+                  key=lambda m: m.get("priority") or 0)
+    return [{"id": m["slug"], "label": m.get("display_name") or m["slug"],
+             "efforts": effort_sorted(r.get("effort") for r in m.get("supported_reasoning_levels") or [] if isinstance(r, dict))}
+            for m in rows]
+
+
+def grok_models():
+    """Grok's own cached listing (models_cache.json in its home), visible rows."""
+    cache = read_json(HOMES / "grok" / "models_cache.json")
+    if not isinstance(cache, dict) or not isinstance(cache.get("models"), dict): return None
+    out = []
+    for key, row in cache["models"].items():
+        info = (row or {}).get("info") or {}
+        if info.get("hidden"): continue
+        efforts = [e.get("value") for e in info.get("reasoning_efforts") or [] if isinstance(e, dict)] if info.get("supports_reasoning_effort") else []
+        out.append({"id": info.get("id") or key, "label": info.get("name") or key, "efforts": effort_sorted(efforts)})
+    return out
+
+
+def claude_label(model_id):
+    """claude-fable-5-2 -> Fable 5.2."""
+    parts = model_id.split("-")
+    if parts[:1] != ["claude"] or len(parts) < 3: return model_id
+    return parts[1].capitalize() + " " + ".".join(parts[2:])
+
+
+def claude_efforts(cli):
+    """The effort levels the pinned Claude Code takes, from its own --help."""
+    try:
+        done = subprocess.run([cli, "--help"], env=base_env(), stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+    found = re.search(r"--effort <level>[^(]*\(([a-z, ]+)\)", done.stdout)
+    return effort_sorted(found.group(1).replace(" ", "").split(",")) if found else []
+
+
+def claude_answers(cli, token, model):
+    """True when a one-line call on this sign-in is answered by `model` itself
+    (Claude Code reports the model that answered in modelUsage)."""
+    env = base_env()
+    env["CLAUDE_CODE_OAUTH_TOKEN"] = token
+    try:
+        done = subprocess.run([cli, "-p", "Reply with the single word OK.", "--model", model, "--max-turns", "1", "--output-format", "json"],
+                              cwd=private_dir(RUN / "check"), env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=90)
+        result = json.loads(done.stdout.strip().splitlines()[-1])
+    except (subprocess.TimeoutExpired, OSError, ValueError, IndexError):
+        return None
+    return not result.get("is_error") and model in (result.get("modelUsage") or {})
+
+
+def list_claude_models():
+    """The models Claude Code offers on the stored sign-in: the adapter's own
+    listing (`buzz-acp models`, aliases such as fable and opus), then each
+    default full id that the listing lacks and that answers a one-line call.
+    None when it cannot tell (signed out, offline)."""
+    token, cli = claude_token(), claude_cli()
+    if not token or not cli or not (BIN / "buzz-acp").exists(): return None
+    env = base_env()
+    env["CLAUDE_CODE_OAUTH_TOKEN"] = token
+    try:
+        done = subprocess.run([str(BIN / "buzz-acp"), "models", "--json", "--agent-command", HARNESS["claude"][0], "--agent-args="],
+                              cwd=private_dir(RUN / "check"), env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+        listing = json.loads(done.stdout)
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        return None
+    options = []
+    for option in ((listing.get("stable") or {}).get("configOptions") or []):
+        if isinstance(option, dict) and option.get("category") == "model":
+            options = [o for o in option.get("options") or [] if isinstance(o, dict) and o.get("value") not in (None, "default")]
+    efforts = claude_efforts(cli)
+    rows = [{"id": o["value"], "label": o.get("name") or o["value"], "efforts": efforts} for o in options]
+    listed = {r["id"] for r in rows}
+    extra = []
+    for model in DEFAULTS["claude"][0]:
+        if model in listed or not model.startswith("claude-"): continue
+        answered = claude_answers(cli, token, model)
+        if answered is None: return None
+        if answered: extra.append({"id": model, "label": claude_label(model), "efforts": efforts})
+    return extra + rows
+
+
+def refresh_claude_models(wait=False):
+    """Makes the Claude listing again for the stored sign-in, at most one at a
+    time (run/claude-models.lock); returns at once if one is running, unless `wait`."""
+    lock = open(private_dir(RUN) / "claude-models.lock", "a")
+    try:
+        try: fcntl.flock(lock, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+        except OSError: return
+        token = claude_token()
+        if not token: return
+        cache = read_json(RUN / "claude-models.json", {}) or {}
+        if cache.get("hash") == token_hash(token) and not claude_models_stale(cache): return
+        models = list_claude_models()
+        write_private(RUN / "claude-models.json", json.dumps({"hash": token_hash(token), "at": time.time(), "models": models}))
+    finally:
+        lock.close()
+
+
+def claude_models_stale(cache):
+    ttl = CLAUDE_MODELS_TTL if cache.get("models") else CLAUDE_MODELS_FAIL_TTL
+    return time.time() - (cache.get("at") or 0) >= ttl
+
+
+def claude_models():
+    """The last Claude listing for the stored sign-in, or None (none yet, or
+    another sign-in). A stale one is still used, and made again out of band."""
+    token = claude_token()
+    if not token: return None
+    cache = read_json(RUN / "claude-models.json", {}) or {}
+    if cache.get("hash") != token_hash(token):
+        spawn_models_refresh()
+        return None
+    if claude_models_stale(cache): spawn_models_refresh()
+    return cache.get("models")
+
+
+def spawn_models_refresh():
+    env = {**base_env(), **root_env()}
+    if os.environ.get("AGENTCTL_NO_CRON"): env["AGENTCTL_NO_CRON"] = "1"
+    try:
+        subprocess.Popen([PYTHON, str(SELF), "models", "claude"], env=env, cwd=str(private_dir(RUN)),
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:
+        pass
+
+
+def offered(harness):
+    """[{id, label, efforts}] this harness offers here, or None when this
+    machine cannot tell yet. Cheap: reads caches only."""
+    if harness == "claude": return claude_models()
+    if harness == "codex": return codex_models()
+    if harness == "grok": return grok_models()
+    return None
+
+
+def find_model(models, model):
+    return next((m for m in models if m["id"] == model), None)
+
+
+def choice(harness, settings, models=False):
+    """The model and effort an agent runs with: {model, effort, note, problem}.
+    `problem` (one sentence) when its own choice is not offered here; `note`
+    when a default is not offered and another one stands in. model and effort
+    are None for a harness that takes neither (Goose). `models` is offered(harness)
+    when the caller has it already."""
+    if harness not in DEFAULTS: return {"model": None, "effort": None}
+    tries, default_effort = DEFAULTS[harness]
+    model = (settings.get("model") or "").strip()
+    effort = (settings.get("effort") or "").strip()
+    models = offered(harness) if models is False else models
+    if models is None:  # cannot check yet: what was asked for, or the first default
+        return {"model": model or tries[0], "effort": effort or default_effort, "checked": False}
+    label = LABEL[harness]
+    out = {"model": model, "effort": effort, "checked": True}
+    if model:
+        entry = find_model(models, model)
+        if not entry:
+            return {**out, "problem": f"{label} does not offer the model {model} on this machine. Choose another model for this agent."}
+    else:
+        entry = next((find_model(models, m) for m in tries if find_model(models, m)), None) or (models[0] if models else None)
+        if not entry: return {**out, "model": None, "effort": None, "note": f"{label} listed no models; it runs its own default."}
+        out["model"] = entry["id"]
+        if entry["id"] != tries[0]: out["note"] = f"{tries[0]} is not offered here; {entry['id']} runs instead."
+    if effort:
+        if effort not in entry["efforts"]:
+            return {**out, "problem": f"{entry['label']} does not take the effort {effort}. Choose another effort for this agent."}
+    elif default_effort in entry["efforts"]:
+        out["effort"] = default_effort
+    else:  # the highest one below the default, else none
+        below = [e for e in entry["efforts"] if EFFORT_ORDER.index(e) < EFFORT_ORDER.index(default_effort)] if default_effort in EFFORT_ORDER else []
+        out["effort"] = below[-1] if below else None
+        out["note"] = ((out.get("note") or "") + f" {entry['label']} does not take {default_effort} effort; "
+                       + (f"{out['effort']} instead." if out["effort"] else "it runs its own default.")).strip()
+    return out
+
+
+def launch(harness, picked):
+    """(env, agent args) that make this harness run the picked model and effort."""
+    model, effort = picked.get("model"), picked.get("effort")
+    command, args = HARNESS[harness]
+    env = {}
+    if harness == "claude":
+        if model: env["ANTHROPIC_MODEL"] = model
+        if effort: env["CLAUDE_CODE_EFFORT_LEVEL"] = effort
+    elif harness == "codex":
+        config = {**({"model": model} if model else {}), **({"model_reasoning_effort": effort} if effort else {})}
+        if config: env["CODEX_CONFIG"] = json.dumps(config)
+    elif harness == "grok":
+        extra = (["--model", model] if model else []) + (["--reasoning-effort", effort] if effort else [])
+        parts = args.split(",")
+        args = ",".join(parts[:1] + extra + parts[1:])  # grok agent <options> stdio
+    return env, args
+
+
+def models_reply(wait_claude=True):
+    """The `models` op: per installed harness that takes a model, what it
+    offers ({id, label, efforts}), the default model and effort here, and
+    whether the machine could tell. Claude's listing is made here if missing."""
+    rows = []
+    for hid in DEFAULTS:
+        if not installed(hid): continue
+        if hid == "claude" and wait_claude: refresh_claude_models(wait=True)
+        models = offered(hid)
+        picked = choice(hid, {}, models)
+        rows.append({"id": hid, "label": LABEL[hid], "models": models or [], "checked": models is not None,
+                     "model": picked.get("model"), "effort": picked.get("effort"),
+                     **({"note": picked["note"]} if picked.get("note") else {})})
+    return {"ok": True, "harnesses": rows}
+
+
+def checked_choice(harness, model, effort):
+    """Refuses a model or effort this harness does not offer here (when the
+    machine can tell); returns the cleaned pair, "" meaning the default."""
+    model = model.strip() if isinstance(model, str) else ""
+    effort = effort.strip().lower() if isinstance(effort, str) else ""
+    if model and not MODEL_ID.match(model): fail("model is not a model id")
+    if effort and not EFFORT_ID.match(effort): fail("effort is not an effort level")
+    if (model or effort) and harness not in DEFAULTS:
+        fail(f"{LABEL.get(harness, harness)} takes its model from the machine; it has no model or effort to choose.")
+    picked = choice(harness, {"model": model, "effort": effort})
+    if picked.get("problem"): fail(picked["problem"])
+    return model, effort
+
+
 # ---------------------------------------------------------------- start
 
 def start(d):
@@ -845,8 +1128,11 @@ def _start(d):
         if known_bad(harness):
             fail(f"{LABEL[harness]} is not signed in on this machine. Sign in to {LABEL[harness]} from Buzz first.")
         env = device_env(harness)
+    picked = choice(harness, s)
+    if picked.get("problem"): fail(picked["problem"])
+    model_env, args = launch(harness, picked)
     stop(d)
-    command, args = HARNESS[harness]
+    command = HARNESS[harness][0]
     env.update({
         "BUZZ_PRIVATE_KEY": (d / "key").read_text().strip(),
         # The harness speaks WebSocket to the relay; the CLI below uses HTTPS.
@@ -863,7 +1149,10 @@ def _start(d):
         # skips a heartbeat while its model process sleeps, so a heartbeat
         # agent keeps it on, and runs two turns so a person can still talk
         # to it while a scheduled run is going.
-        (d / "heartbeat.md").write_text(heartbeat_prompt(s))
+        # The model it runs, when that is an exact id (an alias such as
+        # opus is left for the agent to name exactly).
+        exact = picked.get("model") if "-" in (picked.get("model") or "") else ""
+        (d / "heartbeat.md").write_text(heartbeat_prompt({**s, "model": exact}))
         env.update({
             "BUZZ_ACP_LAZY_POOL": "false",
             "BUZZ_ACP_HEARTBEAT_INTERVAL": str(minutes * 60),
@@ -880,7 +1169,9 @@ def _start(d):
     if (s.get("instructions") or "").strip():
         (d / "instructions.md").write_text(s["instructions"])
         env["BUZZ_ACP_SYSTEM_PROMPT_FILE"] = str(d / "instructions.md")
-    if s.get("model"): env["BUZZ_ACP_MODEL"] = s["model"]
+    # Never BUZZ_ACP_MODEL: see "model and effort" above.
+    env.update(model_env)
+    write_private(d / "launch.json", json.dumps({k: picked.get(k) for k in ("model", "effort", "note", "checked")}))
     (d / "work").mkdir(exist_ok=True)
     cap_log(d / "agent.log", AGENT_LOG_CAP)
     log = open(d / "agent.log", "ab")
@@ -1429,7 +1720,23 @@ def community_url(value):
 
 # ---------------------------------------------------------------- requests
 
-CHANGES = {"remove", "activate", "profile", "instructions.set", "start", "heartbeat.set"}
+CHANGES = {"remove", "activate", "profile", "instructions.set", "settings.set", "start", "heartbeat.set"}
+
+
+def model_fields(s, cache=None):
+    """What status and list say about an agent's model: the model and effort
+    it runs with (the default's when it chose none), whether it chose them
+    (modelChosen, effortChosen), and modelNote or modelProblem when the machine
+    has one. `cache` keeps one offered() per harness across a list."""
+    harness = s.get("harness") or "claude"
+    if harness not in DEFAULTS: return {"model": None, "effort": None}
+    if cache is None: cache = {}
+    if harness not in cache: cache[harness] = offered(harness)
+    picked = choice(harness, s, cache[harness])
+    return {"model": picked.get("model"), "effort": picked.get("effort"),
+            "modelChosen": bool(s.get("model")), "effortChosen": bool(s.get("effort")),
+            **({"modelNote": picked["note"]} if picked.get("note") else {}),
+            **({"modelProblem": picked["problem"]} if picked.get("problem") else {})}
 
 
 def may_change(settings):
@@ -1446,6 +1753,7 @@ def handle(req):
     private_dir(AGENTS)
 
     if op == "machine.status": return machine_status()
+    if op == "models": return models_reply()
     if op == "doctor": return doctor()
     if op == "login.start":
         harness = req.get("harness")
@@ -1473,6 +1781,9 @@ def handle(req):
                     and s.get("createdBy") == CALLER):
                 return {"ok": True, "pubkey": d.name}
         community = community_url(req.get("community"))
+        config = req.get("config") or {}
+        harness = config.get("harness") or "claude"
+        model, effort = checked_choice(harness, config.get("model"), config.get("effort"))
         secret = secrets.token_hex(32)
         while not 0 < int(secret, 16) < N: secret = secrets.token_hex(32)
         pubkey = pubkey_of(secret)
@@ -1480,11 +1791,10 @@ def handle(req):
         d.mkdir(mode=0o700)
         fd = os.open(d / "key", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         os.write(fd, secret.encode()); os.close(fd)
-        config = req.get("config") or {}
         write_settings(d, {
             "name": name, "picture": req.get("picture"), "requestId": req.get("requestId"),
             "community": community,
-            "harness": config.get("harness") or "claude", "model": config.get("model") or "",
+            "harness": harness, "model": model, "effort": effort,
             "instructions": config.get("instructions") or "",
             "respondTo": config.get("respondTo") or "owner-only",
             "allow": [k for k in (config.get("allow") or []) if HEX64.match(str(k))],
@@ -1500,18 +1810,19 @@ def handle(req):
              "owner": owner_of(read_settings(d))} for d in agent_dirs()]}
 
     if op == "list":
-        rows = []
+        rows, cache = [], {}
         for d in agent_dirs():
             s = read_settings(d)
             rows.append({"pubkey": d.name, "name": s.get("name"), "harness": s.get("harness"),
                          "respondTo": s.get("respondTo"), "activated": bool(s.get("auth")), "running": bool(running(d)),
-                         "keepsStopping": keeps_stopping(d), "createdBy": s.get("createdBy"), "heartbeat": heartbeat_minutes(s)})
+                         "keepsStopping": keeps_stopping(d), "createdBy": s.get("createdBy"), "heartbeat": heartbeat_minutes(s),
+                         **model_fields(s, cache)})
         return {"ok": True, "agents": rows}
 
     d = folder(req.get("pubkey"))
     if op in CHANGES and d.exists(): may_change(read_settings(d))
     # Asked for in person: the supervisor's backoff starts over.
-    if op in ("start", "activate", "instructions.set") and d.exists(): (d / "restarts.json").unlink(missing_ok=True)
+    if op in ("start", "activate", "instructions.set", "settings.set") and d.exists(): (d / "restarts.json").unlink(missing_ok=True)
     if op == "remove":
         if d.exists():
             with agent_lock(d): stop(d)
@@ -1528,8 +1839,9 @@ def handle(req):
             fail("auth must be a NIP-OA tag: [auth, owner, conditions, signature]")
         s["auth"] = auth
         s["community"] = community_url(req.get("community") or s["community"])
-        for key in ("harness", "model", "instructions", "respondTo", "heartbeat"):
+        for key in ("harness", "model", "effort", "instructions", "respondTo", "heartbeat"):
             if (req.get("config") or {}).get(key) is not None: s[key] = req["config"][key]
+        s["model"], s["effort"] = checked_choice(s.get("harness") or "claude", s.get("model"), s.get("effort"))
         write_settings(d, s)
         pid = start(d)
         ok, detail = publish_profile(d)
@@ -1569,6 +1881,17 @@ def handle(req):
         if s.get("auth"): start(d)
         return {"ok": True}
 
+    if op == "settings.set":
+        # The agent's model and effort; "" is the harness's default here. A
+        # field left out stays as it was. An activated agent restarts on them.
+        harness = s.get("harness") or "claude"
+        model = req["model"] if "model" in req else s.get("model")
+        effort = req["effort"] if "effort" in req else s.get("effort")
+        s["model"], s["effort"] = checked_choice(harness, model, effort)
+        write_settings(d, s)
+        if s.get("auth"): start(d)
+        return {"ok": True, **model_fields(s)}
+
     if op == "start":
         return {"ok": True, "pid": start(d)}
 
@@ -1576,7 +1899,7 @@ def handle(req):
         r = restarts(d)
         return {"ok": True, "running": bool(running(d)), "activated": bool(s.get("auth")),
                 "name": s.get("name"), "harness": s.get("harness"), "respondTo": s.get("respondTo"),
-                "keepsStopping": keeps_stopping(d), "restarts": r.get("count", 0),
+                "keepsStopping": keeps_stopping(d), "restarts": r.get("count", 0), **model_fields(s),
                 **({"nextRestart": int(r["next"])} if r.get("next") and not running(d) else {}),
                 "log": log_tail(d, 1500)}
 
@@ -1597,6 +1920,7 @@ def main(argv=None):
     if argv[:1] == ["doctor"]: sys.exit(print_doctor())
     if argv[:1] == ["login-helper"] and len(argv) == 2: return login_helper(argv[1])
     if argv[:1] == ["check"] and len(argv) == 2 and argv[1] in SIGN_IN: return run_check(argv[1])
+    if argv == ["models", "claude"]: return refresh_claude_models()
     try:
         try: req = json.loads(sys.stdin.read() or "{}")
         except ValueError: fail("request is not JSON")

@@ -780,6 +780,32 @@ def print_doctor():
     return 0 if r["healthy"] else 1
 
 
+# ---------------------------------------------------------------- heartbeat
+# An agent with a heartbeat wakes every N minutes and asks Black 4 what is due.
+# What it does lives in Platform Control (each job's schedule), never here:
+# this holds only whether it wakes and how often.
+
+HEARTBEAT_MIN, HEARTBEAT_MAX = 5, 1440
+
+
+def heartbeat_minutes(s):
+    minutes = s.get("heartbeat")
+    return minutes if isinstance(minutes, int) and not isinstance(minutes, bool) and HEARTBEAT_MIN <= minutes <= HEARTBEAT_MAX else 0
+
+
+def heartbeat_prompt(s):
+    name = (s.get("name") or "a Black 4 agent").replace('"', "'")
+    model = (s.get("model") or "").replace('"', "'")
+    model_text = f'model "{model}"' if model else "model set to your exact model id"
+    return (
+        "Black 4 heartbeat. Call the Black 4 tool start_next_standing_run with "
+        f'agent "{name}" and {model_text}. If due is false, end your turn without posting anything. '
+        "Otherwise do the run exactly as its instructions say, post only where they say (with buzz messages send), "
+        "call finish_standing_run with its runId and each business's outcome, then call start_next_standing_run again. "
+        "Stop asking after 30 minutes of work.\n"
+    )
+
+
 # ---------------------------------------------------------------- start
 
 def start(d):
@@ -817,6 +843,20 @@ def _start(d):
         "BUZZ_ACP_RESPOND_TO": s.get("respondTo") or "owner-only",
         "BUZZ_ACP_LAZY_POOL": "true",
     })
+    minutes = heartbeat_minutes(s)
+    if minutes:
+        # A heartbeat agent wakes on its own and asks Black 4 what is due
+        # (docs/roadmap/job-schedules.md in the platform repository). buzz-acp
+        # skips a heartbeat while its model process sleeps, so a heartbeat
+        # agent keeps it on, and runs two turns so a person can still talk
+        # to it while a scheduled run is going.
+        (d / "heartbeat.md").write_text(heartbeat_prompt(s))
+        env.update({
+            "BUZZ_ACP_LAZY_POOL": "false",
+            "BUZZ_ACP_HEARTBEAT_INTERVAL": str(minutes * 60),
+            "BUZZ_ACP_HEARTBEAT_PROMPT_FILE": str(d / "heartbeat.md"),
+            "BUZZ_ACP_AGENTS": "2",
+        })
     if args: env["BUZZ_ACP_AGENT_ARGS"] = args
     env.update(FULL_ACCESS[harness])
     # buzz-acp declares one MCP server per session and hands it the agent's key
@@ -1376,7 +1416,7 @@ def community_url(value):
 
 # ---------------------------------------------------------------- requests
 
-CHANGES = {"remove", "activate", "profile", "instructions.set", "start"}
+CHANGES = {"remove", "activate", "profile", "instructions.set", "start", "heartbeat.set"}
 
 
 def may_change(settings):
@@ -1452,7 +1492,7 @@ def handle(req):
             s = read_settings(d)
             rows.append({"pubkey": d.name, "name": s.get("name"), "harness": s.get("harness"),
                          "respondTo": s.get("respondTo"), "activated": bool(s.get("auth")), "running": bool(running(d)),
-                         "keepsStopping": keeps_stopping(d), "createdBy": s.get("createdBy")})
+                         "keepsStopping": keeps_stopping(d), "createdBy": s.get("createdBy"), "heartbeat": heartbeat_minutes(s)})
         return {"ok": True, "agents": rows}
 
     d = folder(req.get("pubkey"))
@@ -1475,7 +1515,7 @@ def handle(req):
             fail("auth must be a NIP-OA tag: [auth, owner, conditions, signature]")
         s["auth"] = auth
         s["community"] = community_url(req.get("community") or s["community"])
-        for key in ("harness", "model", "instructions", "respondTo"):
+        for key in ("harness", "model", "instructions", "respondTo", "heartbeat"):
             if (req.get("config") or {}).get(key) is not None: s[key] = req["config"][key]
         write_settings(d, s)
         pid = start(d)
@@ -1489,6 +1529,16 @@ def handle(req):
         ok, detail = publish_profile(d)
         if not ok: fail("profile was not published: " + detail)
         return {"ok": True}
+
+    if op == "heartbeat.set":
+        minutes = req.get("minutes")
+        if minutes not in (0, None) and (not isinstance(minutes, int) or isinstance(minutes, bool)
+                                         or not HEARTBEAT_MIN <= minutes <= HEARTBEAT_MAX):
+            fail(f"minutes is 0 (off) or {HEARTBEAT_MIN} to {HEARTBEAT_MAX}")
+        s["heartbeat"] = minutes or 0
+        write_settings(d, s)
+        if s.get("auth"): start(d)
+        return {"ok": True, "heartbeat": s["heartbeat"]}
 
     if op == "instructions.get":
         return {"ok": True, "instructions": s.get("instructions") or ""}

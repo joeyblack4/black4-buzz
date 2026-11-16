@@ -382,6 +382,7 @@ class Start(Base):
         prompt = Path(env["BUZZ_ACP_HEARTBEAT_PROMPT_FILE"]).read_text()
         self.assertIn("start_next_standing_run", prompt)
         self.assertIn("without posting", prompt)
+        self.assertIn("call_tool", prompt, "the core toolset reaches start_next_standing_run through call_tool")
         listed = self.req(op="list")["agents"][0]
         self.assertEqual(listed["heartbeat"], 15)
         self.assertEqual(self.req(op="heartbeat.set", pubkey=d.name, minutes=2)["ok"], False)

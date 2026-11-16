@@ -799,10 +799,11 @@ def heartbeat_prompt(s):
     model_text = f'model "{model}"' if model else "model set to your exact model id"
     return (
         "Black 4 heartbeat. Call the Black 4 tool start_next_standing_run with "
-        f'agent "{name}" and {model_text}. If due is false, end your turn without posting anything. '
+        f'agent "{name}" and {model_text} (if your tool list does not show it, use the Black 4 call_tool '
+        "with that name and those arguments). If due is false, end your turn without posting anything. "
         "Otherwise do the run exactly as its instructions say, post only where they say (with buzz messages send), "
-        "call finish_standing_run with its runId and each business's outcome, then call start_next_standing_run again. "
-        "Stop asking after 30 minutes of work.\n"
+        "call finish_standing_run (the same way) with its runId and each business's outcome, then call "
+        "start_next_standing_run again. Stop asking after 30 minutes of work.\n"
     )
 
 

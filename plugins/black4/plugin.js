@@ -53,7 +53,9 @@ export const AUTHKIT = Object.freeze({
   scope: "openid profile email offline_access",
   params: Object.freeze({ resource: "https://api.black4.ai/mcp" }),
 });
-export const MCP_URL = "https://api.black4.ai/mcp?tools=core";
+// The same Black 4 MCP every agent uses, listing every tool: Buzz gets no
+// connection of its own (Joey, 2026-11-16).
+export const MCP_URL = "https://api.black4.ai/mcp";
 const MCP_PROTOCOL = "2025-06-18";
 const HOST_TIMEOUT_MAX_MS = 180 * 1000; // ctx.host.request's own ceiling
 const REFRESH_EARLY_MS = 2 * 60 * 1000; // refresh this long before an access token ends

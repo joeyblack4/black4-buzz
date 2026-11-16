@@ -144,7 +144,7 @@ const envFor = (id, url, extra = {}) => ({
   BUZZ_PRIVATE_KEY: hex(id.agentSecret), BUZZ_AUTH_TAG: JSON.stringify(id.authTag), BLACK4_MCP_URL: url, ...extra,
 });
 
-test("linked owner: forwards initialize, core tools, calls, SSE and notifications", async (t) => {
+test("linked owner: forwards initialize, every tool, calls, SSE and notifications", async (t) => {
   const id = identity();
   const fake = await startFakeMcp({ linked: new Set([id.owner]) });
   t.after(fake.close);
@@ -154,7 +154,6 @@ test("linked owner: forwards initialize, core tools, calls, SSE and notification
   const list = await c.request("tools/list");
   const names = list.result.tools.map((x) => x.name);
   assert.ok(names.includes("find_tools") && names.includes("call_tool"));
-  assert.ok(!names.includes("list_reviews"), "?tools=core keeps the list small");
   assert.ok(!names.includes(STATUS_TOOL));
   const who = await c.request("tools/call", { name: "whoami", arguments: {} });
   assert.deepEqual(JSON.parse(who.result.content[0].text), { agent: id.agent, owner: id.owner });
@@ -168,7 +167,7 @@ test("linked owner: forwards initialize, core tools, calls, SSE and notification
   assert.match(boom.result.content[0].text, /HTTP 500: kaboom/);
   await settle();
   assert.ok(fake.requests.every((r) => !r.verdict.error), "every request verified");
-  assert.ok(fake.requests.every((r) => r.url.endsWith("/mcp?tools=core")));
+  assert.ok(fake.requests.every((r) => r.url.endsWith("/mcp")), "no toolset: every tool, as any agent sees it");
   assert.equal(new Set(fake.requests.map((r) => r.headers.authorization)).size, fake.requests.length, "a fresh event per request");
   assert.equal(fake.requests.find((r) => r.body.includes("notifications/initialized")).verdict.owner, id.owner);
   assert.ok(fake.requests.slice(1).every((r) => r.headers["mcp-protocol-version"] === "2025-06-18"));
@@ -289,5 +288,5 @@ test("never writes the key, the attestation signature or the header", async (t) 
   assert.ok(!out.includes(hex(id.agentSecret)));
   assert.ok(!out.includes(id.authTag[3]));
   assert.ok(!out.includes("Nostr "));
-  assert.match(c.stderr(), /forwarding to .*\/mcp\?tools=core/);
+  assert.match(c.stderr(), /forwarding to \S*\/mcp for owner/);
 });

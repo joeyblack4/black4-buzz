@@ -18,7 +18,7 @@ const whoami = (message) => message.method === "tools/list"
 
 /** The plugin on a test host. `module` reuses a plugin module (one Buzz run)
  * across harnesses; `opens` scripts what navigation.open answers. */
-async function harness(t, { signedIn = false, polls = ["authorization_pending", "authorization_pending", "authorization_pending", "ok"], module, browser = true, opens = () => ({ status: "opened" }), owner, relay = true } = {}) {
+async function harness(t, { signedIn = false, polls = ["authorization_pending", "authorization_pending", "authorization_pending", "ok"], module, browser = true, opens = () => ({ status: "opened" }), owner, revision, relay = true } = {}) {
   const plugin = module ?? await freshPlugin();
   const authkit = fakeAuthKit({ polls, interval: 0.02 });
   const mcp = fakeMcp(authkit, { answer: whoami });
@@ -41,7 +41,7 @@ async function harness(t, { signedIn = false, polls = ["authorization_pending", 
     navigation: { open: async (target) => { opened.push(target); return opens(opened.length); } },
     effect: (fn) => { const off = fn(); if (off) cleanups.push(off); },
     host: { request: net.request },
-    ...(owner ? { pluginOwner: { id: owner, revision: "test" } } : {}),
+    ...(owner || revision ? { pluginOwner: { id: owner ?? "ai.black4", revision: revision ?? "test" } } : {}),
     ...(relay ? { relay: { snapshot: () => ({ status: "ready", viewer: null, session: {} }), subscribe: (listener) => { relayListeners.add(listener); return () => relayListeners.delete(listener); } } } : {}),
   };
   plugin.apply(ctx);
@@ -78,6 +78,19 @@ const text = (node) => texts(node).join(" ");
 
 // ---- the prompt: when Buzz opens Settings → Black 4 ----
 
+/** A device's localStorage, as the webview keeps it across launches. */
+function deviceStorage(t, { broken = false } = {}) {
+  const values = new Map();
+  const previous = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  const storage = {
+    getItem: (key) => { if (broken) throw new Error("SecurityError"); return values.has(key) ? values.get(key) : null; },
+    setItem: (key, value) => { if (broken) throw new Error("SecurityError"); values.set(key, String(value)); },
+  };
+  Object.defineProperty(globalThis, "localStorage", { value: storage, configurable: true, writable: true });
+  t.after(() => { if (previous) Object.defineProperty(globalThis, "localStorage", previous); else delete globalThis.localStorage; });
+  return values;
+}
+
 test("installed and enabled while signed out: Buzz opens Settings → Black 4 once, at its Sign in", async (t) => {
   const app = await harness(t);
   await settle();
@@ -88,6 +101,55 @@ test("installed and enabled while signed out: Buzz opens Settings → Black 4 on
   assert.equal(signIn.props.className, "b4-go", "the primary button");
   await app.communityChanged();
   assert.equal(app.opened.length, 1, "dismissed, it does not come back in this run");
+});
+
+test("an ordinary launch opens nothing: Sign in waits in place on every surface, with the dock dot", async (t) => {
+  const device = deviceStorage(t);
+  const install = await harness(t, { revision: "rev-1" });
+  await settle();
+  assert.equal(install.opened.length, 1, "the first activation of a revision opens Settings");
+  assert.equal(device.get("ai.black4.signin-prompted"), "rev-1", "only the revision is remembered");
+  // Quit and launch again: a new module (memory gone), the same device.
+  const launch = await harness(t, { revision: "rev-1", browser: false });
+  await settle();
+  await launch.communityChanged();
+  assert.deepEqual(launch.opened, [], "no Settings takeover on a launch");
+  for (const view of [launch.settings(), launch.panel(), launch.preview(), launch.workspace()]) assert.ok(button(view, "Sign in to Black 4"));
+  assert.equal(launch.badge().props["aria-label"], "Sign in to Black 4");
+  // Signing in, then losing it while Buzz runs, still prompts once.
+  launch.click("Sign in to Black 4");
+  await launch.connected();
+  launch.authkit.refresh.clear();
+  launch.authkit.access.clear();
+  launch.click("Reconnect");
+  await until(() => button(launch.settings(), "Sign in to Black 4"), { what: "signed out" });
+  assert.equal(launch.opened.length, 1, "a sign-in that ended while running opens Settings");
+});
+
+test("an update (a new revision) opens Sign in once again; storage that fails falls back to once per run", async (t) => {
+  const device = deviceStorage(t);
+  device.set("ai.black4.signin-prompted", "rev-1");
+  const updated = await harness(t, { revision: "rev-2" });
+  await settle();
+  assert.equal(updated.opened.length, 1);
+  assert.equal(device.get("ai.black4.signin-prompted"), "rev-2");
+  const unremembered = await harness(t, { revision: "rev-2", opens: () => ({ status: "superseded" }) });
+  await settle();
+  assert.equal(unremembered.opened.length, 0, "already shown for this revision");
+});
+
+test("without working storage, the first activation in a run still opens Sign in", async (t) => {
+  deviceStorage(t, { broken: true });
+  const app = await harness(t, { revision: "rev-1" });
+  await settle();
+  assert.equal(app.opened.length, 1);
+});
+
+test("an open that never showed is not remembered as shown", async (t) => {
+  const device = deviceStorage(t);
+  const app = await harness(t, { revision: "rev-1", opens: () => ({ status: "superseded" }) });
+  await settle();
+  assert.equal(device.has("ai.black4.signin-prompted"), false);
 });
 
 test("the section follows the installed plugin's id", async (t) => {

@@ -69,6 +69,7 @@
         "navigation.open=>.status",
         "pluginOwner",
         "pluginOwner.id",
+        "pluginOwner.revision",
         "relay.snapshot",
         "relay.subscribe",
         "relay.snapshot=>.status",

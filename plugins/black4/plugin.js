@@ -90,7 +90,19 @@ export function memoryStore() {
 export const signInMemory = memoryStore(); // this Buzz run's sign-in (tests seed it)
 /** Whether the plugin may still open Settings → Black 4 by itself in this Buzz
  * run: once, until a sign-in succeeds (module memory, like the sign-in). */
-export const signInPrompt = { due: true };
+export const signInPrompt = { due: true, connected: false };
+/** Remembers, on this device, which installed revision already opened its
+ * Sign in by itself: one revision opens Settings once, on its first
+ * activation, never on every launch. Not a secret: a revision string only. */
+export const PROMPTED_KEY = "ai.black4.signin-prompted";
+const promptedRevision = {
+  seen(revision) {
+    try { return globalThis.localStorage?.getItem(PROMPTED_KEY) === revision; } catch { return false; }
+  },
+  remember(revision) {
+    try { globalThis.localStorage?.setItem(PROMPTED_KEY, revision); } catch {}
+  },
+};
 
 /** One person's Black 4 sign-in. `request` is `ctx.host.request`. The state
  * it reports (`subscribe`/`snapshot`) never holds a token. */
@@ -580,26 +592,35 @@ export function apply(ctx) {
   };
   // ---- the sign-in prompt -------------------------------------------------
   // Nothing works until the person signs in, so the plugin opens Settings →
-  // Black 4, its Sign in button focused, when it finds itself signed out: on
-  // activation, and when a sign-in ends later. Once per Buzz run; a successful
+  // Black 4, its Sign in button focused, by itself in two cases only:
+  // - "installed": the first activation of an installed revision (a fresh
+  //   install, or an update, which also starts signed out), once per device;
+  // - "ended": a sign-in that worked in this Buzz run ended (refused refresh).
+  // An ordinary launch opens nothing: every surface shows Sign in in place
+  // and the Reviews dock entry carries a dot. Once per Buzz run; a successful
   // sign-in arms it again. Sign out, Cancel and a declined or expired code
   // never prompt. An open that never showed (superseded, or failed without
   // showing anything) is tried once more, on the next community change.
   const settingsSection = `${ctx.pluginOwner?.id ?? "ai.black4"}/connection`;
+  const revision = String(ctx.pluginOwner?.revision ?? "unknown");
   let missed = 0; // opens in a row that never showed
-  const promptSignIn = ({ retry = false } = {}) => {
-    if (retry && missed !== 1) return;
+  let missedReason = null;
+  const promptSignIn = (reason, { retry = false } = {}) => {
+    if (retry) { if (missed !== 1) return; reason = missedReason; }
+    if (reason === "installed" && promptedRevision.seen(revision)) return;
     if (!signInPrompt.due || stopped || typeof ctx.navigation?.open !== "function") return;
     signInPrompt.due = false;
-    const miss = () => { missed += 1; if (missed === 1) signInPrompt.due = true; };
+    const miss = () => { missed += 1; missedReason = reason; if (missed === 1) signInPrompt.due = true; };
+    const shown = () => { missed = 0; if (reason === "installed") promptedRevision.remember(revision); };
     try {
       Promise.resolve(ctx.navigation.open({ version: 1, kind: "settings", section: settingsSection }))
         .then((result) => {
           if (result?.status === "superseded" || (result?.status === "failed" && !result.presented)) miss();
-          else missed = 0;
+          else shown();
         }, miss);
     } catch { miss(); }
   };
+  const signedOutWhy = () => (signInPrompt.connected ? "ended" : "installed");
   /** Opens a sign-in link in the default browser, as a click on it would:
    * Buzz sends a link with target _blank to the system browser. */
   const openInBrowser = (url) => {
@@ -893,7 +914,7 @@ export function apply(ctx) {
         update({ status: "starting", detail: "" });
         const restored = await session.restore();
         if (attempt !== generation || stopped) return;
-        if (!restored) { update({ status: "signed-out", detail: session.snapshot().detail ?? "" }); promptSignIn(); return; }
+        if (!restored) { update({ status: "signed-out", detail: session.snapshot().detail ?? "" }); promptSignIn("installed"); return; }
       }
       update({ status: "starting", detail: "" });
       mcp.reset();
@@ -912,6 +933,7 @@ export function apply(ctx) {
       } catch {}
       if (attempt !== generation || stopped) return;
       retry = 0;
+      signInPrompt.connected = true; // from here, signed out means a sign-in ended
       update({ status: "connected", detail: "", account, instructions: init?.instructions ?? "" });
       syncHardware();
       void pollQueue();
@@ -920,7 +942,7 @@ export function apply(ctx) {
       void checkLink({ link });
     } catch (error) {
       if (attempt !== generation || stopped) return;
-      if (error?.code === "signin" || !session.signedIn) { update({ status: "signed-out", detail: error?.message ?? "" }); promptSignIn(); }
+      if (error?.code === "signin" || !session.signedIn) { update({ status: "signed-out", detail: error?.message ?? "" }); promptSignIn(signedOutWhy()); }
       else scheduleRetry(error?.message ?? String(error));
     } finally {
       if (attempt === generation) starting = false;
@@ -990,7 +1012,7 @@ export function apply(ctx) {
       generation += 1;
       stopQueuePolling();
       update({ status: "signed-out", detail: view.detail ?? "" });
-      promptSignIn();
+      promptSignIn("ended");
     }
   }));
 
@@ -1021,7 +1043,7 @@ export function apply(ctx) {
     ctx.effect(() => ctx.relay.subscribe(() => {
       const key = viewerKey();
       if (state.status === "connected" && key !== (state.agentLink.key ?? null)) void checkLink();
-      if (state.status === "signed-out") promptSignIn({ retry: true });
+      if (state.status === "signed-out") promptSignIn(null, { retry: true });
     }));
   }
 

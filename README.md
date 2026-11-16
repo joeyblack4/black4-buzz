@@ -35,8 +35,8 @@ Terminal, Node, Tailscale or an SSH key.
    Commerce Mac's door (`black4-commerce-01.tail50b7f0.ts.net`). Choose
    **Install plugin**.
 2. **Turn it on** in **Settings → Plugins**. Plugins start off.
-3. **Sign in.** Once the plugin is on, Buzz opens **Settings → Black 4** by
-   itself with **Sign in to Black 4** ready (press Return or click it). Your
+3. **Sign in.** The first time the plugin starts, Buzz opens **Settings →
+   Black 4** by itself with **Sign in to Black 4** ready (press Return or click it). Your
    browser opens with the code already filled in: check that it matches the
    large code Buzz shows, then approve. Buzz updates by itself.
    While you are signed out, the same **Sign in to Black 4** button also sits
@@ -64,9 +64,12 @@ Terminal, Node, Tailscale or an SSH key.
   token: opening a collection starts relay sync queries, a collection belongs
   to one identity and one community, and it is stored as plaintext on disk
   where local agents can read it. The cost is one browser approval per
-  launch: Buzz opens **Settings → Black 4** at its Sign in once after each
-  launch (dismiss it and it stays away until the next launch), and once more
-  if a sign-in ends while Buzz runs. Access tokens are refreshed before they expire. Tokens never go into
+  launch. Buzz opens **Settings → Black 4** at its Sign in by itself only the
+  first time a newly installed or updated plugin starts, and if a sign-in ends
+  while Buzz runs. On an ordinary launch nothing opens: choose **Sign in to
+  Black 4** wherever you are (Settings → Black 4, Reviews, a review in a
+  message, the hardware form); a dot on the Reviews entry reminds you.
+  Access tokens are refreshed before they expire. Tokens never go into
   logs, into the Settings card or to any agent.
 - **Until you sign in after a launch**, Buzz's own agents can't use Black 4
   tools, and **Black 4 hardware** isn't offered. Your existing hardware agents

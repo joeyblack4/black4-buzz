@@ -365,6 +365,30 @@ class Start(Base):
         self.assertEqual(env["BUZZ_ACP_MCP_COMMAND"], str(self.a.ROOT / "mcp" / "black4"))
         self.assertEqual(Path(env["BUZZ_ACP_MCP_COMMAND"]).stem, "black4")
 
+    def test_heartbeat_keeps_the_model_on_and_asks_black4_what_is_due(self):
+        self.sign_in()
+        d = self.make_agent()
+        self.assertTrue(self.req(op="start", pubkey=d.name)["ok"])
+        env = self.wait_env(d)
+        self.assertEqual(env["BUZZ_ACP_LAZY_POOL"], "true", "no heartbeat: the model sleeps until a mention")
+        self.assertNotIn("BUZZ_ACP_HEARTBEAT_INTERVAL", env)
+        (d / "work" / "env.json").unlink()
+        r = self.req(op="heartbeat.set", pubkey=d.name, minutes=15)
+        self.assertEqual(r, {"ok": True, "heartbeat": 15})
+        env = self.wait_env(d)
+        self.assertEqual(env["BUZZ_ACP_LAZY_POOL"], "false")
+        self.assertEqual(env["BUZZ_ACP_HEARTBEAT_INTERVAL"], "900")
+        self.assertEqual(env["BUZZ_ACP_AGENTS"], "2")
+        prompt = Path(env["BUZZ_ACP_HEARTBEAT_PROMPT_FILE"]).read_text()
+        self.assertIn("start_next_standing_run", prompt)
+        self.assertIn("without posting", prompt)
+        listed = self.req(op="list")["agents"][0]
+        self.assertEqual(listed["heartbeat"], 15)
+        self.assertEqual(self.req(op="heartbeat.set", pubkey=d.name, minutes=2)["ok"], False)
+        (d / "work" / "env.json").unlink()
+        self.assertEqual(self.req(op="heartbeat.set", pubkey=d.name, minutes=0), {"ok": True, "heartbeat": 0})
+        self.assertEqual(self.wait_env(d)["BUZZ_ACP_LAZY_POOL"], "true")
+
     def wait_env(self, d):
         for _ in range(30):
             if (d / "work" / "env.json").exists(): break

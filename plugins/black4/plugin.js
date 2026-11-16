@@ -583,17 +583,22 @@ export function apply(ctx) {
   // Black 4, its Sign in button focused, when it finds itself signed out: on
   // activation, and when a sign-in ends later. Once per Buzz run; a successful
   // sign-in arms it again. Sign out, Cancel and a declined or expired code
-  // never prompt. An open that never showed (failed, superseded) is tried
-  // again on the next community change.
+  // never prompt. An open that never showed (superseded, or failed without
+  // showing anything) is tried once more, on the next community change.
   const settingsSection = `${ctx.pluginOwner?.id ?? "ai.black4"}/connection`;
-  const promptSignIn = () => {
+  let missed = 0; // opens in a row that never showed
+  const promptSignIn = ({ retry = false } = {}) => {
+    if (retry && missed !== 1) return;
     if (!signInPrompt.due || stopped || typeof ctx.navigation?.open !== "function") return;
     signInPrompt.due = false;
-    const rearm = () => { signInPrompt.due = true; };
+    const miss = () => { missed += 1; if (missed === 1) signInPrompt.due = true; };
     try {
       Promise.resolve(ctx.navigation.open({ version: 1, kind: "settings", section: settingsSection }))
-        .then((result) => { if (result?.status === "failed" || result?.status === "superseded") rearm(); }, rearm);
-    } catch { rearm(); }
+        .then((result) => {
+          if (result?.status === "superseded" || (result?.status === "failed" && !result.presented)) miss();
+          else missed = 0;
+        }, miss);
+    } catch { miss(); }
   };
   /** Opens a sign-in link in the default browser, as a click on it would:
    * Buzz sends a link with target _blank to the system browser. */
@@ -954,12 +959,14 @@ export function apply(ctx) {
     }
     if (stopped || mine !== signInTicket) return;
     signInPrompt.due = true; // a sign-in that ends later may prompt once more
+    missed = 0;
     update({ signIn: null });
     linkOnConnect = true;
     reconnect();
   };
   const cancelSignIn = () => {
     signInTicket += 1;
+    missed = 0;
     session.cancel();
     update({ status: "signed-out", signIn: null, detail: "" });
   };
@@ -971,6 +978,7 @@ export function apply(ctx) {
     clearTimeout(retryTimer);
     stopQueuePolling();
     signingOut = true;
+    missed = 0;
     try { await session.signOut(); } finally { signingOut = false; }
     hardware.withdraw();
     update({ status: "signed-out", detail: "", account: null, hardware: "hidden" });
@@ -1013,7 +1021,7 @@ export function apply(ctx) {
     ctx.effect(() => ctx.relay.subscribe(() => {
       const key = viewerKey();
       if (state.status === "connected" && key !== (state.agentLink.key ?? null)) void checkLink();
-      if (state.status === "signed-out") promptSignIn();
+      if (state.status === "signed-out") promptSignIn({ retry: true });
     }));
   }
 
@@ -2198,6 +2206,7 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
 
     React.useEffect(() => directory.subscribe(() => setSeen(directory.peek(pubkey))), [pubkey]);
     React.useEffect(() => {
+      if (signedOut) return undefined; // read once signed in (Sign in shows above)
       const controller = new AbortController();
       const { signal } = controller;
       setRun((prior) => ({ ...prior, loading: true, error: undefined }));
@@ -2288,9 +2297,10 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
       : run.error ? h("span", { role: "alert" }, run.error)
         : h("span", null, run.running ? "Running" : run.activated === false ? "Not set up" : "Stopped");
     const dirty = text.draft !== text.base;
+    if (signedOut && SignInPrompt) return h("div", { style: { display: "grid", gap: 16 } },
+      settingsHost?.typeControl?.(false), h(SignInPrompt, null), settingsContent);
     return h("div", { style: { display: "grid", gap: 16 } },
       settingsHost?.typeControl?.(false),
-      signedOut && SignInPrompt ? h(SignInPrompt, null) : null,
       h("div", { style: { display: "grid", gap: 10 } },
         h(Line, { title: "Runs on" }, machine.label),
         h(Line, { title: "Runs" }, harnessLabel(harness) ?? (run.loading ? "…" : "Unknown")),

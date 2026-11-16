@@ -26,12 +26,13 @@ async function harness(t, { signedIn = false, polls = ["authorization_pending", 
   if (signedIn) await plugin.signInMemory.save(authkit.issue().refresh_token);
   const opened = [];
   const regs = {};
+  const tools = new Map();
   const relayListeners = new Set();
   const cleanups = [];
   const h = (type, props, ...children) => ({ type, props: props ?? {}, children });
   const ctx = {
     react: { createElement: h, useState: (v) => [typeof v === "function" ? v() : v, () => {}], useEffect: () => {}, useRef: (v) => ({ current: v }), Component: class { constructor(props) { this.props = props; } } },
-    agents: { snapshot: () => ({ running: [] }), addTool: () => () => {}, register: () => {} },
+    agents: { snapshot: () => ({ running: [] }), addTool: (tool) => { tools.set(tool.name, tool); return () => tools.delete(tool.name); }, register: () => {} },
     settingsCards: { register: (value) => { regs.card = value; } },
     pages: { register: (value) => { regs.page = value; } },
     panels: { register: (value) => { regs.panel = value; } },
@@ -47,7 +48,7 @@ async function harness(t, { signedIn = false, polls = ["authorization_pending", 
   t.after(() => { for (const off of cleanups.reverse()) off(); });
   const settings = () => expand(regs.card.component());
   return {
-    plugin, authkit, mcp, opened, regs,
+    plugin, authkit, mcp, opened, regs, tools,
     settings,
     panel: (target = QUEUE) => expand(regs.panel.component({ target })),
     preview: () => expand(regs.preview.component({ url: REVIEW, open() {} })),
@@ -110,7 +111,7 @@ test("turned off and on again in the same run: no second prompt", async (t) => {
   assert.equal(again.opened.length, 0);
 });
 
-test("an open that never showed (failed or superseded) is tried again on the next community change", async (t) => {
+test("an open that never showed (failed or superseded) is tried once more on the next community change", async (t) => {
   for (const status of ["failed", "superseded"]) {
     const app = await harness(t, { opens: (n) => ({ status: n === 1 ? status : "opened" }) });
     await settle();
@@ -120,6 +121,14 @@ test("an open that never showed (failed or superseded) is tried again on the nex
     await app.communityChanged();
     assert.equal(app.opened.length, 2, "and once shown, not again");
   }
+  const never = await harness(t, { opens: () => ({ status: "superseded" }) });
+  await settle();
+  for (let i = 0; i < 3; i++) await never.communityChanged();
+  assert.equal(never.opened.length, 2, "one retry at most");
+  const shownFailure = await harness(t, { opens: () => ({ status: "failed", reason: "unavailable", presented: true }) });
+  await settle();
+  await shownFailure.communityChanged();
+  assert.equal(shownFailure.opened.length, 1, "a failure Buzz showed the person is not repeated");
 });
 
 test("Sign out, Cancel, an expired code and a declined sign-in never open Settings", async (t) => {
@@ -127,16 +136,19 @@ test("Sign out, Cancel, an expired code and a declined sign-in never open Settin
   await app.connected();
   app.click("Sign out");
   await settle();
-  assert.deepEqual(app.opened, [], "Sign out is the person's own choice");
+  await app.communityChanged();
+  assert.deepEqual(app.opened, [], "Sign out is the person's own choice, also after a community change");
   app.click("Sign in to Black 4");
   await app.waitingForCode();
   app.click("Cancel");
   await settle();
+  await app.communityChanged();
   assert.deepEqual(app.opened, [], "Cancel");
   for (const poll of ["expired_token", "access_denied"]) {
     app.authkit.polls = [poll];
     app.click("Sign in to Black 4");
     await until(() => button(app.settings(), "Sign in to Black 4") && /expired|declined/.test(text(app.settings())), { what: poll });
+    await app.communityChanged();
     assert.deepEqual(app.opened, [], poll);
   }
 });
@@ -156,6 +168,20 @@ test("a sign-in that ends later (refresh refused) opens Settings once, showing w
   assert.match(text(app.settings()), /sign-in ended/i);
   await app.communityChanged();
   assert.equal(app.opened.length, 2, "and only once");
+});
+
+test("a sign-in that ends while idle (an agent's call finds it revoked) opens Settings once", async (t) => {
+  const app = await harness(t, { signedIn: true });
+  await app.connected();
+  assert.deepEqual(app.opened, []);
+  app.authkit.refresh.clear();
+  app.authkit.access.clear();
+  await assert.rejects(app.tools.get("black4_whoami").call({}, {}, {}));
+  await until(() => button(app.settings(), "Sign in to Black 4"), { what: "signed out" });
+  assert.deepEqual(app.opened, [{ version: 1, kind: "settings", section: SECTION }]);
+  assert.match(text(app.settings()), /sign-in ended/i);
+  await app.communityChanged();
+  assert.equal(app.opened.length, 1);
 });
 
 // ---- Sign in itself ----
@@ -339,9 +365,11 @@ test("Black 4 hardware: a sign-in that ended shows Sign in in the form (not read
 
   status = "signed-out";
   const settingsTab = React.createElement(type.tabs[0].component, { agent: { pubkey: "a".repeat(64) }, settingsHost: { typeControl: () => null }, settingsContent: null });
+  const before = asked.filter((op) => op === "status").length;
   tree = await settleTree(settingsTab);
   assert.ok(has(tree, isPrompt), "the agent's Settings shows Sign in");
-  const before = asked.filter((op) => op === "status").length;
+  assert.doesNotMatch(treeText(tree), /Restart|Instructions|Checking/, "and nothing that needs the machine");
+  assert.equal(asked.filter((op) => op === "status").length, before, "nothing is asked of the machine while signed out");
   status = "connected";
   tree = await settleTree(settingsTab);
   assert.equal(has(tree, isPrompt), false);

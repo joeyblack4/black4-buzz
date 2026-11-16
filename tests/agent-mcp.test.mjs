@@ -12,7 +12,7 @@ if (!existsSync(new URL("node_modules/@noble/curves/package.json", DIR))) {
   throw new Error("The connector's dependency is missing: run  npm ci --prefix bridge/black4-agent-mcp");
 }
 const CONNECTOR = new URL("black4-agent-mcp.mjs", DIR).pathname;
-const { schnorr, decodeNsec, secretKey, parseAuthTag, signRequest, signedUrl, eventId, STATUS_TOOL } = await import(CONNECTOR);
+const { schnorr, decodeNsec, secretKey, parseAuthTag, signRequest, signedUrl, eventId, STATUS_TOOL, agentLabel } = await import(CONNECTOR);
 const { startFakeMcp, verifyRequest, authTagOwner } = await import(new URL("test/fake-black4-mcp.mjs", DIR).pathname);
 
 const hex = (b) => Buffer.from(b).toString("hex");
@@ -142,6 +142,25 @@ function run(t, env) {
 const settle = (ms = 150) => new Promise((r) => setTimeout(r, ms));
 const envFor = (id, url, extra = {}) => ({
   BUZZ_PRIVATE_KEY: hex(id.agentSecret), BUZZ_AUTH_TAG: JSON.stringify(id.authTag), BLACK4_MCP_URL: url, ...extra,
+});
+
+test("the agent's name goes out as X-Black4-Agent on every request, and only when it has one", async (t) => {
+  const id = identity();
+  const fake = await startFakeMcp({ linked: new Set([id.owner]) });
+  t.after(fake.close);
+  const named = run(t, envFor(id, fake.url, { BUZZ_ACP_DISPLAY_NAME: "  Paid  Media ✓ " }));
+  await named.init();
+  await named.request("tools/call", { name: "whoami", arguments: {} });
+  await settle();
+  assert.ok(fake.requests.length >= 2);
+  assert.ok(fake.requests.every((r) => r.headers["x-black4-agent"] === "Paid Media"), "printable, collapsed, trimmed");
+  const before = fake.requests.length;
+  const plain = run(t, envFor(id, fake.url));
+  await plain.init();
+  await settle();
+  assert.ok(fake.requests.slice(before).every((r) => r.headers["x-black4-agent"] === undefined));
+  assert.equal(agentLabel("x".repeat(100)).length, 80);
+  assert.equal(agentLabel("✓"), null);
 });
 
 test("linked owner: forwards initialize, every tool, calls, SSE and notifications", async (t) => {

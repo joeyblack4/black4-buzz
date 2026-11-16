@@ -4,29 +4,30 @@
 // and after a sign-in ended. Real components, rendered with a stand-in React.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { fakeAuthKit, fakeMcp, https, freshPlugin, settle, until, AUTHKIT } from "./fakes.mjs";
+import { fakeAuthKit, fakeMcp, fakeDoor, https, freshPlugin, settle, until, AUTHKIT } from "./fakes.mjs";
 
 const REVIEW = "https://app.black4.ai/r/rv_example?item=hero&v=3";
 const QUEUE = "https://app.black4.ai/reviews";
 const SECTION = "ai.black4/connection";
 
 const whoami = (message) => message.method === "tools/list"
-  ? { result: { tools: [{ name: "whoami", inputSchema: { type: "object" } }, { name: "review_queue", inputSchema: { type: "object" } }] } }
+  ? { result: { tools: [{ name: "whoami", inputSchema: { type: "object" } }, { name: "review_queue", inputSchema: { type: "object" } }, { name: "call_tool", inputSchema: { type: "object" } }] } }
   : message.params?.name === "whoami" ? { result: { content: [{ type: "text", text: JSON.stringify({ data: { kind: "staff", email: "person@example.test" } }) }] } }
     : message.params?.name === "review_queue" ? { result: { content: [{ type: "text", text: JSON.stringify({ kind: "black4_review_queue", total: 0, reviews: [] }) }] } }
       : { result: { content: [{ type: "text", text: "{}" }] } };
 
 /** The plugin on a test host. `module` reuses a plugin module (one Buzz run)
  * across harnesses; `opens` scripts what navigation.open answers. */
-async function harness(t, { signedIn = false, polls = ["authorization_pending", "authorization_pending", "authorization_pending", "ok"], module, browser = true, opens = () => ({ status: "opened" }), owner, revision = "test", relay = true, navigation } = {}) {
+async function harness(t, { signedIn = false, polls = ["authorization_pending", "authorization_pending", "authorization_pending", "ok"], module, browser = true, opens = () => ({ status: "opened" }), owner, revision = "test", relay = true, navigation, authkit: sharedAuthkit } = {}) {
   if (!globalThis.__b4device) deviceStorage(t);
   const plugin = module ?? await freshPlugin();
   const opened = [];
-  const authkit = fakeAuthKit({ polls, interval: 0.02 });
+  const authkit = sharedAuthkit ?? fakeAuthKit({ polls, interval: 0.02 });
   const mcp = fakeMcp(authkit, { answer: whoami });
-  const net = https({ authkit, mcp });
+  const door = fakeDoor(mcp, (request) => request.op === "instructions.get" ? { ok: true, instructions: "Be brief." } : { ok: true, agents: [] });
+  const net = https({ authkit, mcp, door });
   const nav = navigation === undefined ? { open: async (target) => { opened.push(target); return opens(opened.length); } } : navigation;
-  if (signedIn) await plugin.signInMemory.save(authkit.issue().refresh_token);
+  if (signedIn) await plugin.signInStore.save(authkit.issue().refresh_token);
   const regs = {};
   const tools = new Map();
   const relayListeners = new Set();
@@ -34,7 +35,7 @@ async function harness(t, { signedIn = false, polls = ["authorization_pending", 
   const h = (type, props, ...children) => ({ type, props: props ?? {}, children });
   const ctx = {
     react: { createElement: h, useState: (v) => [typeof v === "function" ? v() : v, () => {}], useEffect: () => {}, useRef: (v) => ({ current: v }), Component: class { constructor(props) { this.props = props; } } },
-    agents: { snapshot: () => ({ running: [] }), addTool: (tool) => { tools.set(tool.name, tool); return () => tools.delete(tool.name); }, register: () => {} },
+    agents: { snapshot: () => ({ running: [] }), addTool: (tool) => { tools.set(tool.name, tool); return () => tools.delete(tool.name); }, register: (type) => { regs.hardware = type; } },
     settingsCards: { register: (value) => { regs.card = value; } },
     pages: { register: (value) => { regs.page = value; } },
     panels: { register: (value) => { regs.panel = value; } },
@@ -50,7 +51,7 @@ async function harness(t, { signedIn = false, polls = ["authorization_pending", 
   t.after(() => { for (const off of cleanups.reverse()) off(); });
   const settings = () => expand(regs.card.component());
   return {
-    plugin, authkit, mcp, net, opened, regs, tools,
+    plugin, authkit, mcp, door, net, opened, regs, tools,
     settings,
     panel: (target = QUEUE) => expand(regs.panel.component({ target })),
     preview: () => expand(regs.preview.component({ url: REVIEW, open() {} })),
@@ -87,6 +88,7 @@ function deviceStorage(t, { broken = false } = {}) {
   const storage = {
     getItem: (key) => { if (broken) throw new Error("SecurityError"); return values.has(key) ? values.get(key) : null; },
     setItem: (key, value) => { if (broken) throw new Error("SecurityError"); values.set(key, String(value)); },
+    removeItem: (key) => { if (broken) throw new Error("SecurityError"); values.delete(key); },
   };
   Object.defineProperty(globalThis, "localStorage", { value: storage, configurable: true, writable: true });
   globalThis.__b4device = values;
@@ -210,6 +212,8 @@ test("navigation is optional: without it, or when it throws or rejects, the plug
     assert.ok(button(app.settings(), "Sign in to Black 4"));
     app.click("Sign in to Black 4");
     await app.connected();
+    app.click("Sign out"); // the sign-in is kept on this device: leave none for the next
+    await settle();
   }
   const { inject } = await freshPlugin();
   assert.equal(inject.includes("navigation"), false, "never a required service: a host without it still starts the plugin");
@@ -493,4 +497,112 @@ test("Black 4 hardware: a sign-in that ended shows Sign in in the form (not read
   tree = await settleTree(settingsTab);
   assert.equal(has(tree, isPrompt), false);
   assert.ok(asked.filter((op) => op === "status").length > before, "signed in again, it reads the agent again");
+});
+
+// ---- the sign-in kept on this computer ----
+
+const KEY = "ai.black4.signin.v1:overjoyed-tea-41.authkit.app";
+const tokenText = /access-\d|refresh-\d|device-code/;
+
+test("a launch with a kept sign-in comes up signed in: no Sign in, no prompt, even on a new revision's first start", async (t) => {
+  const device = deviceStorage(t);
+  const first = await harness(t, { revision: "rev-1" });
+  await settle();
+  first.click("Sign in to Black 4");
+  await first.connected();
+  assert.match(JSON.parse(device.get(KEY)).refresh, /^refresh-\d+$/, "kept on this device");
+  for (const revision of ["rev-1", "rev-2"]) {
+    const launch = await harness(t, { revision, authkit: first.authkit });
+    await launch.connected();
+    assert.deepEqual(launch.opened, [], `${revision}: no Settings takeover`);
+    assert.equal(button(launch.settings(), "Sign in to Black 4"), null);
+    assert.equal(launch.authkit.calls.filter((call) => call.path === "/oauth2/device_authorization").length, 1, "no browser after the first sign-in");
+  }
+});
+
+test("Sign out removes it from this device; the next launch is signed out", async (t) => {
+  const device = deviceStorage(t);
+  const app = await harness(t, { signedIn: true });
+  await app.connected();
+  assert.ok(device.has(KEY));
+  app.click("Sign out");
+  await settle();
+  assert.equal(device.has(KEY), false);
+  const launch = await harness(t);
+  await settle();
+  assert.ok(button(launch.settings(), "Sign in to Black 4"));
+});
+
+test("a kept sign-in that cannot be refreshed at launch (offline) stays kept and shows Not connected, not Sign in", async (t) => {
+  const device = deviceStorage(t);
+  const app = await harness(t, { signedIn: true, revision: "rev-9" });
+  app.net.offline.add(AUTHKIT);
+  await until(() => /Not connected/.test(text(app.settings())), { what: "offline" });
+  assert.equal(button(app.settings(), "Sign in to Black 4"), null);
+  assert.deepEqual(app.opened, [], "no prompt");
+  assert.equal(app.badge(), null, "no Sign in dot");
+  assert.ok(device.has(KEY), "kept");
+  app.net.offline.clear();
+  app.click("Try again");
+  await app.connected();
+});
+
+test("a kept sign-in refused at launch is removed, and Settings opens once at Sign in", async (t) => {
+  const device = deviceStorage(t);
+  device.set(KEY, JSON.stringify({ v: 1, refresh: "refresh-revoked" }));
+  const app = await harness(t, { revision: "rev-1" });
+  await until(() => button(app.settings(), "Sign in to Black 4"), { what: "signed out" });
+  assert.equal(device.has(KEY), false);
+  assert.equal(app.opened.length, 1);
+  assert.match(text(app.settings()), /sign-in ended/i);
+});
+
+// ---- Black 4 hardware asks for a fresh approval ----
+
+test("a hardware pass refused with fresh_approval_required offers Approve in place, keeps the person signed in, then reads again", async (t) => {
+  const device = deviceStorage(t);
+  const app = await harness(t, { signedIn: true, polls: ["authorization_pending", "authorization_pending", "authorization_pending", "ok"] });
+  await app.connected();
+  await until(() => app.regs.hardware, { what: "the hardware type (staff)" });
+  const hardware = app.regs.hardware;
+  const form = () => expand({ type: hardware.CreateConfiguration, props: { config: {}, onChange() {}, harnessControl: "type-picker" }, children: [] });
+  assert.equal(button(form(), "Approve in browser"), null, "nothing to approve until Black 4 asks");
+  assert.equal(await hardware.remote.instructions.get({ pubkey: "a".repeat(64) }), "Be brief.", "without the server's ask, passes work as before");
+
+  app.mcp.freshApproval = true;
+  await assert.rejects(hardware.remote.instructions.get({ pubkey: "a".repeat(64) }), /needs a fresh approval in your browser/);
+  assert.match(text(app.settings()), /Status Connected/, "not signed out");
+  assert.equal(button(app.settings(), "Sign in to Black 4"), null);
+  assert.deepEqual(app.opened, [], "no Settings takeover");
+  assert.ok(button(form(), "Approve in browser"), "the hardware form offers it in place");
+  const keptBefore = JSON.parse(device.get(KEY)).refresh;
+
+  // Cancel changes nothing but the prompt.
+  app.click("Approve in browser", form());
+  await until(() => /WDJB-MJHT/.test(text(form())), { what: "the approval code" });
+  assert.equal(JSON.parse(device.get(KEY)).refresh, keptBefore, "the kept sign-in stays while approving");
+  app.click("Cancel", form());
+  await settle();
+  assert.ok(button(form(), "Approve in browser"));
+  assert.match(text(app.settings()), /Status Connected/);
+
+  app.authkit.polls = ["authorization_pending", "ok"];
+  app.click("Approve in browser", form());
+  await until(() => /Runs on/.test(text(form())), { what: "approved: the form is back" });
+  assert.notEqual(JSON.parse(device.get(KEY)).refresh, keptBefore, "the approval's sign-in replaces the kept one");
+  assert.match(text(app.settings()), /Status Connected/, "never signed out");
+  app.mcp.freshApproval = false; // the server accepts the recent approval
+  assert.equal(await hardware.remote.instructions.get({ pubkey: "a".repeat(64) }), "Be brief.", "retried, it works");
+});
+
+test("nothing token-like reaches the state, the rendered surfaces or the hardware form", async (t) => {
+  deviceStorage(t);
+  const app = await harness(t, { signedIn: true });
+  await app.connected();
+  await until(() => app.regs.hardware, { what: "the hardware type" });
+  const views = [app.settings(), app.panel(), app.preview(), app.workspace(), app.badge(), expand({ type: app.regs.hardware.CreateConfiguration, props: { config: {}, onChange() {} }, children: [] })];
+  for (const view of views) assert.doesNotMatch(JSON.stringify(view ?? null), tokenText);
+  app.mcp.freshApproval = true;
+  await assert.rejects(app.regs.hardware.remote.instructions.get({ pubkey: "a".repeat(64) }));
+  assert.doesNotMatch(JSON.stringify(expand({ type: app.regs.hardware.CreateConfiguration, props: { config: {}, onChange() {} }, children: [] })), tokenText);
 });

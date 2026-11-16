@@ -59,11 +59,11 @@ function server({ listed = ["whoami", "find_tools", "call_tool"], links = [], re
  * By default the person signed in earlier in this Buzz run (no automatic
  * link); `signedIn: false` starts signed out, to click Sign in. */
 async function harness(t, black4, { viewer = VIEWER, plugin = true, register, signedIn = true, authkit = fakeAuthKit(), agentctl } = {}) {
-  const { apply, signInMemory } = await freshPlugin();
+  const { apply, signInStore } = await freshPlugin();
   const mcp = fakeMcp(authkit, { answer: (message) => black4.answer(message) });
   const door = fakeDoor(mcp, agentctl);
   const net = https({ authkit, mcp, door });
-  if (signedIn) await signInMemory.save(authkit.issue().refresh_token);
+  if (signedIn) await signInStore.save(authkit.issue().refresh_token);
   let card;
   const types = new Set();
   const tools = new Set();

@@ -56,21 +56,35 @@ Terminal, Node, Tailscale or an SSH key.
   2026-11-15. If the key is already linked to someone else, the card says so,
   and nothing is linked. **Remove…** undoes the link, and it stays removed
   until you choose **Link my agents** again. Reconnecting doesn't relink it.
-- **You sign in once each time Buzz starts.** Your sign-in is kept in memory
-  while Buzz runs: turning the plugin off and on, or reloading it, keeps you
-  signed in, but quitting Buzz signs you out. Nothing is written to disk,
-  because Buzz gives plugins no private key-value store. The only way to keep
-  data is `ctx.artifactStorage`, and that isn't a good home for a refresh
-  token: opening a collection starts relay sync queries, a collection belongs
-  to one identity and one community, and it is stored as plaintext on disk
-  where local agents can read it. The cost is one browser approval per
-  launch. Buzz opens **Settings → Black 4** at its Sign in by itself only the
-  first time a newly installed or updated plugin starts, and if a sign-in ends
-  while Buzz runs. On an ordinary launch nothing opens: choose **Sign in to
-  Black 4** wherever you are (Settings → Black 4, Reviews, a review in a
-  message, the hardware form); a dot on the Reviews entry reminds you.
-  Access tokens are refreshed before they expire. Tokens never go into
-  logs, into the Settings card or to any agent.
+- **You sign in once per computer.** After you sign in, the plugin keeps
+  your Black 4 *refresh token* (only that: never the short-lived access token)
+  in Buzz's own web storage (`localStorage`) on this computer, under the key
+  `ai.black4.signin.v1:overjoyed-tea-41.authkit.app`. On macOS that is in
+  Buzz's WebKit data folder in your user Library; on Windows, in Buzz's
+  WebView2 data folder under `%LOCALAPPDATA%`. Quitting and reopening Buzz,
+  or updating the plugin, signs you back in without a browser.
+  - **Who can read it:** it is stored as plain text, so any program running
+    as you on this computer can read it, local agents included. Treat this
+    computer's account as trusted with your Black 4 access.
+  - **To remove it, choose Sign out** in **Settings → Black 4**: the stored
+    token is deleted at once. It is also deleted when Black 4 refuses it (your
+    sign-in ended) and replaced when you sign in again. A dropped network
+    never deletes it.
+  - If Buzz's web storage is blocked or fails, the sign-in is kept in memory
+    only and you sign in again after a restart.
+  - Signing out in one Buzz window signs the others out at their next token
+    refresh (within about five minutes).
+  - Buzz opens **Settings → Black 4** at its Sign in by itself only the first
+    time a newly installed or updated plugin starts without a kept sign-in,
+    and if a sign-in ends while Buzz runs. Otherwise choose **Sign in to
+    Black 4** wherever you are; a dot on the Reviews entry reminds you.
+  - Access tokens are refreshed before they expire. Tokens never go into
+    logs, into the Settings card or to any agent.
+- **Black 4 hardware may ask for a fresh approval.** If Platform Control
+  answers a hardware request with `fresh_approval_required`, the hardware form
+  and the agent's Settings show **Approve in browser**: the same browser
+  approval as signing in, while you stay signed in. Once you approve, they
+  read the machine again; an action such as **Create** is chosen again.
 - **Until you sign in after a launch**, Buzz's own agents can't use Black 4
   tools, and **Black 4 hardware** isn't offered. Your existing hardware agents
   keep running on the machine, but Buzz shows them as *Harness unavailable*

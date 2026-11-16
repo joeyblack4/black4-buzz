@@ -29,6 +29,12 @@ const QUEUE_TIMEOUT_MS = 30 * 1000;
 const LINK_TIMEOUT_MS = 30 * 1000;
 const LINK_UNAVAILABLE = "This Black 4 server can't link agents yet.";
 const PASS_TOOL = "sign_hardware_request";
+/** What Platform Control answers (error code) when a pass needs a recent
+ * browser approval: a sign-in kept on disk alone may not mint hardware
+ * passes once it has been idle. Proposed name; until the server sends it,
+ * nothing here changes. */
+export const FRESH_APPROVAL_CODE = "fresh_approval_required";
+const FRESH_APPROVAL_TEXT = "Black 4 hardware needs a fresh approval in your browser.";
 const PASS_REFUSED = "Agents cannot mint Black 4 hardware passes. Only the Black 4 plugin's hardware agent type does, for its own requests.";
 /** Whether a tool call (directly, or through call_tool, however nested) asks
  * for a hardware pass. */
@@ -41,7 +47,8 @@ export function mintsPass(name, args, depth = 0) {
 
 // ---- sign-in, the Black 4 MCP and the hardware door, over HTTPS -------------
 // Everything goes through `ctx.host.request` to the origins the manifest
-// declares; nothing runs outside Buzz. Tokens live only in the closures below:
+// declares; nothing runs outside Buzz. Tokens live only in the closures below
+// and, for the refresh token alone, in one localStorage key (`diskStore`):
 // never in UI state, logs, error text or anything an agent receives.
 
 /** WorkOS AuthKit, device authorization (RFC 8628). Platform Control owns the
@@ -60,6 +67,8 @@ const MCP_PROTOCOL = "2025-06-18";
 const HOST_TIMEOUT_MAX_MS = 180 * 1000; // ctx.host.request's own ceiling
 const REFRESH_EARLY_MS = 2 * 60 * 1000; // refresh this long before an access token ends
 const DEVICE_INTERVAL_S = 5; // RFC 8628's default poll interval
+const ROTATION_LOOKS = 3; // a refused refresh reads the shared store this many more times…
+const ROTATION_WAIT_MS = 500; // …this far apart, for a rotation another window is still saving
 
 const clampTimeout = (ms) => Math.max(1000, Math.min(HOST_TIMEOUT_MAX_MS, Math.round(ms)));
 const headerOf = (response, name) => {
@@ -80,14 +89,61 @@ export async function bodySha256(text) {
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-/** Where a refresh token is kept between sign-ins. The default keeps it in
- * this module, so it lasts while Buzz runs (a plugin reload or an off/on keeps
- * it) and is gone when Buzz quits: nothing is written to disk. */
+/** A refresh token kept in this module only: gone when Buzz quits. The
+ * fallback when the disk store cannot be used, and what tests use. */
 export function memoryStore() {
   let value = null;
   return { load: async () => value, save: async (token) => { value = token; }, clear: async () => { value = null; } };
 }
-export const signInMemory = memoryStore(); // this Buzz run's sign-in (tests seed it)
+
+/** Where the person's sign-in is kept on this computer: one localStorage key,
+ * namespaced to the plugin and the sign-in server. Only the refresh token is
+ * stored (as `{"v":1,"refresh":"…"}`), never the access token. */
+export const SIGNIN_KEY = `ai.black4.signin.v1:${new URL(AUTHKIT.origin).host}`;
+
+/** The refresh token on disk (the webview's localStorage), so each person
+ * signs in once per computer. When localStorage is missing, blocked or
+ * throws, it keeps the token in module memory instead, for this run only.
+ * `load` answers null only when the disk says there is none: a store that
+ * cannot be read answers what this module last kept, so a passing storage
+ * error never reads as a sign-out. */
+export function diskStore({ storage = () => globalThis.localStorage, key = SIGNIN_KEY } = {}) {
+  let kept = null; // what this module last saved or read: the fallback
+  let broken = false; // a write failed: the disk may hold an older value
+  const disk = () => { if (broken) return null; try { return storage() ?? null; } catch { return null; } };
+  return {
+    async load() {
+      const store = disk();
+      if (!store) return kept;
+      try {
+        const raw = store.getItem(key);
+        if (raw == null) { kept = null; return null; }
+        const token = jsonOf(raw)?.refresh;
+        kept = typeof token === "string" && token ? token : null;
+        return kept;
+      } catch { return kept; }
+    },
+    async save(token) {
+      kept = token;
+      const store = disk();
+      if (!store) return;
+      try { store.setItem(key, JSON.stringify({ v: 1, refresh: token })); } catch {
+        broken = true; // keep it in memory; never leave an older token behind
+        try { store.removeItem(key); } catch {}
+      }
+    },
+    async clear() {
+      kept = null;
+      broken = false;
+      const store = disk();
+      if (!store) return;
+      try { store.removeItem(key); } catch {
+        try { store.setItem(key, JSON.stringify({ v: 1, refresh: null })); } catch {} // read as none
+      }
+    },
+  };
+}
+export const signInStore = diskStore(); // the person's sign-in on this computer
 /** Whether the plugin may still open Settings → Black 4 by itself in this Buzz
  * run: once, until a sign-in succeeds (module memory, like the sign-in). */
 export const signInPrompt = { due: true, connected: false };
@@ -116,13 +172,15 @@ const promptedRevision = {
 
 /** One person's Black 4 sign-in. `request` is `ctx.host.request`. The state
  * it reports (`subscribe`/`snapshot`) never holds a token. */
-export function createSession({ request, store = signInMemory, now = () => Date.now(), sleep, authkit = AUTHKIT } = {}) {
+export function createSession({ request, store = signInStore, now = () => Date.now(), sleep, authkit = AUTHKIT } = {}) {
   const wait = sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   let access = null; // { token, expiresAt }
   let refreshToken = null;
   let refreshing = null;
   let restored = null;
   let flow = 0; // the current device sign-in; a newer one or cancel retires it
+  let stepping = 0; // the flow of a fresh approval made while signed in
+  let steppedFrom = null; // the view before it, put back when it ends without replacing the sign-in
   let view = Object.freeze({ status: "signed-out" }); // signed-out | starting | waiting | signed-in
   const listeners = new Set();
   const set = (next) => { view = Object.freeze(next); for (const listener of [...listeners]) listener(view); };
@@ -152,9 +210,16 @@ export function createSession({ request, store = signInMemory, now = () => Date.
       await store.save(refreshToken);
     }
   };
-  const forget = async () => {
+  /** Drops this sign-in. `unless`: the refresh token this window last used;
+   * when the store already holds a different one (another window or a
+   * reload rotated it, or signed in again), that one is left alone. */
+  const forget = async ({ unless } = {}) => {
     access = null;
     refreshToken = null;
+    if (unless) {
+      const stored = await store.load().catch(() => null);
+      if (stored && stored !== unless) return;
+    }
     try { await store.clear(); } catch {}
   };
 
@@ -164,22 +229,36 @@ export function createSession({ request, store = signInMemory, now = () => Date.
     return { ok: false, grant: body.error === "invalid_grant" || status === 400 || status === 401, message: reason(body, `HTTP ${status}`) };
   };
 
-  /** Swaps the refresh token for a new access token. One at a time. On a
-   * refused grant it reads the store once more (another window may have
-   * rotated it) before it gives up and signs out. */
+  /** Swaps the refresh token for a new access token. One at a time in this
+   * window. The store is shared with other Buzz windows and with the next
+   * launch, so it is read first: a token another window rotated is used
+   * instead of this window's older one, and a store emptied elsewhere (Sign
+   * out in another window) signs this window out too. On a refused grant it
+   * reads the store again for a moment (a rotation may still be landing)
+   * before it gives up, and then clears the store only if it still holds the
+   * refused token. A network failure never clears anything. */
   const refresh = () => refreshing ??= (async () => {
     try {
+      const stored = await store.load().catch(() => refreshToken);
+      if (!stored && refreshToken) {
+        access = null;
+        refreshToken = null;
+        set({ status: "signed-out" }); // signed out elsewhere: not an ended sign-in
+        throw Object.assign(new Error("Sign in to Black 4 first."), { code: "signed-out" });
+      }
+      if (stored) refreshToken = stored;
       if (!refreshToken) throw Object.assign(new Error("Sign in to Black 4 first."), { code: "signed-out" });
-      const used = refreshToken;
+      let used = refreshToken;
       let result = await exchange(used);
-      if (!result.ok && result.grant) {
-        const stored = await store.load().catch(() => null);
-        if (stored && stored !== used) { refreshToken = stored; result = await exchange(stored); }
+      for (let look = 0; !result.ok && result.grant && look < ROTATION_LOOKS; look++) {
+        const latest = await store.load().catch(() => null);
+        if (latest && latest !== used) { used = latest; refreshToken = latest; result = await exchange(latest); continue; }
+        await wait(ROTATION_WAIT_MS);
       }
       if (!result.ok) {
         if (result.grant) {
-          await forget();
-          set({ status: "signed-out", detail: "Your Black 4 sign-in ended. Sign in again." });
+          await forget({ unless: used });
+          set({ status: "signed-out", ended: true, detail: "Your Black 4 sign-in ended. Sign in again." });
           throw Object.assign(new Error("Your Black 4 sign-in ended. Sign in again."), { code: "signed-out" });
         }
         throw Object.assign(new Error(`Black 4 sign-in could not refresh (${result.message}).`), { code: "offline" });
@@ -194,16 +273,19 @@ export function createSession({ request, store = signInMemory, now = () => Date.
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
     get signedIn() { return view.status === "signed-in"; },
 
-    /** A saved sign-in from earlier in this Buzz run, if there is one. */
+    /** The sign-in kept on this computer, if there is one: true once it is
+     * good again, false when there is none or it was refused. Rejects with
+     * `code: "offline"` when the sign-in server could not be reached: the
+     * sign-in is kept, and asking again later may still restore it. */
     restore: () => restored ??= (async () => {
       try {
-        const saved = await store.load();
+        const saved = await store.load().catch(() => null);
         if (!saved) return false;
         refreshToken = saved;
-        await refresh();
+        try { await refresh(); } catch (error) { if (error?.code === "offline") throw error; return false; }
         set({ status: "signed-in" });
         return true;
-      } catch { return false; } finally { restored = null; }
+      } finally { restored = null; }
     })(),
 
     /** An access token that is good for a while yet; refreshes first when near its end. */
@@ -213,11 +295,20 @@ export function createSession({ request, store = signInMemory, now = () => Date.
     },
 
     /** Starts a device sign-in. `onCode({ url, userCode, expiresAt })` hears
-     * what to show; resolves once signed in, rejects with a sentence. */
-    async signIn({ onCode } = {}) {
+     * what to show; resolves once signed in, rejects with a sentence. A new
+     * sign-in replaces the one kept on this computer, which is cleared at
+     * once. `stepUp`: a fresh approval while signed in; the current sign-in
+     * stays in use (and kept) until the new one replaces it, and a stepUp that
+     * fails or is cancelled leaves the person signed in. */
+    async signIn({ onCode, stepUp = false } = {}) {
       const mine = ++flow;
       const live = () => mine === flow;
-      set({ status: "starting" });
+      const keepCurrent = stepUp;
+      const before = view;
+      stepping = keepCurrent ? mine : 0;
+      steppedFrom = before;
+      set({ status: "starting", ...(keepCurrent ? { stepUp: true } : {}) });
+      if (!keepCurrent) await forget();
       try {
         const started = await post("/oauth2/device_authorization", { client_id: authkit.clientId, scope: authkit.scope, ...authkit.params });
         if (!live()) throw Object.assign(new Error("Cancelled."), { code: "cancelled" });
@@ -230,7 +321,7 @@ export function createSession({ request, store = signInMemory, now = () => Date.
         if (!link) throw new Error("Black 4 sign-in returned no link to open.");
         const userCode = typeof code.user_code === "string" ? plain(code.user_code, 32) : "";
         const expiresAt = now() + (Number(code.expires_in) > 0 ? Number(code.expires_in) : 600) * 1000;
-        set({ status: "waiting", url: link, userCode, expiresAt });
+        set({ status: "waiting", url: link, userCode, expiresAt, ...(keepCurrent ? { stepUp: true } : {}) });
         onCode?.({ url: link, userCode, expiresAt });
         let interval = Number(code.interval) > 0 ? Number(code.interval) : DEVICE_INTERVAL_S;
         for (;;) {
@@ -255,12 +346,20 @@ export function createSession({ request, store = signInMemory, now = () => Date.
         }
         set({ status: "signed-in" });
       } catch (error) {
-        if (live()) set({ status: "signed-out", ...(error.code === "cancelled" ? {} : { detail: error.message }) });
+        if (live()) set(keepCurrent ? before : { status: "signed-out", ...(error.code === "cancelled" ? {} : { detail: error.message }) });
         throw error;
+      } finally {
+        if (stepping === mine) stepping = 0;
       }
     },
-    cancel() { flow += 1; if (view.status === "starting" || view.status === "waiting") set({ status: "signed-out" }); },
-    async signOut() { flow += 1; await forget(); set({ status: "signed-out" }); },
+    cancel() {
+      const wasStepUp = stepping !== 0;
+      flow += 1;
+      stepping = 0;
+      // A cancelled fresh approval leaves the sign-in as it was.
+      if (view.status === "starting" || view.status === "waiting") set(wasStepUp && steppedFrom ? steppedFrom : { status: "signed-out" });
+    },
+    async signOut() { flow += 1; stepping = 0; await forget(); set({ status: "signed-out" }); },
   };
 }
 
@@ -556,12 +655,16 @@ export function apply(ctx) {
     agentLink: { status: "idle" },
     hardware: "hidden", // hidden | offered: the Black 4 hardware agent type
     hardwareError: "", // one sentence when the hardware type failed
+    // Black 4 asked for a fresh browser approval before more hardware passes:
+    // null | { status: "needed" | "starting" | "waiting", code?, detail? }
+    freshApproval: null,
+    approvals: 0, // fresh approvals made: hardware views read again on each
   };
   const listeners = new Set();
   const update = (patch) => {
     // Any status other than connected makes the count unknown: no stale badge
     // survives a disconnect, a failed refresh or a reconnect to another account.
-    if (patch.status && patch.status !== "connected") patch = { ...patch, waiting: null, agentLink: { status: "idle" } };
+    if (patch.status && patch.status !== "connected") patch = { ...patch, waiting: null, agentLink: { status: "idle" }, freshApproval: null };
     state = { ...state, ...patch };
     for (const listener of listeners) listener();
   };
@@ -873,6 +976,7 @@ export function apply(ctx) {
       link: () => linkAgents(),
       // While signed out, the form and Settings show the same Sign in.
       signIn: { use: () => useBridgeState().status, Prompt: SignInPrompt },
+      approval: { use: () => { const current = useBridgeState(); return { needed: !!current.freshApproval, epoch: current.approvals }; }, Prompt: ApprovalPrompt },
     },
     // One 60-second pass per door request, minted as the signed-in person.
     // ownerKey: this Buzz identity's key, which becomes the pass's owner, so an
@@ -886,6 +990,12 @@ export function apply(ctx) {
       try {
         answer = await callBlack4(PASS_TOOL, { ...input, ...(ownerKey ? { ownerKey } : {}) }, { unavailable: "This Black 4 server can't sign hardware requests yet." });
       } catch (error) {
+        if (error?.serverCode === FRESH_APPROVAL_CODE || String(error?.message).includes(FRESH_APPROVAL_CODE)) {
+          // Not a sign-out: the sign-in stays. Ask for a fresh approval in
+          // place; hardware views read again once it is given.
+          if (!state.freshApproval) update({ freshApproval: { status: "needed" } });
+          throw Object.assign(new Error(FRESH_APPROVAL_TEXT), { code: "fresh-approval" });
+        }
         if (error?.serverCode === "owner_key_not_linked" || /owner_key_not_linked/.test(String(error?.message))) {
           void checkLink();
           throw Object.assign(new Error("Your agents are not linked to you on this Buzz identity, or the key is linked to someone else. Choose Link my agents, then try again."), { code: "unlinked" });
@@ -925,7 +1035,8 @@ export function apply(ctx) {
         update({ status: "starting", detail: "" });
         const restored = await session.restore();
         if (attempt !== generation || stopped) return;
-        if (!restored) { update({ status: "signed-out", detail: session.snapshot().detail ?? "" }); promptSignIn("installed"); return; }
+        // No sign-in kept on this computer, or the kept one was refused.
+        if (!restored) { update({ status: "signed-out", detail: session.snapshot().detail ?? "" }); promptSignIn(session.snapshot().ended ? "ended" : "installed"); return; }
       }
       update({ status: "starting", detail: "" });
       mcp.reset();
@@ -955,7 +1066,10 @@ export function apply(ctx) {
       if (attempt !== generation || stopped) return;
       // Signed out only when the sign-in server refused the grant (the session
       // says so); anything else, a dropped network included, is retried.
-      if (session.snapshot().status === "signed-out") { update({ status: "signed-out", detail: session.snapshot().detail ?? error?.message ?? "" }); promptSignIn(signedOutWhy()); }
+      if (error?.code !== "offline" && session.snapshot().status === "signed-out") {
+        update({ status: "signed-out", detail: session.snapshot().detail ?? error?.message ?? "" });
+        if (session.snapshot().ended) promptSignIn(signedOutWhy());
+      }
       else scheduleRetry(error?.message ?? String(error));
     } finally {
       if (attempt === generation) starting = false;
@@ -998,6 +1112,40 @@ export function apply(ctx) {
     linkOnConnect = true;
     reconnect();
   };
+  /** A fresh approval while signed in (Black 4 asked for one before more
+   * hardware passes): the same device sign-in, as a step up. The person stays
+   * signed in throughout, and a cancelled or failed one changes nothing but
+   * the prompt. Once approved, hardware views read again. */
+  let approvalTicket = 0;
+  const approve = async () => {
+    if (stopped || state.status !== "connected" || state.freshApproval?.status !== "needed") return;
+    const mine = ++approvalTicket;
+    const before = state.account?.email;
+    update({ freshApproval: { status: "starting" } });
+    try {
+      await session.signIn({ stepUp: true, onCode: (code) => {
+        if (mine !== approvalTicket || !state.freshApproval) return;
+        update({ freshApproval: { status: "waiting", code: { url: code.url, userCode: code.userCode } } });
+        openInBrowser(code.url);
+      } });
+    } catch (error) {
+      if (mine === approvalTicket && state.freshApproval) update({ freshApproval: { status: "needed", detail: error?.code === "cancelled" ? "" : error?.message ?? "" } });
+      return;
+    }
+    if (stopped || mine !== approvalTicket) return;
+    update({ freshApproval: null, approvals: state.approvals + 1 });
+    // Approved as someone else: everything here follows the new account.
+    try {
+      const who = readAnswer(await request("tools/call", { name: "whoami", arguments: {} }, { timeoutMs: LINK_TIMEOUT_MS }));
+      const email = (who?.data ?? who)?.email;
+      if (before && email && email !== before) reconnect();
+    } catch {}
+  };
+  const cancelApproval = () => {
+    approvalTicket += 1;
+    session.cancel();
+    if (state.freshApproval) update({ freshApproval: { status: "needed" } });
+  };
   const cancelSignIn = () => {
     signInTicket += 1;
     session.cancel();
@@ -1022,7 +1170,7 @@ export function apply(ctx) {
       generation += 1;
       stopQueuePolling();
       update({ status: "signed-out", detail: view.detail ?? "" });
-      promptSignIn("ended");
+      if (view.ended) promptSignIn("ended"); // signed out in another window: no prompt
     }
   }));
 
@@ -1283,6 +1431,39 @@ export function apply(ctx) {
       }));
   }
 
+  /** Black 4 hardware asked for a fresh approval: the device sign-in, offered
+   * in place, while the person stays signed in. */
+  function ApprovalPrompt() {
+    const current = useBridgeState();
+    const [copied, setCopied] = React.useState(false);
+    const approval = current.freshApproval;
+    if (!approval) return null;
+    const wrap = (...children) => h("div", { className: "b4-signin" }, h("style", null, SIGNIN_STYLES), ...children);
+    const bar = (...children) => h("div", { className: "b4-bar" }, ...children);
+    const button = (text, onClick, props = {}) => h("button", { type: "button", onClick, ...props }, text);
+    if (approval.status === "starting" || (approval.status === "waiting" && !approval.code)) {
+      return wrap(bar(h("button", { type: "button", className: "b4-go", disabled: true, "aria-busy": true }, "Approving…"), button("Cancel", cancelApproval)));
+    }
+    if (approval.status === "waiting") {
+      const code = approval.code;
+      return wrap(
+        code.userCode ? bar(
+          h("span", { className: "b4-code", "aria-label": `Approval code ${code.userCode}` }, code.userCode),
+          button(copied ? "Copied" : "Copy", () => {
+            Promise.resolve(globalThis.navigator?.clipboard?.writeText?.(code.userCode))
+              .then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }, () => {});
+          })) : null,
+        bar(h("span", { role: "status", className: "b4-bar b4-muted" }, h("span", { className: "b4-spin", "aria-hidden": true }), "Confirm it in your browser"),
+          h("a", { href: code.url, target: "_blank", rel: "noopener noreferrer" }, "Open sign-in page"),
+          button("Cancel", cancelApproval)));
+    }
+    return wrap(
+      approval.detail ? h("span", { className: "b4-muted" }, approval.detail) : null,
+      button("Approve in browser", () => void approve(), {
+        className: "b4-go", title: "Black 4 hardware asks for a recent approval. You stay signed in.",
+      }));
+  }
+
   function Black4Settings() {
     const current = useBridgeState();
     const row = (label, value) =>
@@ -1535,7 +1716,7 @@ export function doorTransport({ request, sign }) {
     try {
       pass = (await sign({ machine: machine.id, op: payload.op, bodySha256: hash }))?.pass;
     } catch (error) {
-      if (error?.code === "unlinked") throw error;
+      if (error?.code === "unlinked" || error?.code === "fresh-approval") throw error;
       throw Object.assign(new Error(`Could not reach the ${machine.label}: your Black 4 sign-in could not get a pass (${plain(error?.message ?? error, 200)}).`), { code: "signin" });
     }
     if (typeof pass !== "string" || !pass) throw Object.assign(new Error(`Could not reach the ${machine.label}: your Black 4 sign-in got no pass.`), { code: "signin" });
@@ -2036,12 +2217,16 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
   // that ended leaves this type registered; its views then show Sign in, and
   // read the machine again once signed in.
   const SignInPrompt = access?.signIn?.Prompt;
+  const ApprovalPrompt = access?.approval?.Prompt;
   // Signed out (or signing in): show Sign in. Reachable: Black 4 is
   // connected, so the door can mint passes. In between (starting, failed)
   // the machine is not asked; it is asked once connected.
+  // `needsApproval`: Black 4 asked for a fresh browser approval before more
+  // passes; `epoch` counts approvals given, so views read again after one.
   const useBlack4 = () => {
     const status = access?.signIn ? access.signIn.use?.() : "connected";
-    return { signedOut: status === "signed-out" || status === "signing-in", reachable: status === "connected" };
+    const approval = access?.approval?.use?.() ?? { needed: false, epoch: 0 };
+    return { signedOut: status === "signed-out" || status === "signing-in", reachable: status === "connected", needsApproval: approval.needed, epoch: approval.epoch };
   };
   const useSignedOut = () => useBlack4().signedOut;
 
@@ -2052,18 +2237,21 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
 
   /** The machine's status (or its models), read in an effect and shared across views. */
   const useReader = (reader, machineId) => {
-    const { reachable } = useBlack4();
+    const { reachable, epoch } = useBlack4();
     const [status, setStatus] = React.useState(() => reader.peek(machineId));
     const wasReachable = React.useRef(reachable);
+    const lastEpoch = React.useRef(epoch);
     React.useEffect(() => {
       let live = true;
-      const back = !wasReachable.current && reachable; // just connected: anything read before is stale
+      // Just connected, or just approved again: anything read before is stale.
+      const back = (!wasReachable.current && reachable) || lastEpoch.current !== epoch;
       wasReachable.current = reachable;
+      lastEpoch.current = epoch;
       setStatus(reader.peek(machineId));
       const off = reader.subscribe((id) => { if (live && id === machineOf(machineId).id) setStatus(reader.peek(machineId)); });
       if (ask && reachable) void reader.read(machineId, back ? { force: true } : undefined).then((next) => { if (live) setStatus(next); });
       return () => { live = false; off(); };
-    }, [machineId, reachable]);
+    }, [machineId, reachable, epoch]);
     return status;
   };
   const useStatus = (machineId) => useReader(statuses, machineId);
@@ -2197,12 +2385,13 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
       if (status?.kind === "ok" && usable.length && !usable.some((entry) => entry.id === value.harness))
         onChange({ ...value, harness: usable[0].id, model: "", effort: "" }, { suggested: true });
     }, [status, value.harness]);
-    const signedOut = useSignedOut();
-    const isReady = !signedOut && readyToCreate(state) && (status?.kind !== "ok" || usable.some((entry) => entry.id === value.harness));
+    const { signedOut, needsApproval } = useBlack4();
+    const isReady = !signedOut && !needsApproval && readyToCreate(state) && (status?.kind !== "ok" || usable.some((entry) => entry.id === value.harness));
     React.useEffect(() => { onReadyChange?.(isReady); }, [onReadyChange, isReady]);
     React.useEffect(() => () => onReadyChange?.(false), [onReadyChange]);
 
     if (signedOut && SignInPrompt) return h("div", { style: { display: "grid", gap: 12 } }, harnessControl, h(SignInPrompt, null));
+    if (needsApproval && ApprovalPrompt) return h("div", { style: { display: "grid", gap: 12 } }, harnessControl, h(ApprovalPrompt, null));
 
     return h("div", { style: { display: "grid", gap: 12 } },
       harnessControl,
@@ -2241,7 +2430,7 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
     const [beat, setBeat] = React.useState({ loading: true, minutes: 0, base: "", draft: "", custom: false, defaultPrompt: "" });
     const [beatBusy, setBeatBusy] = React.useState(false);
     const [picking, setPicking] = React.useState({ saving: false });
-    const { signedOut, reachable } = useBlack4();
+    const { signedOut, reachable, needsApproval, epoch } = useBlack4();
 
     React.useEffect(() => directory.subscribe(() => setSeen(directory.peek(pubkey))), [pubkey]);
     React.useEffect(() => {
@@ -2272,7 +2461,7 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
         else setBeat({ loading: false, minutes: 0, base: "", draft: "", custom: false, defaultPrompt: "", error: String(heartbeat.reason?.message ?? heartbeat.reason) });
       })().catch((error) => { if (!signal.aborted) setRun({ loading: false, error: String(error?.message ?? error) }); });
       return () => controller.abort();
-    }, [pubkey, revision, reachable]);
+    }, [pubkey, revision, reachable, epoch]);
 
     const machine = machineOf(machineId);
     const harness = run.harness ?? seen?.harness;
@@ -2338,8 +2527,10 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
     const dirty = text.draft !== text.base;
     if (signedOut && SignInPrompt) return h("div", { style: { display: "grid", gap: 16 } },
       settingsHost?.typeControl?.(false), h(SignInPrompt, null), settingsContent);
+    const approvalPrompt = needsApproval && ApprovalPrompt ? h(ApprovalPrompt, null) : null;
     return h("div", { style: { display: "grid", gap: 16 } },
       settingsHost?.typeControl?.(false),
+      approvalPrompt,
       h("div", { style: { display: "grid", gap: 10 } },
         h(Line, { title: "Runs on" }, machine.label),
         h(Line, { title: "Runs" }, harnessLabel(harness) ?? (run.loading ? "…" : "Unknown")),

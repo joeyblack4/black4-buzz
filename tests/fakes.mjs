@@ -133,6 +133,8 @@ export function fakeMcp(authkit, { answer = () => ({ result: {} }), sse = false,
         renew.calls.push(args ?? {});
         if (!renew.supported) return json(200, { jsonrpc: "2.0", id: message.id, error: { code: -32602, message: "MCP error -32602: Tool renew_signin not found" } }, headers);
         const answerWith = (step, approvalId) => {
+          // not_needed: not a stored sign-in, so no limit applies to it either.
+          if (step === "signin_approval_not_needed") { self.idle = false; self.approvalRequired = false; }
           if (!RENEW_STATES.has(step)) return toolFailure(message.id, headers, step, `fake ${step}`);
           if (step === "approved") { self.idle = false; self.approvalRequired = false; return null; }
           return null;

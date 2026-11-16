@@ -738,6 +738,115 @@ test("today's server, without renew_signin: nothing changes until it is needed, 
   assert.match(text(app.settings()), /Status Connected/);
 });
 
+test("the approval error keeps its code and its own sentence through the door", async (t) => {
+  deviceStorage(t);
+  const app = await harness(t, { signedIn: true });
+  await app.connected();
+  await until(() => app.regs.hardware, { timeoutMs: 6000, what: "hardware" });
+  app.mcp.approvalRequired = true;
+  const error = await app.regs.hardware.remote.instructions.get({ pubkey: PUBKEY }).then(() => null, (failure) => failure);
+  assert.match(error.message, /^Black 4 hardware needs your approval in your browser\.$/, "not wrapped as 'could not get a pass'");
+  const { doorTransport } = app.plugin;
+  const ask = doorTransport({ request: async () => { throw new Error("never reached"); }, sign: async () => { throw Object.assign(new Error("Black 4 hardware needs your approval in your browser."), { code: "approval" }); } });
+  await assert.rejects(ask({ id: "commerce", label: "Commerce Mac", door: "https://door.example.test" }, { op: "status" }), (failure) => failure.code === "approval" && !/could not get a pass/.test(failure.message));
+});
+
+test("idle, then signed out elsewhere or refused during Approve: Approve becomes Sign in, never offered forever", async (t) => {
+  const device = deviceStorage(t);
+  const app = await harness(t, { signedIn: true });
+  await app.connected();
+  app.mcp.idle = true;
+  app.click("Reconnect");
+  await until(() => button(app.settings(), "Approve in browser"), { timeoutMs: 6000, what: "idle" });
+  // Another window signs out: the disk is emptied, and the grant is gone.
+  device.delete(KEY);
+  app.authkit.refresh.clear();
+  app.authkit.access.clear();
+  app.click("Approve in browser");
+  await until(() => button(app.settings(), "Sign in to Black 4"), { timeoutMs: 6000, what: "Sign in" });
+  assert.equal(button(app.settings(), "Approve in browser"), null);
+  assert.deepEqual(app.opened, [], "signed out elsewhere: no prompt");
+});
+
+test("Cancel, then Approve again resumes the same approval (no second browser approval); approved after Cancel still counts", async (t) => {
+  deviceStorage(t);
+  const app = await harness(t, { signedIn: true });
+  await app.connected();
+  await until(() => app.regs.hardware, { timeoutMs: 6000, what: "hardware" });
+  app.mcp.approvalRequired = true;
+  app.mcp.renew.polls = ["pending"];
+  await assert.rejects(app.regs.hardware.remote.instructions.get({ pubkey: PUBKEY }));
+  app.click("Approve in browser", hardwareForm(app));
+  await until(() => /RNEW-CODE/.test(text(hardwareForm(app))), { timeoutMs: 6000, what: "waiting" });
+  app.click("Cancel", hardwareForm(app));
+  await settle();
+  const starts = () => renewCalls(app).filter((call) => !call.approvalId).length;
+  assert.equal(starts(), 1);
+  app.click("Approve in browser", hardwareForm(app));
+  await until(() => /RNEW-CODE/.test(text(hardwareForm(app))), { timeoutMs: 6000, what: "resumed" });
+  assert.equal(starts(), 1, "resumed: the same approval, not a new one");
+  app.click("Cancel", hardwareForm(app));
+  // The person approves in the browser right after Cancel.
+  app.mcp.renew.polls = ["approved"];
+  app.click("Approve in browser", hardwareForm(app));
+  await until(() => /Runs on/.test(text(hardwareForm(app))), { timeoutMs: 6000, what: "accepted" });
+  assert.equal(starts(), 1, "the earlier approval counted");
+});
+
+test("an in-flight answer of approved that arrives after Cancel is accepted", async (t) => {
+  deviceStorage(t);
+  const app = await harness(t, { signedIn: true });
+  await app.connected();
+  await until(() => app.regs.hardware, { timeoutMs: 6000, what: "hardware" });
+  app.mcp.approvalRequired = true;
+  await assert.rejects(app.regs.hardware.remote.instructions.get({ pubkey: PUBKEY }));
+  app.mcp.renew.polls = ["approved"];
+  app.mcp.renew.interval = 0.15;
+  const handle = app.mcp.handle;
+  let hold;
+  app.mcp.handle = async (input) => {
+    const body = JSON.parse(input.body);
+    if (body.params?.name === "renew_signin" && body.params.arguments?.approvalId) await new Promise((resolve) => { hold = resolve; });
+    return handle(input);
+  };
+  app.click("Approve in browser", hardwareForm(app));
+  await until(() => typeof hold === "function", { timeoutMs: 6000, what: "a poll in flight" });
+  app.click("Cancel", hardwareForm(app));
+  hold();
+  await until(() => /Runs on/.test(text(hardwareForm(app))), { timeoutMs: 6000, what: "accepted after Cancel" });
+});
+
+test("idle approved in another window: pressing Approve notices with one request and reconnects, no browser", async (t) => {
+  deviceStorage(t);
+  const app = await harness(t, { signedIn: true });
+  await app.connected();
+  app.mcp.idle = true;
+  app.click("Reconnect");
+  await until(() => button(app.settings(), "Approve in browser"), { timeoutMs: 6000, what: "idle" });
+  app.mcp.idle = false; // approved elsewhere
+  app.click("Approve in browser");
+  await app.connected();
+  assert.deepEqual(renewCalls(app), [], "no new approval started");
+});
+
+test("coming back to the window looks again: idle approved elsewhere reconnects; a hardware approval re-reads", async (t) => {
+  deviceStorage(t);
+  const listeners = new Map();
+  const previous = { add: globalThis.addEventListener, remove: globalThis.removeEventListener };
+  globalThis.addEventListener = (name, fn) => listeners.set(name, fn);
+  globalThis.removeEventListener = (name) => listeners.delete(name);
+  t.after(() => { globalThis.addEventListener = previous.add; globalThis.removeEventListener = previous.remove; });
+  const app = await harness(t, { signedIn: true });
+  await app.connected();
+  app.mcp.idle = true;
+  app.click("Reconnect");
+  await until(() => button(app.settings(), "Approve in browser"), { timeoutMs: 6000, what: "idle" });
+  app.mcp.idle = false;
+  listeners.get("focus")();
+  await app.connected();
+  assert.deepEqual(renewCalls(app), []);
+});
+
 test("agents never see or call renew_signin, directly or through call_tool", async (t) => {
   deviceStorage(t);
   const app = await harness(t, { signedIn: true });

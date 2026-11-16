@@ -120,9 +120,13 @@ export const SIGNIN_KEY = `ai.black4.signin.v1:${new URL(AUTHKIT.origin).host}`;
 /** The refresh token on disk (the webview's localStorage), so each person
  * signs in once per computer. When localStorage is missing, blocked or
  * throws, it keeps the token in module memory instead, for this run only.
- * `load` answers null only when the disk says there is none: a store that
- * cannot be read answers what this module last kept, so a passing storage
- * error never reads as a sign-out. */
+ * `load` answers null only when the disk says there is none (no key, or the
+ * empty record a failed delete leaves). A store that cannot be read, and a
+ * value under the key that is not this plugin's record (corrupt, or another
+ * version's), answer what this module last kept: nothing at launch, and
+ * never a sign-out of other windows. Nothing is deleted on a failed write or
+ * an unreadable value: only Sign out, a refused grant, or a successful save
+ * replaces what is there. */
 export function diskStore({ storage = () => globalThis.localStorage, key = SIGNIN_KEY } = {}) {
   let kept = null; // what this module last saved or read: the fallback
   let broken = false; // a write failed: the disk may hold an older value
@@ -134,8 +138,10 @@ export function diskStore({ storage = () => globalThis.localStorage, key = SIGNI
       try {
         const raw = store.getItem(key);
         if (raw == null) { kept = null; return null; }
-        const token = jsonOf(raw)?.refresh;
-        kept = typeof token === "string" && token ? token : null;
+        const record = jsonOf(raw);
+        if (record?.v === 1 && record.refresh === null) { kept = null; return null; } // deleted
+        if (record?.v !== 1 || typeof record.refresh !== "string" || !record.refresh) return kept; // not ours: unread, untouched
+        kept = record.refresh;
         return kept;
       } catch { return kept; }
     },
@@ -144,8 +150,9 @@ export function diskStore({ storage = () => globalThis.localStorage, key = SIGNI
       const store = disk();
       if (!store) return;
       try { store.setItem(key, JSON.stringify({ v: 1, refresh: token })); } catch {
-        broken = true; // keep it in memory; never leave an older token behind
-        try { store.removeItem(key); } catch {}
+        // This window carries on from memory; what is on disk stays as it
+        // was, so other windows are not signed out by a failed write.
+        broken = true;
       }
     },
     async clear() {
@@ -232,15 +239,20 @@ export function createSession({ request, store = signInStore, now = () => Date.n
     refreshToken = null;
     if (unless) {
       const stored = await store.load().catch(() => null);
-      if (stored && stored !== unless) return;
+      if (stored && stored !== unless) return stored;
     }
     try { await store.clear(); } catch {}
+    return null;
   };
 
   const exchange = async (token) => {
     const { status, body } = await post("/oauth2/token", { grant_type: "refresh_token", client_id: authkit.clientId, refresh_token: token, ...authkit.params });
     if (status === 200 && body.access_token) return { ok: true, body };
-    return { ok: false, grant: body.error === "invalid_grant" || status === 400 || status === 401, message: reason(body, `HTTP ${status}`) };
+    // Only invalid_grant means this refresh token is dead (expired, revoked,
+    // or superseded by a rotation: RFC 6749 §5.2, WorkOS Connect). Anything
+    // else (invalid_client, invalid_request, a 5xx) is a failure that keeps
+    // the kept sign-in, so a server misconfiguration never deletes it.
+    return { ok: false, grant: body.error === "invalid_grant", message: reason(body, `HTTP ${status}`) };
   };
 
   /** Swaps the refresh token for a new access token. One at a time in this
@@ -269,9 +281,17 @@ export function createSession({ request, store = signInStore, now = () => Date.n
         if (latest && latest !== used) { used = latest; refreshToken = latest; result = await exchange(latest); continue; }
         await wait(ROTATION_WAIT_MS);
       }
+      // A newer token can still land while this window gives up: use it.
+      for (let adopt = 0; !result.ok && result.grant && adopt < 2; adopt++) {
+        const newer = await forget({ unless: used });
+        if (!newer) break;
+        used = newer;
+        refreshToken = newer;
+        result = await exchange(newer);
+      }
       if (!result.ok) {
         if (result.grant) {
-          await forget({ unless: used });
+          if (refreshToken) await forget({ unless: used }); // a refused adopted token is cleared too, the same way
           set({ status: "signed-out", ended: true, detail: "Your Black 4 sign-in ended. Sign in again." });
           throw Object.assign(new Error("Your Black 4 sign-in ended. Sign in again."), { code: "signed-out" });
         }
@@ -1015,6 +1035,8 @@ export function apply(ctx) {
         }
         throw error;
       }
+      // A pass minted: the approval limit is lifted (approved here or elsewhere).
+      if (state.renewal?.reason === "hardware" && state.renewal.status === "needed") update({ renewal: null });
       return answer?.data ?? answer;
     },
   });
@@ -1172,6 +1194,8 @@ export function apply(ctx) {
       // A server without renew_signin (before Platform Control's stored
       // sign-in limits) answers a JSON-RPC error for an unknown tool.
       if (error?.code === "rpc") throw Object.assign(new Error("This Black 4 server can't approve sign-ins yet."), { code: "unsupported" });
+      // The sign-in itself was refused: not something to ask again.
+      if (error?.code === "signin") throw error;
       throw Object.assign(new Error("Couldn't reach Black 4. Try again."), { code: "retry" });
     }
     try { return readAnswer(result); } catch (error) {
@@ -1180,10 +1204,34 @@ export function apply(ctx) {
       throw error;
     }
   };
+  // The approval this window last started: kept after Cancel, so pressing
+  // Approve again resumes it (same code) and an approval given just after
+  // Cancel still counts.
+  let lastApproval = null; // { id, code: { url, userCode }, ends, interval }
   const renewDone = () => {
+    lastApproval = null;
     const idle = state.status === "idle";
     update({ renewal: null, approvals: state.approvals + 1 });
     if (idle) reconnect();
+  };
+  /** One cheap look before a new browser approval: this window's own last
+   * approval (approved after Cancel?), and, while idle, one ordinary request
+   * (approved in another window?). True when no approval is needed now. */
+  const recheck = async () => {
+    if (lastApproval && Date.now() < lastApproval.ends) {
+      try {
+        const answer = await askRenew({ approvalId: lastApproval.id });
+        if (answer?.state === "approved") return true;
+        if (answer?.state !== "pending") lastApproval = null;
+      } catch (error) {
+        if (error?.serverCode === "signin_approval_not_needed") return true;
+        if (error?.code !== "retry") lastApproval = null;
+      }
+    } else lastApproval = null;
+    if (state.status === "idle") {
+      try { await mcp.request("tools/call", { name: "whoami", arguments: {} }, { timeoutMs: LINK_TIMEOUT_MS }); return true; } catch {}
+    }
+    return false;
   };
   /** Approve in browser: the renewal, shown in place on every surface. */
   const approve = async () => {
@@ -1194,36 +1242,47 @@ export function apply(ctx) {
     const setRenewal = (patch) => { if (live()) update({ renewal: { reason, ...patch } }); };
     setRenewal({ status: "starting" });
     try {
-      const started = await askRenew({});
+      if (await recheck()) { if (live()) renewDone(); return; }
       if (!live()) return;
-      if (started?.state === "approved") return renewDone();
-      const approvalId = typeof started?.approvalId === "string" ? started.approvalId : "";
-      // Only a link on the sign-in origin is ever shown or opened.
-      const link = [started?.verificationUriComplete, started?.verificationUri].find((value) => {
-        try { const url = new URL(value); return url.origin === AUTHKIT.origin && !url.username && !url.password; } catch { return false; }
-      });
-      if (started?.state !== "pending" || !approvalId || !link) throw new Error("Black 4 could not start the approval. Try again.");
-      const userCode = typeof started.userCode === "string" ? plain(started.userCode, 32) : "";
-      const ends = Date.parse(started.expiresAt) || Date.now() + 10 * 60 * 1000;
-      setRenewal({ status: "waiting", code: { url: link, userCode } });
-      openInBrowser(link);
-      let interval = Number(started.interval) > 0 ? Number(started.interval) : DEVICE_INTERVAL_S;
-      for (;;) {
-        await new Promise((resolve) => setTimeout(resolve, interval * 1000));
+      if (!lastApproval) {
+        const started = await askRenew({});
         if (!live()) return;
-        if (Date.now() > ends) throw new Error(RENEW_ENDED.expired);
+        if (started?.state === "approved") return renewDone();
+        const approvalId = typeof started?.approvalId === "string" ? started.approvalId : "";
+        // Only a link on the sign-in origin is ever shown or opened.
+        const link = [started?.verificationUriComplete, started?.verificationUri].find((value) => {
+          try { const url = new URL(value); return url.origin === AUTHKIT.origin && !url.username && !url.password; } catch { return false; }
+        });
+        if (started?.state !== "pending" || !approvalId || !link) throw new Error("Black 4 could not start the approval. Try again.");
+        lastApproval = {
+          id: approvalId,
+          code: { url: link, userCode: typeof started.userCode === "string" ? plain(started.userCode, 32) : "" },
+          ends: Date.parse(started.expiresAt) || Date.now() + 10 * 60 * 1000,
+          interval: Number(started.interval) > 0 ? Number(started.interval) : DEVICE_INTERVAL_S,
+        };
+      }
+      const approval = lastApproval;
+      setRenewal({ status: "waiting", code: approval.code });
+      openInBrowser(approval.code.url);
+      for (;;) {
+        await new Promise((resolve) => setTimeout(resolve, approval.interval * 1000));
+        if (!live()) return;
+        if (Date.now() > approval.ends) { lastApproval = null; throw new Error(RENEW_ENDED.expired); }
         let polled;
-        try { polled = await askRenew({ approvalId }); } catch (error) {
+        try { polled = await askRenew({ approvalId: approval.id }); } catch (error) {
           if (error.code === "retry") continue; // asked again next time
           throw error;
         }
+        // Approved just as the person pressed Cancel: it still counts.
+        if (polled?.state === "approved") { if (!stopped && state.renewal) renewDone(); return; }
         if (!live()) return;
-        if (polled?.state === "pending") { if (Number(polled.interval) > 0) interval = Number(polled.interval); continue; }
-        if (polled?.state === "approved") return renewDone();
+        if (polled?.state === "pending") { if (Number(polled.interval) > 0) approval.interval = Number(polled.interval); continue; }
+        lastApproval = null;
         throw new Error(RENEW_ENDED[polled?.state] ?? "Black 4 could not finish the approval. Try again.");
       }
     } catch (error) {
       if (error?.serverCode === "signin_approval_not_needed") { if (live()) renewDone(); return; }
+      if (error?.serverCode && error.serverCode !== "signin_approval_unavailable") lastApproval = null;
       setRenewal({ status: "needed", detail: RENEW_ENDED[error?.serverCode] ?? plain(error?.message ?? error, 200) });
     }
   };
@@ -1231,6 +1290,29 @@ export function apply(ctx) {
     renewTicket += 1;
     if (state.renewal) update({ renewal: { reason: state.renewal.reason, status: "needed" } });
   };
+  // Back in this window (focus): approved elsewhere, or after Cancel? One
+  // cheap look; for hardware, its views read again (a pass that works ends
+  // the prompt). At most every 10 seconds, and never mid-approval.
+  let lookedAt = 0;
+  const lookAgain = async () => {
+    if (stopped || state.renewal?.status !== "needed" || Date.now() - lookedAt < 10 * 1000) return;
+    lookedAt = Date.now();
+    const ticket = renewTicket;
+    let done = false;
+    try { done = await recheck(); } catch {}
+    if (ticket !== renewTicket || state.renewal?.status !== "needed") return;
+    if (done) renewDone();
+    else if (state.renewal.reason === "hardware") update({ approvals: state.approvals + 1 });
+  };
+  if (typeof globalThis.addEventListener === "function") {
+    ctx.effect(() => {
+      const onFocus = () => { void lookAgain(); };
+      const remove = globalThis.removeEventListener;
+      globalThis.addEventListener("focus", onFocus);
+      return () => { try { remove?.call(globalThis, "focus", onFocus); } catch {} };
+    });
+  }
+
   const cancelSignIn = () => {
     signInTicket += 1;
     session.cancel();
@@ -1251,7 +1333,9 @@ export function apply(ctx) {
 
   // A refresh the sign-in server refused ends the session: say so in place.
   ctx.effect(() => session.subscribe((view) => {
-    if (view.status === "signed-out" && state.status === "connected" && !signingOut) {
+    // Also while idle: a refusal during Approve, or Sign out in another
+    // window, turns Approve into Sign in.
+    if (view.status === "signed-out" && (state.status === "connected" || state.status === "idle") && !signingOut) {
       generation += 1;
       stopQueuePolling();
       update({ status: "signed-out", detail: view.detail ?? "" });
@@ -1794,7 +1878,7 @@ export function doorTransport({ request, sign }) {
     try {
       pass = (await sign({ machine: machine.id, op: payload.op, bodySha256: hash }))?.pass;
     } catch (error) {
-      if (error?.code === "unlinked" || error?.code === "fresh-approval") throw error;
+      if (error?.code === "unlinked" || error?.code === "approval") throw error;
       throw Object.assign(new Error(`Could not reach the ${machine.label}: your Black 4 sign-in could not get a pass (${plain(error?.message ?? error, 200)}).`), { code: "signin" });
     }
     if (typeof pass !== "string" || !pass) throw Object.assign(new Error(`Could not reach the ${machine.label}: your Black 4 sign-in got no pass.`), { code: "signin" });

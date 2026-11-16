@@ -72,7 +72,13 @@ Terminal, Node, Tailscale or an SSH key.
     sign-in ended) and replaced when you sign in again. A dropped network
     never deletes it.
   - If Buzz's web storage is blocked or fails, the sign-in is kept in memory
-    only and you sign in again after a restart.
+    only and you sign in again after a restart; a failed write leaves what
+    was stored for the other windows. A value under the key that isn't this
+    plugin's (corrupt, or another version's) counts as no sign-in and is
+    left alone until you sign in.
+  - Only a refused refresh token (`invalid_grant`) deletes it. A sign-in
+    server error, or a misconfiguration such as `invalid_client`, shows *Not
+    connected* and keeps it.
   - Signing out in one Buzz window signs the others out at their next token
     refresh (within about five minutes).
   - Buzz opens **Settings → Black 4** at its Sign in by itself only the first
@@ -91,8 +97,11 @@ Terminal, Node, Tailscale or an SSH key.
     Every surface shows **Approve in browser** and the Reviews entry a dot.
   Either way you stay signed in and the kept sign-in is not removed. Approve
   shows a code, large and copyable, and opens your browser, as signing in
-  does; once you approve, Buzz carries on by itself (an action such as
-  **Create** is chosen again).
+  does. Once you approve there, this window reconnects (idle) or reads the
+  machine again (hardware) by itself; an action such as **Create** is chosen
+  again. Cancel and Approve again picks up the same code. Approved in
+  another Buzz window? This one notices when you come back to it or press
+  Approve, without a second approval.
 - **Until you sign in after a launch**, Buzz's own agents can't use Black 4
   tools, and **Black 4 hardware** isn't offered. Your existing hardware agents
   keep running on the machine, but Buzz shows them as *Harness unavailable*

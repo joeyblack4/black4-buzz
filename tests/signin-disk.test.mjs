@@ -152,29 +152,86 @@ test("two windows refreshing at the same moment: the loser picks up the winner's
   assert.ok(authkit.refresh.has(stored(storage)), "the kept token is live");
 });
 
-test("a refused token is cleared only if the disk still holds it: a newer sign-in saved meanwhile stays", async () => {
+test("a newer sign-in that lands just as this window gives up is adopted, not cleared, and nothing prompts", async () => {
   const authkit = fakeAuthKit();
   const storage = fakeStorage();
-  storage.setItem(SIGNIN_KEY, JSON.stringify({ v: 1, refresh: authkit.issue().refresh_token }));
-  const session = windowOn(authkit, storage);
-  await session.restore();
-  // This window's sign-in is revoked; another window has just signed in anew,
-  // and its token lands on disk after this window's last look.
-  authkit.refresh.clear();
-  const newer = authkit.issue().refresh_token;
-  authkit.refresh.delete(newer); // not live for this window's exchange either
+  storage.setItem(SIGNIN_KEY, JSON.stringify({ v: 1, refresh: "refresh-revoked" }));
+  const fresh = authkit.issue().refresh_token; // another window's new sign-in
   let looks = 0;
   const store = diskStore({ storage: () => storage });
-  const watched = createSession({
+  const session = createSession({
     request: https({ authkit }).request, sleep: yieldTurn,
     // Loads: restore, the pre-read, three looks after the refusal, then the
     // compare before clearing: the other window's save lands just before it.
-    store: { ...store, load: async () => { looks += 1; if (looks === 6) storage.setItem(SIGNIN_KEY, JSON.stringify({ v: 1, refresh: "refresh-another-window" })); return store.load(); } },
+    store: { ...store, load: async () => { looks += 1; if (looks === 6) storage.setItem(SIGNIN_KEY, JSON.stringify({ v: 1, refresh: fresh })); return store.load(); } },
   });
+  assert.equal(await session.restore(), true, "adopted");
+  assert.notEqual(session.snapshot().ended, true);
+  assert.ok(authkit.refresh.has(stored(storage)), "the kept token is the live one");
+});
+
+test("a newer token that is also refused is cleared, and the sign-in ended", async () => {
+  const authkit = fakeAuthKit();
+  const storage = fakeStorage();
   storage.setItem(SIGNIN_KEY, JSON.stringify({ v: 1, refresh: "refresh-revoked" }));
-  assert.equal(await watched.restore(), false, "refused");
-  assert.equal(stored(storage), "refresh-another-window", "the other window's sign-in is left alone");
-  await assert.rejects(session.accessToken({ force: true }));
+  let looks = 0;
+  const store = diskStore({ storage: () => storage });
+  const session = createSession({
+    request: https({ authkit }).request, sleep: yieldTurn,
+    store: { ...store, load: async () => { looks += 1; if (looks === 6) storage.setItem(SIGNIN_KEY, JSON.stringify({ v: 1, refresh: "refresh-also-revoked" })); return store.load(); } },
+  });
+  assert.equal(await session.restore(), false);
+  assert.equal(stored(storage), null);
+  assert.equal(session.snapshot().ended, true);
+});
+
+test("only invalid_grant ends the sign-in: invalid_client or a server error keeps it and reads as not reachable", async () => {
+  for (const [status, error] of [[401, "invalid_client"], [400, "invalid_request"], [500, "server_error"]]) {
+    const authkit = fakeAuthKit();
+    const storage = fakeStorage();
+    const token = authkit.issue().refresh_token;
+    storage.setItem(SIGNIN_KEY, JSON.stringify({ v: 1, refresh: token }));
+    const handle = authkit.handle;
+    authkit.handle = (input) => (input.body.includes("grant_type=refresh_token") ? { status, headers: {}, body: JSON.stringify({ error }) } : handle(input));
+    const session = windowOn(authkit, storage);
+    await assert.rejects(session.restore(), (failure) => failure.code === "offline", `${error}: not reachable, kept`);
+    assert.equal(stored(storage), token, `${error}: kept`);
+    assert.notEqual(session.snapshot().ended, true);
+  }
+});
+
+test("a failed write keeps what is on disk for the other windows; this window carries on from memory", async () => {
+  const authkit = fakeAuthKit();
+  const storage = fakeStorage();
+  const first = authkit.issue().refresh_token;
+  storage.setItem(SIGNIN_KEY, JSON.stringify({ v: 1, refresh: first }));
+  const store = diskStore({ storage: () => storage });
+  const session = createSession({ request: https({ authkit }).request, store, sleep: yieldTurn });
+  const setItem = storage.setItem;
+  storage.setItem = () => { throw new Error("QuotaExceededError"); };
+  assert.equal(await session.restore(), true);
+  assert.equal(stored(storage), first, "the disk still holds what it held");
+  assert.ok(authkit.refresh.has(await store.load()), "this window holds the rotated one in memory");
+  storage.setItem = setItem;
+});
+
+test("an unreadable or foreign value under the key reads as nothing kept, is not deleted, and never signs other windows out", async () => {
+  const authkit = fakeAuthKit();
+  for (const raw of ["{not json", JSON.stringify({ v: 2, refresh: "refresh-from-a-newer-plugin" }), JSON.stringify("just a string")]) {
+    const storage = fakeStorage();
+    storage.setItem(SIGNIN_KEY, raw);
+    const launch = windowOn(authkit, storage);
+    assert.equal(await launch.restore(), false, "nothing kept at launch");
+    assert.equal(storage.values.get(SIGNIN_KEY), raw, "left as it was");
+    // A window already signed in is not signed out by it.
+    const token = authkit.issue().refresh_token;
+    const store = diskStore({ storage: () => storage });
+    await store.save(token);
+    storage.values.set(SIGNIN_KEY, raw);
+    const running = createSession({ request: https({ authkit }).request, store, sleep: yieldTurn });
+    assert.equal(await running.restore(), true, "this window uses what it last kept");
+    assert.equal(running.snapshot().status, "signed-in");
+  }
 });
 
 test("Sign out in one window signs the other out at its next refresh, without bringing the token back", async () => {
@@ -203,7 +260,6 @@ test("blocked localStorage: the sign-in is kept in memory for this run, and noth
     assert.match(await store.load(), /^refresh-/, `${fail}: kept in memory`);
     await session.accessToken({ force: true });
     assert.equal(session.snapshot().status, "signed-in");
-    assert.equal(storage.values.has(SIGNIN_KEY), false, "no stale token left on disk");
     await session.signOut();
     assert.equal(await store.load(), null);
   }

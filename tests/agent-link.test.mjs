@@ -76,6 +76,8 @@ async function harness(t, black4, { viewer = VIEWER, plugin = true, register, si
   const { apply, signInStore } = await freshPlugin();
   const mcp = fakeMcp(authkit, { answer: (message) => black4.answer(message) });
   mcp.renew = null; // the server below answers renew_signin
+  // One approval for the person, as on the server: passes are gated with links.
+  Object.defineProperty(mcp, "approvalRequired", { get: () => black4.approvalRequired, set: (value) => { black4.approvalRequired = value; } });
   const door = fakeDoor(mcp, agentctl);
   const net = https({ authkit, mcp, door });
   if (signedIn) await signInStore.save(authkit.issue().refresh_token);
@@ -468,7 +470,7 @@ test("signing in with linking refused for want of a recent approval: Approve in 
   assert.equal(approveButtons(ui.whole()), 1, "one Approve in Settings, in Agent access");
   find(ui.view(), "Approve in browser").props.onClick();
   await until(() => /^Agent access Linked/.test(ui.text()), { timeoutMs: 6000, what: "linked after approval" });
-  assert.ok(black4.calls.filter((call) => call.name === "link_agent_owner_key").length >= 2, "refused, then made by itself");
+  assert.equal(black4.calls.filter((call) => call.name === "link_agent_owner_key").length, 2, `refused once, then made once by itself: ${JSON.stringify(black4.calls.map((call) => call.name))}`);
   assert.deepEqual(black4.renew.calls[0], {}, "renew_signin started with no input");
   assert.equal(black4.links.length, 1);
 });
@@ -481,6 +483,7 @@ test("Link my agents refused for want of a recent approval: the same Approve, th
   black4.renew.polls = ["pending"];
   await ui.click("Link my agents");
   assert.match(ui.text(), /Linking waits for your approval/);
+  assert.match(find(ui.view(), "Approve in browser").props.title, /^Linking your agents asks for a recent approval/, "the tooltip fits the link");
   await ui.click("Approve in browser");
   await until(() => /LINK-CODE/.test(ui.text()), { timeoutMs: 6000, what: "the code" });
   await ui.click("Cancel");
@@ -500,7 +503,60 @@ test("an agent's call refused for want of a recent approval tells the agent what
   const tool = ui.agentTool("black4_invite_customer_admin");
   await assert.rejects(tool.call({}, {}, { email: "new@example.test" }), /Approve in browser in Buzz/);
   assert.ok(find(ui.whole(), "Approve in browser"), "the person sees Approve in Settings");
+  assert.match(find(ui.whole(), "Approve in browser").props.title, /^Black 4 asks for a recent approval/, "a neutral tooltip, not hardware's");
   find(ui.whole(), "Approve in browser").props.onClick();
   await until(() => !find(ui.whole(), "Approve in browser") && !/LINK-CODE|Approving/.test(ui.wholeText()), { timeoutMs: 6000, what: "approved" });
   assert.equal(await tool.call({}, {}, { email: "new@example.test" }), JSON.stringify({ invited: true }), "the agent's retry works");
+});
+
+test("a declined or expired approval at the link step: still waiting with Approve and why, never 'not linked', and no link retried", async (t) => {
+  for (const [step, says] of [["denied", /declined/], ["expired", /expired/]]) {
+    const black4 = server({ listed: ["whoami", "call_tool"] });
+    const ui = await harness(t, black4);
+    await settle();
+    black4.approvalRequired = true;
+    black4.renew.polls = [step];
+    await ui.click("Link my agents");
+    const links = () => black4.calls.filter((call) => call.name === "link_agent_owner_key").length;
+    assert.equal(links(), 1);
+    await ui.click("Approve in browser");
+    await until(() => says.test(ui.text()) && find(ui.view(), "Approve in browser"), { timeoutMs: 6000, what: `${step} shown` });
+    assert.match(ui.text(), /Linking waits for your approval/);
+    assert.doesNotMatch(ui.text(), /not linked/i);
+    assert.match(ui.wholeText(), /Status Connected/);
+    assert.equal(links(), 1, `${step}: the link is not tried again`);
+  }
+});
+
+test("coming back to the window after a declined approval does not try the link again", async (t) => {
+  const listeners = new Map();
+  const previous = { add: globalThis.addEventListener, remove: globalThis.removeEventListener };
+  globalThis.addEventListener = (name, fn) => listeners.set(name, fn);
+  globalThis.removeEventListener = (name) => listeners.delete(name);
+  t.after(() => { globalThis.addEventListener = previous.add; globalThis.removeEventListener = previous.remove; });
+  const black4 = server({ listed: ["whoami", "call_tool"] });
+  const ui = await harness(t, black4);
+  await settle();
+  black4.approvalRequired = true;
+  black4.renew.polls = ["denied"];
+  await ui.click("Link my agents");
+  await ui.click("Approve in browser");
+  await until(() => /declined/.test(ui.text()), { timeoutMs: 6000, what: "declined" });
+  const links = black4.calls.filter((call) => call.name === "link_agent_owner_key").length;
+  listeners.get("focus")();
+  await settle();
+  assert.equal(black4.calls.filter((call) => call.name === "link_agent_owner_key").length, links, "no Linking… flicker");
+  assert.match(ui.text(), /Linking waits for your approval/);
+});
+
+test("an agent's own link succeeding while the plugin's link waits: the prompt clears and Agent access links by itself", async (t) => {
+  const black4 = server({ listed: ["whoami", "call_tool", "link_agent_owner_key"] });
+  const ui = await harness(t, black4);
+  await settle();
+  black4.approvalRequired = true;
+  await ui.click("Link my agents");
+  assert.match(ui.text(), /Linking waits for your approval/);
+  black4.approvalRequired = false; // approved elsewhere
+  await ui.agentTool("black4_link_agent_owner_key").call({}, {}, { ownerKey: OTHER, label: "An agent's own" });
+  await until(() => /^Agent access Linked/.test(ui.text()), { timeoutMs: 6000, what: "linked by itself" });
 });

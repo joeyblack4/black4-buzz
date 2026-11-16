@@ -951,16 +951,19 @@ export function apply(ctx) {
       }
       throw error;
     }
-    approvalSeen(name);
+    approvalSeen(name, { ownLink: name === "link_agent_owner_key" });
     return answer;
   };
   /** Black 4 asked for a recent approval: one Approve, wherever it is shown. */
   const needApproval = (reason) => { if (!state.renewal) update({ renewal: { reason, status: "needed" } }); };
   /** A gated tool worked: the approval is there (given here or elsewhere). */
-  const approvalSeen = (name) => {
+  // `ownLink`: the plugin's own link call (its answer sets Agent access
+  // itself); any other gated call, an agent's link included, retries the
+  // link that waited.
+  const approvalSeen = (name, { ownLink = false } = {}) => {
     if (!APPROVAL_GATED.includes(name) || !state.renewal || state.renewal.reason === "idle" || state.renewal.status !== "needed") return;
     update({ renewal: null });
-    if (name !== "link_agent_owner_key" && state.agentLink?.status === "approval") void linkAgents();
+    if (!ownLink && state.agentLink?.status === "approval") void linkAgents();
   };
   const linkFailure = (error, key) => ({
     status: error.code === "unavailable" ? "unavailable" : "error",
@@ -1333,7 +1336,6 @@ export function apply(ctx) {
     if (ticket !== renewTicket || state.renewal?.status !== "needed") return;
     if (done) renewDone();
     else if (state.renewal.reason === "hardware") update({ approvals: state.approvals + 1 });
-    else if (state.agentLink?.status === "approval") void linkAgents(); // approved elsewhere? the link tells
   };
   if (typeof globalThis.addEventListener === "function") {
     ctx.effect(() => {
@@ -1642,7 +1644,9 @@ export function apply(ctx) {
           className: "b4-go", autoFocus: focus || undefined,
           title: renewing.reason === "idle"
             ? "Black 4 asks you to approve this sign-in again after a while unused. You stay signed in."
-            : "Black 4 hardware asks for a recent approval of this sign-in. You stay signed in.",
+            : renewing.reason === "hardware" ? "Black 4 hardware asks for a recent approval of this sign-in. You stay signed in."
+              : renewing.reason === "link" ? "Linking your agents asks for a recent approval of this sign-in. You stay signed in."
+                : "Black 4 asks for a recent approval of this sign-in. You stay signed in.",
         }));
     }
     if (current.status === "signing-in") return current.signIn ? waiting(current.signIn, cancelSignIn) : busy("Signing in…", cancelSignIn);

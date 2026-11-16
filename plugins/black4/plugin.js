@@ -18,7 +18,7 @@
 // it runs in its own scope and a failure there is shown in the Settings card
 // instead of stopping the rest.
 
-export const inject = ["react", "host", "agents", "settingsCards", "panels", "browser", "conversation", "pages", "relay", "navigation"];
+export const inject = ["react", "host", "agents", "settingsCards", "panels", "browser", "conversation", "pages", "relay"];
 
 const PREFIX = "black4_";
 const CALL_TIMEOUT_MS = 5 * 60 * 1000;
@@ -93,13 +93,23 @@ export const signInMemory = memoryStore(); // this Buzz run's sign-in (tests see
 export const signInPrompt = { due: true, connected: false };
 /** Remembers, on this device, which installed revision already opened its
  * Sign in by itself: one revision opens Settings once, on its first
- * activation, never on every launch. Not a secret: a revision string only. */
+ * activation, never on every launch. Not a secret: a revision string only.
+ * Module memory backs it within a run; without working storage nothing can
+ * be remembered across launches, so the install prompt is not shown at all. */
 export const PROMPTED_KEY = "ai.black4.signin-prompted";
+const shownThisRun = new Set();
 const promptedRevision = {
+  /** true: already shown; false: not yet; null: cannot be remembered. */
   seen(revision) {
-    try { return globalThis.localStorage?.getItem(PROMPTED_KEY) === revision; } catch { return false; }
+    if (shownThisRun.has(revision)) return true;
+    try {
+      const storage = globalThis.localStorage;
+      if (!storage) return null;
+      return storage.getItem(PROMPTED_KEY) === revision;
+    } catch { return null; }
   },
   remember(revision) {
+    shownThisRun.add(revision);
     try { globalThis.localStorage?.setItem(PROMPTED_KEY, revision); } catch {}
   },
 };
@@ -267,7 +277,8 @@ export function createMcp({ request, session, url = MCP_URL, clientInfo = { name
   const post = async (message, { timeoutMs = 60 * 1000, retried = false, reopened = false } = {}) => {
     let token;
     try { token = await session.accessToken({ force: retried }); } catch (error) {
-      throw Object.assign(new Error(error.message), { code: "signin" });
+      // A refresh that could not reach the sign-in server is offline, not signed out.
+      throw Object.assign(new Error(error.message), { code: error?.code === "offline" ? "offline" : "signin" });
     }
     const headers = {
       "content-type": "application/json",
@@ -595,30 +606,30 @@ export function apply(ctx) {
   // Black 4, its Sign in button focused, by itself in two cases only:
   // - "installed": the first activation of an installed revision (a fresh
   //   install, or an update, which also starts signed out), once per device;
-  // - "ended": a sign-in that worked in this Buzz run ended (refused refresh).
+  //   skipped when the revision is unknown or cannot be remembered;
+  // - "ended": a sign-in that worked in this Buzz run was refused later.
   // An ordinary launch opens nothing: every surface shows Sign in in place
   // and the Reviews dock entry carries a dot. Once per Buzz run; a successful
-  // sign-in arms it again. Sign out, Cancel and a declined or expired code
-  // never prompt. An open that never showed (superseded, or failed without
-  // showing anything) is tried once more, on the next community change.
+  // sign-in arms it again. Sign out, Cancel, a declined or expired code and a
+  // dropped network never prompt. It is never retried later: an open that did
+  // not show (the person was busy elsewhere) is left to the in-place Sign in.
+  // Navigation is optional: a host without it still activates.
   const settingsSection = `${ctx.pluginOwner?.id ?? "ai.black4"}/connection`;
-  const revision = String(ctx.pluginOwner?.revision ?? "unknown");
-  let missed = 0; // opens in a row that never showed
-  let missedReason = null;
-  const promptSignIn = (reason, { retry = false } = {}) => {
-    if (retry) { if (missed !== 1) return; reason = missedReason; }
-    if (reason === "installed" && promptedRevision.seen(revision)) return;
-    if (!signInPrompt.due || stopped || typeof ctx.navigation?.open !== "function") return;
+  const revision = typeof ctx.pluginOwner?.revision === "string" && ctx.pluginOwner.revision ? ctx.pluginOwner.revision : null;
+  const navigation = () => {
+    try { return ctx.reflect?.get?.("navigation") ?? undefined; } catch { return undefined; }
+  };
+  const promptSignIn = (reason) => {
+    if (reason === "installed" && (!revision || promptedRevision.seen(revision) !== false)) return;
+    const nav = navigation();
+    if (!signInPrompt.due || stopped || typeof nav?.open !== "function") return;
     signInPrompt.due = false;
-    const miss = () => { missed += 1; missedReason = reason; if (missed === 1) signInPrompt.due = true; };
-    const shown = () => { missed = 0; if (reason === "installed") promptedRevision.remember(revision); };
+    const shown = (result) => {
+      if (reason === "installed" && !(result?.status === "failed" && !result.presented)) promptedRevision.remember(revision);
+    };
     try {
-      Promise.resolve(ctx.navigation.open({ version: 1, kind: "settings", section: settingsSection }))
-        .then((result) => {
-          if (result?.status === "superseded" || (result?.status === "failed" && !result.presented)) miss();
-          else shown();
-        }, miss);
-    } catch { miss(); }
+      Promise.resolve(nav.open({ version: 1, kind: "settings", section: settingsSection })).then(shown, () => {});
+    } catch {}
   };
   const signedOutWhy = () => (signInPrompt.connected ? "ended" : "installed");
   /** Opens a sign-in link in the default browser, as a click on it would:
@@ -942,7 +953,9 @@ export function apply(ctx) {
       void checkLink({ link });
     } catch (error) {
       if (attempt !== generation || stopped) return;
-      if (error?.code === "signin" || !session.signedIn) { update({ status: "signed-out", detail: error?.message ?? "" }); promptSignIn(signedOutWhy()); }
+      // Signed out only when the sign-in server refused the grant (the session
+      // says so); anything else, a dropped network included, is retried.
+      if (session.snapshot().status === "signed-out") { update({ status: "signed-out", detail: session.snapshot().detail ?? error?.message ?? "" }); promptSignIn(signedOutWhy()); }
       else scheduleRetry(error?.message ?? String(error));
     } finally {
       if (attempt === generation) starting = false;
@@ -981,14 +994,12 @@ export function apply(ctx) {
     }
     if (stopped || mine !== signInTicket) return;
     signInPrompt.due = true; // a sign-in that ends later may prompt once more
-    missed = 0;
     update({ signIn: null });
     linkOnConnect = true;
     reconnect();
   };
   const cancelSignIn = () => {
     signInTicket += 1;
-    missed = 0;
     session.cancel();
     update({ status: "signed-out", signIn: null, detail: "" });
   };
@@ -1000,7 +1011,6 @@ export function apply(ctx) {
     clearTimeout(retryTimer);
     stopQueuePolling();
     signingOut = true;
-    missed = 0;
     try { await session.signOut(); } finally { signingOut = false; }
     hardware.withdraw();
     update({ status: "signed-out", detail: "", account: null, hardware: "hidden" });
@@ -1043,7 +1053,6 @@ export function apply(ctx) {
     ctx.effect(() => ctx.relay.subscribe(() => {
       const key = viewerKey();
       if (state.status === "connected" && key !== (state.agentLink.key ?? null)) void checkLink();
-      if (state.status === "signed-out") promptSignIn(null, { retry: true });
     }));
   }
 
@@ -1116,7 +1125,7 @@ export function apply(ctx) {
   function ReviewsBadge() {
     const current = useBridgeState();
     if (current.status === "signed-out") return h("span", {
-      role: "img", "aria-label": "Sign in to Black 4", title: "Sign in to Black 4",
+      role: "img", "aria-label": current.detail ? `Sign in to Black 4. ${current.detail}` : "Sign in to Black 4", title: "Sign in to Black 4",
       style: { display: "inline-block", width: ".5em", height: ".5em", borderRadius: "50%", background: "var(--affordance-prominent, CanvasText)" },
     });
     if (current.status !== "connected" || !current.waiting) return null;
@@ -1262,10 +1271,14 @@ export function apply(ctx) {
         bar(status, link, button("Cancel", cancelSignIn)));
     }
     if (current.status !== "signed-out") return null;
+    // Why the last sign-in ended is announced once, from Settings (which a
+    // sign-in that ended opens, its button focused and described by it), not
+    // as an alert from every surface showing Sign in.
+    const described = focus && current.detail ? "b4-signin-detail" : undefined;
     return wrap(
-      current.detail ? h("span", { role: "alert", className: "b4-muted" }, current.detail) : null,
+      current.detail ? h("span", { id: described, className: "b4-muted" }, current.detail) : null,
       button("Sign in to Black 4", () => void signIn(), {
-        className: "b4-go", autoFocus: focus || undefined,
+        className: "b4-go", autoFocus: focus || undefined, "aria-describedby": described,
         title: "Gives every agent in Buzz the Black 4 tools, as you",
       }));
   }
@@ -2023,10 +2036,14 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
   // that ended leaves this type registered; its views then show Sign in, and
   // read the machine again once signed in.
   const SignInPrompt = access?.signIn?.Prompt;
-  const useSignedOut = () => {
-    const status = access?.signIn?.use?.();
-    return status === "signed-out" || status === "signing-in";
+  // Signed out (or signing in): show Sign in. Reachable: Black 4 is
+  // connected, so the door can mint passes. In between (starting, failed)
+  // the machine is not asked; it is asked once connected.
+  const useBlack4 = () => {
+    const status = access?.signIn ? access.signIn.use?.() : "connected";
+    return { signedOut: status === "signed-out" || status === "signing-in", reachable: status === "connected" };
   };
+  const useSignedOut = () => useBlack4().signedOut;
 
   const Select = ({ label, value, options, onChange, disabled, title }) =>
     h("label", { style: { display: "grid", gap: 4 } }, label,
@@ -2035,18 +2052,18 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
 
   /** The machine's status (or its models), read in an effect and shared across views. */
   const useReader = (reader, machineId) => {
-    const signedOut = useSignedOut();
+    const { reachable } = useBlack4();
     const [status, setStatus] = React.useState(() => reader.peek(machineId));
-    const wasSignedOut = React.useRef(signedOut);
+    const wasReachable = React.useRef(reachable);
     React.useEffect(() => {
       let live = true;
-      const back = wasSignedOut.current && !signedOut; // just signed in: what was read signed out is stale
-      wasSignedOut.current = signedOut;
+      const back = !wasReachable.current && reachable; // just connected: anything read before is stale
+      wasReachable.current = reachable;
       setStatus(reader.peek(machineId));
       const off = reader.subscribe((id) => { if (live && id === machineOf(machineId).id) setStatus(reader.peek(machineId)); });
-      if (ask && !signedOut) void reader.read(machineId, back ? { force: true } : undefined).then((next) => { if (live) setStatus(next); });
+      if (ask && reachable) void reader.read(machineId, back ? { force: true } : undefined).then((next) => { if (live) setStatus(next); });
       return () => { live = false; off(); };
-    }, [machineId, signedOut]);
+    }, [machineId, reachable]);
     return status;
   };
   const useStatus = (machineId) => useReader(statuses, machineId);
@@ -2224,11 +2241,11 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
     const [beat, setBeat] = React.useState({ loading: true, minutes: 0, base: "", draft: "", custom: false, defaultPrompt: "" });
     const [beatBusy, setBeatBusy] = React.useState(false);
     const [picking, setPicking] = React.useState({ saving: false });
-    const signedOut = useSignedOut();
+    const { signedOut, reachable } = useBlack4();
 
     React.useEffect(() => directory.subscribe(() => setSeen(directory.peek(pubkey))), [pubkey]);
     React.useEffect(() => {
-      if (signedOut) return undefined; // read once signed in (Sign in shows above)
+      if (!reachable) return undefined; // read once connected (Sign in shows while signed out)
       const controller = new AbortController();
       const { signal } = controller;
       setRun((prior) => ({ ...prior, loading: true, error: undefined }));
@@ -2255,7 +2272,7 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
         else setBeat({ loading: false, minutes: 0, base: "", draft: "", custom: false, defaultPrompt: "", error: String(heartbeat.reason?.message ?? heartbeat.reason) });
       })().catch((error) => { if (!signal.aborted) setRun({ loading: false, error: String(error?.message ?? error) }); });
       return () => controller.abort();
-    }, [pubkey, revision, signedOut]);
+    }, [pubkey, revision, reachable]);
 
     const machine = machineOf(machineId);
     const harness = run.harness ?? seen?.harness;

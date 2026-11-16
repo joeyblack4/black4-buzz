@@ -10,7 +10,7 @@
     "ai.black4": {
       "title": "Black 4 (sign-in and MCP over HTTPS, Reviews, Agent access, Black 4 hardware)",
       "dir": "plugins/black4",
-      "inject": ["react", "host", "agents", "settingsCards", "panels", "browser", "conversation", "pages", "relay", "navigation"],
+      "inject": ["react", "host", "agents", "settingsCards", "panels", "browser", "conversation", "pages", "relay"],
       "aliases": {},
       "manifest": [
         "id",
@@ -62,6 +62,7 @@
         "conversation.registerLinkPreview(0).component(0).url",
         "conversation.registerLinkPreview(0).component(0).open",
         "settingsCards.register",
+        "reflect.get",
         "navigation.open",
         "navigation.open(0).version",
         "navigation.open(0).kind",

@@ -18,13 +18,15 @@ const whoami = (message) => message.method === "tools/list"
 
 /** The plugin on a test host. `module` reuses a plugin module (one Buzz run)
  * across harnesses; `opens` scripts what navigation.open answers. */
-async function harness(t, { signedIn = false, polls = ["authorization_pending", "authorization_pending", "authorization_pending", "ok"], module, browser = true, opens = () => ({ status: "opened" }), owner, revision, relay = true } = {}) {
+async function harness(t, { signedIn = false, polls = ["authorization_pending", "authorization_pending", "authorization_pending", "ok"], module, browser = true, opens = () => ({ status: "opened" }), owner, revision = "test", relay = true, navigation } = {}) {
+  if (!globalThis.__b4device) deviceStorage(t);
   const plugin = module ?? await freshPlugin();
+  const opened = [];
   const authkit = fakeAuthKit({ polls, interval: 0.02 });
   const mcp = fakeMcp(authkit, { answer: whoami });
   const net = https({ authkit, mcp });
+  const nav = navigation === undefined ? { open: async (target) => { opened.push(target); return opens(opened.length); } } : navigation;
   if (signedIn) await plugin.signInMemory.save(authkit.issue().refresh_token);
-  const opened = [];
   const regs = {};
   const tools = new Map();
   const relayListeners = new Set();
@@ -38,17 +40,17 @@ async function harness(t, { signedIn = false, polls = ["authorization_pending", 
     panels: { register: (value) => { regs.panel = value; } },
     conversation: { registerLink() {}, registerLinkPreview: (value) => { regs.preview = value; } },
     browser: { available: browser, View: "browser-view" },
-    navigation: { open: async (target) => { opened.push(target); return opens(opened.length); } },
+    reflect: { get: (name) => (name === "navigation" ? nav ?? undefined : undefined) },
     effect: (fn) => { const off = fn(); if (off) cleanups.push(off); },
     host: { request: net.request },
-    ...(owner || revision ? { pluginOwner: { id: owner ?? "ai.black4", revision: revision ?? "test" } } : {}),
+    ...(owner || revision ? { pluginOwner: { id: owner ?? "ai.black4", ...(revision ? { revision } : {}) } } : {}),
     ...(relay ? { relay: { snapshot: () => ({ status: "ready", viewer: null, session: {} }), subscribe: (listener) => { relayListeners.add(listener); return () => relayListeners.delete(listener); } } } : {}),
   };
   plugin.apply(ctx);
   t.after(() => { for (const off of cleanups.reverse()) off(); });
   const settings = () => expand(regs.card.component());
   return {
-    plugin, authkit, mcp, opened, regs, tools,
+    plugin, authkit, mcp, net, opened, regs, tools,
     settings,
     panel: (target = QUEUE) => expand(regs.panel.component({ target })),
     preview: () => expand(regs.preview.component({ url: REVIEW, open() {} })),
@@ -87,7 +89,8 @@ function deviceStorage(t, { broken = false } = {}) {
     setItem: (key, value) => { if (broken) throw new Error("SecurityError"); values.set(key, String(value)); },
   };
   Object.defineProperty(globalThis, "localStorage", { value: storage, configurable: true, writable: true });
-  t.after(() => { if (previous) Object.defineProperty(globalThis, "localStorage", previous); else delete globalThis.localStorage; });
+  globalThis.__b4device = values;
+  t.after(() => { delete globalThis.__b4device; if (previous) Object.defineProperty(globalThis, "localStorage", previous); else delete globalThis.localStorage; });
   return values;
 }
 
@@ -126,30 +129,46 @@ test("an ordinary launch opens nothing: Sign in waits in place on every surface,
   assert.equal(launch.opened.length, 1, "a sign-in that ended while running opens Settings");
 });
 
-test("an update (a new revision) opens Sign in once again; storage that fails falls back to once per run", async (t) => {
+test("an update (a new revision) opens Sign in once again", async (t) => {
   const device = deviceStorage(t);
   device.set("ai.black4.signin-prompted", "rev-1");
   const updated = await harness(t, { revision: "rev-2" });
   await settle();
   assert.equal(updated.opened.length, 1);
   assert.equal(device.get("ai.black4.signin-prompted"), "rev-2");
-  const unremembered = await harness(t, { revision: "rev-2", opens: () => ({ status: "superseded" }) });
+  const again = await harness(t, { revision: "rev-2" });
   await settle();
-  assert.equal(unremembered.opened.length, 0, "already shown for this revision");
+  assert.equal(again.opened.length, 0, "already shown for this revision");
 });
 
-test("without working storage, the first activation in a run still opens Sign in", async (t) => {
+test("what cannot be remembered never prompts by itself: blocked storage, or no revision; Sign in waits in place", async (t) => {
   deviceStorage(t, { broken: true });
-  const app = await harness(t, { revision: "rev-1" });
+  const blocked = await harness(t, { revision: "rev-1" });
   await settle();
-  assert.equal(app.opened.length, 1);
+  assert.deepEqual(blocked.opened, [], "blocked storage: no prompt on every launch");
+  assert.ok(button(blocked.settings(), "Sign in to Black 4"));
+  assert.equal(blocked.badge().props["aria-label"], "Sign in to Black 4");
+  const unknown = await harness(t, { revision: null });
+  await settle();
+  assert.deepEqual(unknown.opened, [], "no revision: updates cannot be told apart, so no install prompt");
+  unknown.click("Sign in to Black 4");
+  await unknown.connected();
+  unknown.authkit.refresh.clear();
+  unknown.authkit.access.clear();
+  unknown.click("Reconnect");
+  await until(() => button(unknown.settings(), "Sign in to Black 4"), { what: "signed out" });
+  assert.equal(unknown.opened.length, 1, "a sign-in that ended still prompts");
 });
 
-test("an open that never showed is not remembered as shown", async (t) => {
+test("an open Buzz could not show is not remembered, so the next launch tries again; one the person moved past is", async (t) => {
   const device = deviceStorage(t);
-  const app = await harness(t, { revision: "rev-1", opens: () => ({ status: "superseded" }) });
+  const failed = await harness(t, { revision: "rev-1", opens: () => ({ status: "failed", reason: "unavailable" }) });
   await settle();
   assert.equal(device.has("ai.black4.signin-prompted"), false);
+  const superseded = await harness(t, { revision: "rev-1", opens: () => ({ status: "superseded" }) });
+  await settle();
+  assert.equal(superseded.opened.length, 1);
+  assert.equal(device.get("ai.black4.signin-prompted"), "rev-1", "superseded is the person's own navigation");
 });
 
 test("the section follows the installed plugin's id", async (t) => {
@@ -173,24 +192,47 @@ test("turned off and on again in the same run: no second prompt", async (t) => {
   assert.equal(again.opened.length, 0);
 });
 
-test("an open that never showed (failed or superseded) is tried once more on the next community change", async (t) => {
-  for (const status of ["failed", "superseded"]) {
-    const app = await harness(t, { opens: (n) => ({ status: n === 1 ? status : "opened" }) });
+test("an open that did not show is never retried later, in the middle of other work", async (t) => {
+  for (const [i, result] of [{ status: "superseded" }, { status: "failed", reason: "timeout" }, { status: "failed", reason: "unavailable", presented: true }].entries()) {
+    const app = await harness(t, { opens: () => result, revision: `rev-${i}` });
     await settle();
     assert.equal(app.opened.length, 1);
-    await app.communityChanged();
-    assert.equal(app.opened.length, 2, `${status}: tried again`);
-    await app.communityChanged();
-    assert.equal(app.opened.length, 2, "and once shown, not again");
+    for (let i = 0; i < 3; i++) await app.communityChanged();
+    assert.equal(app.opened.length, 1, `${result.status}: not opened again`);
+    assert.ok(button(app.settings(), "Sign in to Black 4"), "Sign in stays in place");
   }
-  const never = await harness(t, { opens: () => ({ status: "superseded" }) });
-  await settle();
-  for (let i = 0; i < 3; i++) await never.communityChanged();
-  assert.equal(never.opened.length, 2, "one retry at most");
-  const shownFailure = await harness(t, { opens: () => ({ status: "failed", reason: "unavailable", presented: true }) });
-  await settle();
-  await shownFailure.communityChanged();
-  assert.equal(shownFailure.opened.length, 1, "a failure Buzz showed the person is not repeated");
+});
+
+test("navigation is optional: without it, or when it throws or rejects, the plugin still runs and offers Sign in", async (t) => {
+  for (const navigation of [null, { open() { throw new Error("boom"); } }, { open: async () => { throw new Error("boom"); } }]) {
+    const app = await harness(t, { navigation });
+    await settle();
+    assert.ok(button(app.settings(), "Sign in to Black 4"));
+    app.click("Sign in to Black 4");
+    await app.connected();
+  }
+  const { inject } = await freshPlugin();
+  assert.equal(inject.includes("navigation"), false, "never a required service: a host without it still starts the plugin");
+});
+
+test("signed in, a dropped network is offline (retrying), never Sign in or a prompt", async (t) => {
+  const app = await harness(t, { signedIn: true });
+  await app.connected();
+  // The access token is no longer accepted and the sign-in server is unreachable.
+  app.net.offline.add(AUTHKIT);
+  app.authkit.access.clear();
+  app.click("Reconnect");
+  await until(() => /Not connected/.test(text(app.settings())), { what: "offline" });
+  assert.equal(button(app.settings(), "Sign in to Black 4"), null, "not signed out");
+  assert.match(text(app.settings()), /Could not reach Black 4 sign-in/);
+  assert.match(text(app.settings()), /Retrying in/);
+  assert.deepEqual(app.opened, [], "no Settings over the person's work");
+  assert.equal(app.badge(), null, "no Sign in dot");
+  assert.equal(button(app.panel(), "Sign in to Black 4"), null);
+  app.net.offline.clear();
+  app.click("Try again");
+  await app.connected();
+  assert.deepEqual(app.opened, []);
 });
 
 test("Sign out, Cancel, an expired code and a declined sign-in never open Settings", async (t) => {
@@ -338,7 +380,15 @@ test("signed in: no Sign in anywhere; ended: Sign in comes back everywhere with 
   for (const view of [app.settings(), app.panel(), app.preview()]) {
     assert.ok(button(view, "Sign in to Black 4"));
     assert.match(text(view), /sign-in ended/i);
+    assert.equal(find(view, (n) => n.props?.role === "alert"), null, "no surface announces it on its own");
   }
+  // Announced once: Settings (which opens) focuses Sign in, described by why.
+  const signIn = button(app.settings(), "Sign in to Black 4");
+  const reason = find(app.settings(), (n) => n.props?.id === signIn.props["aria-describedby"]);
+  assert.ok(reason, "the focused button is described by the reason");
+  assert.match(text(reason), /sign-in ended/i);
+  assert.equal(button(app.panel(), "Sign in to Black 4").props["aria-describedby"], undefined);
+  assert.match(app.badge().props["aria-label"], /^Sign in to Black 4\. .*sign-in ended/i, "the dock dot's label says why");
 });
 
 // ---- Black 4 hardware (Create agent and the agent's Settings) ----
@@ -416,10 +466,14 @@ test("Black 4 hardware: a sign-in that ended shows Sign in in the form (not read
   assert.doesNotMatch(treeText(tree), /Runs on|Could not reach/, "no machine controls that cannot work");
   assert.equal(ready.at(-1), false, "Create stays off");
   assert.deepEqual(asked, [], "nothing is asked of the machine while signed out");
-  for (const step of ["signing-in", "connected"]) {
+  // The real sequence: signing in, then connecting, then connected.
+  for (const step of ["signing-in", "starting"]) {
     status = step;
     tree = await settleTree(form);
+    assert.deepEqual(asked, [], `${step}: the machine is not asked before Black 4 is connected`);
   }
+  status = "connected";
+  tree = await settleTree(form);
   assert.equal(has(tree, isPrompt), false, "signed in: the form is back");
   assert.match(treeText(tree), /Runs on/);
   assert.ok(asked.includes("machine.status"), "and reads the machine at once");
@@ -432,6 +486,9 @@ test("Black 4 hardware: a sign-in that ended shows Sign in in the form (not read
   assert.ok(has(tree, isPrompt), "the agent's Settings shows Sign in");
   assert.doesNotMatch(treeText(tree), /Restart|Instructions|Checking/, "and nothing that needs the machine");
   assert.equal(asked.filter((op) => op === "status").length, before, "nothing is asked of the machine while signed out");
+  status = "starting";
+  tree = await settleTree(settingsTab);
+  assert.equal(asked.filter((op) => op === "status").length, before, "nor while Black 4 is still connecting");
   status = "connected";
   tree = await settleTree(settingsTab);
   assert.equal(has(tree, isPrompt), false);

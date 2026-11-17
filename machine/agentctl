@@ -31,6 +31,7 @@ Not requests (run from cron or by agentctl itself):
   agentctl models <slot>      makes a slot's model listing again, out of band
   agentctl restart-agents <harness> [pays]   restarts agents after a sign-in
   agentctl apply-later <pubkey>   applies an agent's own change once its turn ends
+  agentctl log-filter <raw> <log> <pid> <from>   follows buzz-acp's raw log into agent.log (every agent has one)
 
 Callers: a teammate reaches this machine with their own SSH key, whose
 authorized_keys entry forces `agentctl --caller <label>` (machine/teammates.sh
@@ -716,7 +717,10 @@ KEYS = {
     "codex": {"service": "OpenAI", "keyUrl": "https://platform.openai.com/api-keys",
               "bases": (("api", "https://api.openai.com/v1"),),
               "headers": BEARER, "rejected": UNAUTHORIZED,
-              "home_env": "CODEX_HOME", "env": lambda key, base: {},
+              # codex-acp 2.2.2 prompts on a key only with OPENAI_API_KEY in the environment as
+              # well as Codex's own auth.json (checked: with the file alone it answers
+              # "Authentication required" at the first prompt).
+              "home_env": "CODEX_HOME", "env": lambda key, base: {"OPENAI_API_KEY": key},
               "install": lambda key: install_codex_key(key), "installed": lambda key: codex_key_installed(key),
               "chat": lambda i: (i.startswith("gpt-") or re.match(r"^o\d", i) is not None) and not NOT_CHAT.search(i) and "instruct" not in i,
               "efforts": lambda i: cached_efforts("codex", i)},
@@ -819,8 +823,8 @@ You can read and change your own setup with agentctl: one JSON request on stdin,
         minutes: 5 to 1440, or 0 for off. "prompt" sets what each heartbeat does ("" for the default).
     echo '{{"op":"models"}}' | {cmd}
         the models and efforts you can run here
-    echo '{{"op":"settings.set","pubkey":"<pubkey>","model":"<id>","effort":"<level>"}}' | {cmd}
-        "" for the machine's default
+    echo '{{"op":"settings.set","pubkey":"<pubkey>","model":"<id>","effort":"<level>","compactAt":150000}}' | {cmd}
+        "" for the machine's default model or effort; compactAt: the tokens at which you compact your context, null for your harness's default
     echo '{{"op":"instructions.get","pubkey":"<pubkey>"}}' | {cmd}
     echo '{{"op":"instructions.set","pubkey":"<pubkey>","instructions":"<text>"}}' | {cmd}
     echo '{{"op":"start","pubkey":"<pubkey>"}}' | {cmd}
@@ -2040,15 +2044,28 @@ def _start(d):
     env.update(model_env)
     write_private(d / "launch.json", json.dumps({**{k: picked.get(k) for k in ("model", "effort", "note", "checked")}, "compactAt": compact_at}))
     cap_log(d / "agent.log", AGENT_LOG_CAP)
-    log = open(d / "agent.log", "ab")
+    # buzz-acp writes to agent.raw.log; the log filter follows it into
+    # agent.log (see "an agent changing itself"). The filter for the previous
+    # start is ended first, so no two write the same lines.
+    stop_sieve(d)
+    cap_log(d / "agent.raw.log", AGENT_LOG_CAP)
+    raw = open(d / "agent.raw.log", "ab")
+    try: os.chmod(d / "agent.raw.log", 0o600)
+    except OSError: pass
+    start_at = raw.tell()
     proc = subprocess.Popen(
         [str(BIN / "buzz-acp"), "--agent-owner", s["auth"][1]],
-        cwd=d / "work", env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+        cwd=d / "work", env=env, stdin=subprocess.DEVNULL, stdout=raw, stderr=raw,
         start_new_session=True)
-    log.close()
+    raw.close()
     (d / "pid").write_text(str(proc.pid))
+    sieve = subprocess.Popen([PYTHON, str(SELF), "log-filter", str(d / "agent.raw.log"), str(d / "agent.log"), str(proc.pid), str(start_at)],
+                             env={**base_env(), **root_env()}, cwd=str(d), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
+    write_private(d / "sieve.json", json.dumps({"pid": sieve.pid}))
     time.sleep(START_GRACE)
     if proc.poll() is not None:
+        time.sleep(0.5)  # what buzz-acp said on its way out, through the filter
         fail("agent stopped at start: " + log_tail(d, 600))
     ensure_persistence()
     return proc.pid
@@ -2086,11 +2103,20 @@ def stop_harness_agents(harness, pays=None):
 # outside the agent's process group. The turn's end is read from agent.log:
 # agents are started with buzz-acp's ACP wire log on (TURN_LOG), which writes
 # every session/prompt it sends and the result it gets back ({"stopReason":
-# ...}). From the log's size at the request, the waiter counts prompts opened
-# and results closed; the asking turn has ended when one more has closed than
-# opened (a heartbeat turn that starts and ends meanwhile cancels out). It
-# then waits for the log to be quiet for TURN_SETTLE seconds, so the reply has
-# gone out, and restarts the agent on the saved settings. buzz-acp sent SIGTERM
+# ...}). That wire also carries the agent's own key (session/new hands it to
+# the MCP server) and everything the model and its tools say, so buzz-acp
+# writes to agent.raw.log (in the agent's private folder, capped like the
+# log) and `agentctl log-filter` follows that file into agent.log, turning a
+# prompt into the bare line "agentctl: turn opened", a result into "agentctl:
+# turn closed", dropping every other wire line and passing the rest through.
+# (Not a pipe: a Node harness sets the pipe it shares with buzz-acp
+# non-blocking, and buzz-acp then dies writing to it.) Since buzz-acp last started (its "buzz-acp starting" line), the
+# waiter counts turns opened and closed; nothing is in flight when as many
+# have closed as opened, and that is when it restarts (a heartbeat agent runs
+# two model processes, so the asking turn is not the only one that may be
+# running). It then waits for the log to be quiet for TURN_SETTLE seconds, so
+# the reply has gone out, and restarts the agent on the saved settings.
+# buzz-acp sent SIGTERM
 # mid-turn does not wait (checked on 0.5.30: it cancels the turn after a few
 # seconds of silence), so nothing is signalled before that. A turn that has not
 # ended after APPLY_WAIT is stopped the hard way. Changes from people (the door,
@@ -2101,8 +2127,65 @@ TURN_SETTLE = 5        # then this long of a quiet log, for the reply to go out
 TURN_LOG = {"RUST_LOG": "info,acp::wire=debug"}  # buzz-acp's ACP traffic, in agent.log
 # buzz-acp writes what it sends compactly and what it receives as the agent
 # wrote it (Qwen Code without spaces, Python agents with), so spaces are optional.
-TURN_OPEN = re.compile(rb'acp::wire: \xe2\x86\x92 .*"method":\s*"session/prompt"')  # → a prompt sent
-TURN_CLOSE = re.compile(rb'acp::wire: \xe2\x86\x90 .*"result":\s*\{\s*"stopReason"')  # ← its result
+WIRE = b"acp::wire:"
+TURN_OPEN_WIRE = re.compile(rb'acp::wire: \xe2\x86\x92 .*"method":\s*"session/prompt"')  # → a prompt sent
+TURN_CLOSE_WIRE = re.compile(rb'acp::wire: \xe2\x86\x90 .*"result":\s*\{\s*"stopReason"')  # ← its result
+TURN_OPEN = re.compile(rb"agentctl: turn opened")   # what the log filter writes for them
+TURN_CLOSE = re.compile(rb"agentctl: turn closed")
+TURN_START = b"buzz-acp starting:"  # the line buzz-acp writes when it starts
+
+
+ANSI = re.compile(rb"\x1b\[[0-9;]*m")  # buzz-acp colours its log lines
+
+
+def sieve_line(line):
+    """What of one line of buzz-acp's output goes into agent.log: a wire line
+    becomes a bare turn marker or nothing; any other line passes through."""
+    plain = ANSI.sub(b"", line)
+    if WIRE not in plain: return line
+    stamp = plain.split(b" ", 1)[0]
+    if TURN_OPEN_WIRE.search(plain): return stamp + b"  INFO agentctl: turn opened\n"
+    if TURN_CLOSE_WIRE.search(plain): return stamp + b"  INFO agentctl: turn closed\n"
+    return b""
+
+
+def sieve_log(raw, log, pid, start):
+    """`agentctl log-filter <raw> <log> <pid> <from>`: follows agent.raw.log
+    from byte `from` into agent.log, line by line through sieve_line, until
+    buzz-acp (`pid`) is gone and nothing more has arrived. A raw log cut over
+    meanwhile (smaller than where we were) is read again from its start."""
+    pos, rest, idle = start, b"", 0
+    while True:
+        try: size = raw.stat().st_size
+        except OSError: size = 0
+        if size < pos: pos, rest = 0, b""
+        chunk = b""
+        if size > pos:
+            with open(raw, "rb") as f:
+                f.seek(pos); chunk = f.read(size - pos)
+            pos = size
+        if chunk:
+            lines = (rest + chunk).split(b"\n")
+            rest = lines.pop()
+            kept = b"".join(sieve_line(line + b"\n") for line in lines)
+            if kept:
+                with open(log, "ab") as out: out.write(kept)
+        alive = bool(process_command(pid))  # a zombie buzz-acp (not yet reaped) is gone
+        idle = 0 if chunk else idle + 1
+        if not alive and idle >= 2:
+            if rest:
+                with open(log, "ab") as out: out.write(sieve_line(rest + b"\n"))
+            return
+        time.sleep(0.2)
+
+
+def stop_sieve(d):
+    """Ends the log filter following this agent's raw log, if one is."""
+    pid = (read_json(d / "sieve.json", {}) or {}).get("pid")
+    if pid and "log-filter" in process_command(pid):
+        try: os.kill(pid, signal.SIGTERM)
+        except OSError: pass
+    (d / "sieve.json").unlink(missing_ok=True)
 APPLY_MARK = "applying.json"
 
 
@@ -2161,19 +2244,37 @@ def spawn_apply(d):
         pass
 
 
+def turns_in_flight(d):
+    """How many prompts buzz-acp has sent and not had answered since it last
+    started, from agent.log (and agent.log.1 when the log was cut over since
+    the start line); None when no start line can be found."""
+    text = b""
+    for name in ("agent.log.1", "agent.log"):
+        try:
+            with open(d / name, "rb") as f: text += f.read()
+        except OSError:
+            pass
+    text = ANSI.sub(b"", text)
+    start = text.rfind(TURN_START)
+    if start < 0: return None
+    text = text[start:]
+    return len(TURN_OPEN.findall(text)) - len(TURN_CLOSE.findall(text))
+
+
 def turn_ended(d, since):
-    """Whether, past byte `since` of agent.log, one more turn has closed than
-    opened: the turn that was running at `since` has ended. (A cut-over log
-    starts again at 0, so a smaller log is read from its start.)"""
+    """Whether the turn that asked (running at byte `since` of agent.log) has
+    ended and nothing else is in flight: as many results back as prompts sent
+    since buzz-acp started, and at least one result past `since`."""
     path = d / "agent.log"
     try:
         size = path.stat().st_size
         with open(path, "rb") as f:
             f.seek(since if size >= since else 0)
-            text = f.read()
+            closed_since = len(TURN_CLOSE.findall(ANSI.sub(b"", f.read())))
     except OSError:
         return False
-    return len(TURN_CLOSE.findall(text)) > len(TURN_OPEN.findall(text))
+    open_turns = turns_in_flight(d)
+    return closed_since > 0 and open_turns is not None and open_turns <= 0
 
 
 def log_quiet(d, seconds, limit=30):
@@ -2333,6 +2434,7 @@ def supervise_pass(now=None):
     now = now or time.time()
     for d in agent_dirs():
         cap_log(d / "agent.log", AGENT_LOG_CAP)
+        cap_log(d / "agent.raw.log", AGENT_LOG_CAP)
         s = read_settings(d)
         if not s.get("auth"): continue
         if applying(d): continue  # a self-change's waiter restarts it
@@ -3162,6 +3264,8 @@ def main(argv=None):
         return restart_harness_agents(argv[1], argv[2] if len(argv) == 3 else None)
     if argv[:1] == ["apply-later"] and len(argv) == 2 and HEX64.match(argv[1]) and (AGENTS / argv[1]).is_dir():
         return apply_later(AGENTS / argv[1])
+    if argv[:1] == ["log-filter"] and len(argv) == 5 and argv[3].isdigit() and argv[4].isdigit():
+        return sieve_log(Path(argv[1]), Path(argv[2]), int(argv[3]), int(argv[4]))
     try:
         try: req = json.loads(sys.stdin.read() or "{}")
         except ValueError: fail("request is not JSON")

@@ -246,9 +246,12 @@ Black 4 hardware agent on this machine, which folder is its own, and the exact
 instructions, and to restart. When an agent changes itself from its shell (a
 person asked it to), `agentctl` sees the request comes from inside the
 agent's own process tree, saves the change at once and answers `"applies":
-"after this turn"`; a detached waiter restarts it once buzz-acp has logged
-the end of that turn (agents run with buzz-acp's ACP wire log on for this),
-so the turn that asked still finishes and its reply posts. A change made by
+"after this turn"`; a detached waiter restarts it once no turn is in flight
+(agents run with buzz-acp's ACP wire log on for this; buzz-acp writes to a
+private `agent.raw.log` and a filter follows it into `agent.log`, keeping
+bare "turn opened" and "turn closed" lines and dropping the wire, which
+carries the agent's key and everything the model says), so the turn that
+asked still finishes and its reply posts. A change made by
 a person restarts the agent at once, as before. Job schedules are not the
 agent's to change here: they live in Platform Control.
 

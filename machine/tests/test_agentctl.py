@@ -90,11 +90,14 @@ if os.path.exists(os.path.join(home, "crash.txt")):
     print("buzz-acp: relay refused the connection", flush=True); sys.exit(1)
 import signal
 signal.signal(signal.SIGTERM, lambda *_: (open(os.path.join(home, "got-term.txt"), "a").write(str(os.getpid()) + "\\n"), sys.exit(0)))
+print("2026-11-17T00:00:00.000000Z  INFO buzz_acp: buzz-acp starting: relay=wss://relay.example.com pubkey=x agent_cmd=fake", flush=True)
+# The real wire log hands the MCP server the agent's key in session/new.
+print('2026-11-17T00:00:00.000000Z DEBUG acp::wire: \u2192 {{"id":1,"jsonrpc":"2.0","method":"session/new","params":{{"mcpServers":[{{"env":[{{"name":"BUZZ_PRIVATE_KEY","value":"' + os.environ.get("BUZZ_PRIVATE_KEY", "") + '"}}]}}]}}}}', flush=True)
 if os.path.exists(os.path.join(home, "turn.txt")):
-    # A turn in flight: its end is buzz-acp's own debug line, written when
-    # finish.txt appears (what the real one logs with RUST_LOG buzz_acp=debug).
+    # A turn in flight (what buzz-acp 0.5.30 writes with RUST_LOG acp::wire=debug
+    # when it sends a prompt); its result comes back when finish.txt appears.
+    print('2026-11-17T00:00:00.000000Z DEBUG acp::wire: \u2192 {{"id":2,"jsonrpc":"2.0","method":"session/prompt","params":{{}}}}', flush=True)
     while not os.path.exists(os.path.join(home, "finish.txt")): time.sleep(0.1)
-    # What buzz-acp 0.5.30 writes with RUST_LOG acp::wire=debug when the prompt's result comes back.
     print('2026-11-17T00:00:00.000000Z DEBUG acp::wire: \u2190 {{"jsonrpc": "2.0", "id": 2, "result": {{"stopReason": "end_turn"}}}}', flush=True)
 with open("env.json", "w") as f:
     json.dump({{k: v for k, v in os.environ.items() if k.startswith(("BUZZ_ACP", "BLACK4_", "RUST_LOG", "CLAUDE_CODE", "CLAUDE_CONFIG_DIR", "PATH", "CODEX", "GROK", "QWEN", "NO_BROWSER", "OPENAI", "XAI", "INITIAL_AGENT_MODE", "GOOSE", "ANTHROPIC"))}}, f)
@@ -761,17 +764,73 @@ class SelfChange(Base):
         self.assertFalse(self.a.turn_ended(agent, (agent / "agent.log").stat().st_size), "nothing past the end")
         self.assertTrue(self.a.turn_ended(agent, 10 ** 9), "a log cut over since the request is read from its start")
 
-    def test_a_turn_that_starts_and_ends_meanwhile_does_not_count_as_the_asking_one(self):
+    def test_the_log_filter_keeps_turn_markers_and_never_the_wire(self):
+        sieve = self.a.sieve_line
+        self.assertEqual(sieve(b"2026-11-17T00:00:00Z  INFO buzz_acp: buzz-acp starting: relay=x\n"), b"2026-11-17T00:00:00Z  INFO buzz_acp: buzz-acp starting: relay=x\n", "passes through")
+        self.assertEqual(sieve(b"2026-11-17T00:00:00Z DEBUG acp::wire: \xe2\x86\x92 {\"id\":4,\"jsonrpc\":\"2.0\",\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"secret things\"}]}}\n"),
+                         b"2026-11-17T00:00:00Z  INFO agentctl: turn opened\n", "what buzz-acp sends, compact")
+        self.assertEqual(sieve(b"2026-11-17T00:00:00Z DEBUG acp::wire: \xe2\x86\x90 {\"jsonrpc\": \"2.0\", \"id\": 4, \"result\": {\"stopReason\": \"end_turn\", \"_meta\": {}}}\n"),
+                         b"2026-11-17T00:00:00Z  INFO agentctl: turn closed\n", "what a Python agent answers, with spaces")
+        self.assertEqual(sieve(b"2026-11-17T00:00:00Z DEBUG acp::wire: \xe2\x86\x90 {\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{\"stopReason\":\"end_turn\"}}\n"),
+                         b"2026-11-17T00:00:00Z  INFO agentctl: turn closed\n", "what Qwen Code answers, without")
+        self.assertEqual(sieve(b"2026-11-17T00:00:00Z DEBUG acp::wire: \xe2\x86\x92 {\"method\":\"session/new\",\"params\":{\"mcpServers\":[{\"env\":[{\"name\":\"BUZZ_PRIVATE_KEY\",\"value\":\"" + b"k" * 64 + b"\"}]}]}}\n"), b"", "the agent's key never reaches the log")
+        self.assertEqual(sieve(b"2026-11-17T00:00:00Z DEBUG acp::wire: \xe2\x86\x90 {\"method\":\"session/update\",\"params\":{\"update\":{\"text\":\"what the model said\"}}}\n"), b"", "nor what the model says")
+        # As buzz-acp really writes it: coloured, the target split by escape codes.
+        coloured = b"\x1b[2m2026-11-17T00:00:00Z\x1b[0m \x1b[34mDEBUG\x1b[0m \x1b[2macp::wire\x1b[0m\x1b[2m:\x1b[0m \xe2\x86\x92 {\"id\":2,\"jsonrpc\":\"2.0\",\"method\":\"session/prompt\",\"params\":{}}\n"
+        self.assertEqual(sieve(coloured), b"2026-11-17T00:00:00Z  INFO agentctl: turn opened\n")
+        self.assertEqual(sieve(b"\x1b[2m2026-11-17T00:00:00Z\x1b[0m \x1b[34mDEBUG\x1b[0m \x1b[2macp::wire\x1b[0m\x1b[2m:\x1b[0m \xe2\x86\x92 {\"method\":\"session/new\",\"params\":{\"env\":[{\"name\":\"BUZZ_PRIVATE_KEY\",\"value\":\"k\"}]}}\n"), b"", "coloured or not, the key never reaches the log")
+        agent = self.make_agent("claude", activate=False)
+        (agent / "agent.log").write_bytes(b"\x1b[2m2026-11-17T00:00:00Z\x1b[0m  \x1b[32mINFO\x1b[0m \x1b[2mbuzz_acp\x1b[0m\x1b[2m:\x1b[0m buzz-acp starting: relay=x\n" + b"2026-11-17T00:00:00Z  INFO agentctl: turn opened\n")
+        self.assertEqual(self.a.turns_in_flight(agent), 1, "a coloured start line still counts")
+
+    def test_a_running_agents_log_holds_markers_and_no_key(self):
+        self.sign_in()
+        agent = self.make_agent("claude")
+        (self.home / "turn.txt").write_text("x"); (self.home / "finish.txt").write_text("x")
+        self.assertTrue(self.req(op="start", pubkey=agent.name)["ok"])
+        time.sleep(0.8)
+        log = (agent / "agent.log").read_text()
+        key = (agent / "key").read_text().strip()
+        self.assertNotIn(key, log, "the key buzz-acp hands the MCP server is filtered out")
+        self.assertNotIn("acp::wire", log)
+        self.assertIn("buzz-acp starting", log)
+        self.assertIn("agentctl: turn opened", log)
+        self.assertIn("agentctl: turn closed", log)
+        self.assertEqual(self.a.turns_in_flight(agent), 0)
+        self.assertIn(key, (agent / "agent.raw.log").read_text(), "buzz-acp itself writes to the raw log, a file, never a pipe")
+        self.assertEqual(stat.S_IMODE((agent / "agent.raw.log").stat().st_mode), 0o600)
+        sieve = json.loads((agent / "sieve.json").read_text())["pid"]
+        self.assertIn("log-filter", self.a.process_command(sieve))
+        self.assertNotIn(key, self.req(op="status", pubkey=agent.name)["log"], "nor in what status shows")
+        self.a.stop(agent)
+        time.sleep(1.0)
+        self.assertEqual(self.a.process_command(sieve), "", "the filter ends with buzz-acp")
+        self.assertTrue(self.req(op="start", pubkey=agent.name)["ok"])
+        time.sleep(0.8)
+        self.assertEqual((agent / "agent.log").read_text().count("buzz-acp starting"), 2, "each start once, from one filter")
+
+    def test_the_restart_waits_until_no_turn_is_in_flight_not_just_the_first_to_end(self):
         agent = self.make_agent("claude", activate=False)
         log = agent / "agent.log"
-        wire = lambda arrow, body: f"2026-11-17T00:00:00Z DEBUG acp::wire: {arrow} {body}\n"
-        log.write_text(wire("\u2192", '{"jsonrpc": "2.0", "id": 5, "method": "session/prompt", "params": {}}'))  # a heartbeat turn starts
-        self.assertFalse(self.a.turn_ended(agent, 0))
-        log.write_text(log.read_text() + wire("\u2190", '{"jsonrpc": "2.0", "id": 5, "result": {"stopReason": "end_turn"}}'))  # and ends
-        self.assertFalse(self.a.turn_ended(agent, 0), "that was not the turn that asked")
-        log.write_text(log.read_text() + wire("\u2190", '{"jsonrpc": "2.0", "id": 4, "result": {"stopReason": "end_turn"}}'))
-        self.assertTrue(self.a.turn_ended(agent, 0), "one more closed than opened: the asking turn ended")
+        start = "2026-11-17T00:00:00Z  INFO buzz_acp: buzz-acp starting: relay=wss://r pubkey=x agent_cmd=y\n"
+        opened, closed = "2026-11-17T00:00:00Z  INFO agentctl: turn opened\n", "2026-11-17T00:00:00Z  INFO agentctl: turn closed\n"
+        log.write_text(start + opened)  # the asking turn
+        since = log.stat().st_size  # the self-change comes now
+        self.assertEqual(self.a.turns_in_flight(agent), 1)
+        self.assertFalse(self.a.turn_ended(agent, since))
+        log.write_text(log.read_text() + opened)  # a heartbeat turn starts on the other process
+        log.write_text(log.read_text() + closed)  # the asking turn ends
+        self.assertEqual(self.a.turns_in_flight(agent), 1)
+        self.assertFalse(self.a.turn_ended(agent, since), "the other turn is still running: a restart now would cut it")
+        log.write_text(log.read_text() + closed)
+        self.assertEqual(self.a.turns_in_flight(agent), 0)
+        self.assertTrue(self.a.turn_ended(agent, since), "now nothing is in flight")
         self.assertFalse(self.a.turn_ended(agent, log.stat().st_size), "nothing past the end")
+        log.write_text(log.read_text() + start)  # buzz-acp started again: the old counts are history
+        self.assertEqual(self.a.turns_in_flight(agent), 0)
+        (agent / "agent.log.1").write_text(log.read_text()); log.write_text("")  # cut over: the start line is in agent.log.1
+        self.assertEqual(self.a.turns_in_flight(agent), 0)
+        (agent / "agent.log.1").unlink(); self.assertIsNone(self.a.turns_in_flight(agent), "no start line anywhere: cannot tell")
 
     def test_a_turn_that_never_ends_is_stopped_the_hard_way(self):
         agent, pid = self.running_agent()
@@ -1698,12 +1757,12 @@ class HarnessKeys(DeviceBase):
         self.assertIn(FAKE_CRED, (self.a.HOMES / "codex" / "auth.json").read_text(), "the ChatGPT sign-in is untouched")
         by_key = self.env_after_start(self.make_agent("codex", pays="key"))
         self.assertEqual(by_key["CODEX_HOME"], str(key_home))
-        self.assertNotIn("OPENAI_API_KEY", by_key, "Codex reads its file, not the environment")
+        self.assertEqual(by_key["OPENAI_API_KEY"], FAKE_OPENAI_KEY, "codex-acp wants it in the environment too")
         self.assertIn('cli_auth_credentials_store = "file"', (key_home / "config.toml").read_text())
         self.assertEqual(by_key["INITIAL_AGENT_MODE"], "agent-full-access")
         by_sub = self.env_after_start(self.make_agent("codex", pays="subscription"))
         self.assertEqual(by_sub["CODEX_HOME"], str(self.a.HOMES / "codex"))
-        self.assertNotIn("OPENAI_API_KEY", json.dumps(by_sub))
+        self.assertNotIn("OPENAI_API_KEY", by_sub)
         (key_home / "auth.json").unlink()
         self.env_after_start(self.make_agent("codex", pays="key"))
         self.assertTrue((key_home / "auth.json").exists(), "start puts the file back when it is gone")

@@ -1,6 +1,7 @@
-# Does a new Buzz break Black 4's plugins? Checks the latest Buzz release, the
-# newest Buzz preview and Buzz's main branch every day, before anyone clicks
-# Update. A red run is the signal; see canary/README.md for what to do.
+# Does a new Buzz break Black 4's plugins, or change how they look? Checks
+# the latest Buzz release, the newest Buzz preview and Buzz's main branch
+# every day, before anyone clicks Update. A red run is the signal; see
+# canary/README.md for what to do.
 name: buzz-canary
 on:
   schedule:
@@ -11,7 +12,7 @@ on:
         description: "Also check this block/buzz-app tag, branch or commit (optional)"
         required: false
   pull_request:
-    paths: ["plugins/**", "canary/**", ".github/workflows/buzz-canary.yml"]
+    paths: ["plugins/**", "canary/**", "kit/**", ".github/workflows/buzz-canary.yml"]
 permissions:
   contents: read
 concurrency:
@@ -63,6 +64,9 @@ jobs:
       - run: npm ci --prefix canary --no-fund --no-audit
       - name: Contract (Buzz's types and manifest schema)
         run: node canary/check.mjs buzz-app --label "${{ matrix.buzz.ref }}"
+      - name: Design (Buzz still paints the UI kit as its own screens)
+        if: ${{ !cancelled() }}
+        run: node canary/design.mjs buzz-app --label "${{ matrix.buzz.ref }}"
       - name: Install Buzz's JavaScript dependencies (no build, no scripts)
         if: ${{ !cancelled() }}
         working-directory: buzz-app

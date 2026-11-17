@@ -1,0 +1,167 @@
+{
+  "$comment": "Everything the Buzz UI kit (kit/buzz-ui.js) takes from Buzz. The Buzz canary (canary/design.mjs) checks each entry against Buzz every day; tests/kit.test.mjs requires the lists to match what the kit draws. setOnly: attributes Buzz sets on its components but never styles (the rest must stay styled).",
+  "builtOn": {
+    "buzz": "v1.0.4",
+    "commit": "a1c9c969"
+  },
+  "variants": {
+    "Group": {
+      "layout": [
+        "rows"
+      ]
+    },
+    "Button": {
+      "variant": [
+        "subtle",
+        "prominent",
+        "outline",
+        "destructive"
+      ],
+      "size": [
+        "md",
+        "sm"
+      ],
+      "shape": [
+        "capsule",
+        "control"
+      ]
+    },
+    "Input": {
+      "controlSize": [
+        "md",
+        "sm"
+      ]
+    },
+    "Stack": {
+      "gap": [
+        4,
+        2
+      ]
+    }
+  },
+  "classes": [
+    "buzz-button",
+    "buzz-button-label",
+    "buzz-button-spinner",
+    "buzz-content-header",
+    "buzz-content-header-copy",
+    "buzz-content-header-subtitle",
+    "buzz-content-header-title",
+    "buzz-dropdown-chevron",
+    "buzz-field",
+    "buzz-field-description",
+    "buzz-field-error",
+    "buzz-field-error-track",
+    "buzz-field-label",
+    "buzz-field-optional",
+    "buzz-input",
+    "buzz-preference-row",
+    "buzz-preference-row-content",
+    "buzz-preference-row-description",
+    "buzz-preference-row-icon",
+    "buzz-preference-row-label",
+    "buzz-preference-row-trailing",
+    "buzz-select",
+    "buzz-select-indicator",
+    "buzz-select-option",
+    "buzz-select-option-content",
+    "buzz-select-option-description",
+    "buzz-select-option-main",
+    "buzz-select-popup",
+    "buzz-select-value",
+    "buzz-select-value-content",
+    "buzz-select-value-text",
+    "buzz-settings-group",
+    "buzz-switch-control",
+    "buzz-switch-thumb",
+    "buzz-textarea"
+  ],
+  "utilities": [
+    "flex",
+    "flex-wrap",
+    "gap-2",
+    "gap-3",
+    "gap-4",
+    "grid",
+    "items-center",
+    "m-0",
+    "motion-safe:animate-spin",
+    "sr-only",
+    "tabular-nums",
+    "text-body",
+    "text-body-sm",
+    "text-danger",
+    "text-secondary",
+    "text-subtle"
+  ],
+  "attributes": [
+    "*[data-highlighted]",
+    "*[data-popup-open]",
+    "*[data-side]",
+    "*[data-starting-style]",
+    "buzz-button[data-button-shape=\"capsule\"]",
+    "buzz-button[data-button-shape=\"control\"]",
+    "buzz-button[data-buzz-ui]",
+    "buzz-button[data-disabled]",
+    "buzz-button[data-loading]",
+    "buzz-button[data-size=\"md\"]",
+    "buzz-button[data-size=\"sm\"]",
+    "buzz-button[data-variant=\"destructive\"]",
+    "buzz-button[data-variant=\"outline\"]",
+    "buzz-button[data-variant=\"prominent\"]",
+    "buzz-button[data-variant=\"subtle\"]",
+    "buzz-content-header[data-buzz-ui]",
+    "buzz-content-header[data-inline]",
+    "buzz-field[data-buzz-ui]",
+    "buzz-input[data-buzz-ui]",
+    "buzz-input[data-size=\"md\"]",
+    "buzz-input[data-size=\"sm\"]",
+    "buzz-preference-row[data-buzz-ui]",
+    "buzz-preference-row[data-disabled]",
+    "buzz-preference-row[data-has-icon]",
+    "buzz-preference-row[data-variant=\"default\"]",
+    "buzz-select-indicator[data-selected]",
+    "buzz-select-option[data-disabled]",
+    "buzz-select-option[data-selected]",
+    "buzz-select-popup[data-buzz-ui]",
+    "buzz-select-popup[data-variant=\"compact\"]",
+    "buzz-select-value[data-placeholder]",
+    "buzz-select[data-appearance=\"outlined\"]",
+    "buzz-select[data-buzz-ui]",
+    "buzz-select[data-variant=\"compact\"]",
+    "buzz-settings-group[data-buzz-ui]",
+    "buzz-settings-group[data-layout=\"rows\"]",
+    "buzz-switch-control[data-buzz-ui]",
+    "buzz-switch-control[data-checked]",
+    "buzz-switch-control[data-disabled]",
+    "buzz-textarea[data-appearance=\"outlined\"]",
+    "buzz-textarea[data-buzz-ui]",
+    "buzz-textarea[data-invalid]",
+    "buzz-textarea[data-surface=\"inset\"]",
+    "buzz-textarea[data-variant=\"text\"]"
+  ],
+  "customProperties": [
+    "--anchor-width",
+    "--available-height",
+    "--available-width",
+    "--transform-origin"
+  ],
+  "setOnly": [
+    "buzz-button[data-button-shape=\"capsule\"]",
+    "buzz-button[data-buzz-ui]",
+    "buzz-content-header[data-buzz-ui]",
+    "buzz-field[data-buzz-ui]",
+    "buzz-input[data-buzz-ui]",
+    "buzz-input[data-size=\"md\"]",
+    "buzz-preference-row[data-buzz-ui]",
+    "buzz-preference-row[data-variant=\"default\"]",
+    "buzz-select-popup[data-buzz-ui]",
+    "buzz-select[data-appearance=\"outlined\"]",
+    "buzz-select[data-buzz-ui]",
+    "buzz-settings-group[data-buzz-ui]",
+    "buzz-switch-control[data-buzz-ui]",
+    "buzz-textarea[data-buzz-ui]",
+    "buzz-textarea[data-surface=\"inset\"]",
+    "buzz-textarea[data-variant=\"text\"]"
+  ]
+}

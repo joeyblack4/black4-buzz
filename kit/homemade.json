@@ -1,0 +1,5 @@
+{
+  "$comment": "Screens drawn before the Buzz UI kit: in each file, how many places still draw their own UI (a className, a style, or a raw button, input, select, textarea or <style>) outside the kit. Each number only goes down; a file not listed may draw none. tests/kit.test.mjs enforces it. Moving a screen onto the kit lowers its number.",
+  "plugins/black4/plugin.js": 63,
+  "subscriptions/src/common.js": 9
+}

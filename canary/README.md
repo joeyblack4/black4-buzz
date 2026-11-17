@@ -2,10 +2,10 @@
 
 Status: current  
 Owner: Black 4 platform  
-Updated: 2026-11-14
+Updated: 2026-11-17
 
-Tells us whether a new Buzz breaks a Black 4 plugin, before anyone clicks
-**Update** in Buzz. The [buzz-canary workflow](../.github/workflows/buzz-canary.yml)
+Tells us whether a new Buzz breaks a Black 4 plugin, or changes how its
+screens look, before anyone clicks **Update** in Buzz. The [buzz-canary workflow](../.github/workflows/buzz-canary.yml)
 runs every day, and on demand, against three versions of
 [block/buzz-app](https://github.com/block/buzz-app): the latest release, the
 newest preview and `main`. It also runs on pull requests that touch `plugins/`
@@ -39,12 +39,27 @@ or `canary/`.
    scope, render, withdraw and register again; and with Buzz's
    `agents.register` made to throw, the rest of the Black 4 plugin must still
    start (settings card, Reviews page and panel) and the failure be reported.
-3. **The machine pairing** (`scripts/check-machine-pins.mjs`, in `npm run check`).
+3. **The design** (`design.mjs`, under a second). Every plugin screen is drawn
+   with the [Buzz UI kit](../kit/README.md), whose
+   [`uses.json`](../kit/uses.json) lists each Buzz class, data attribute (with
+   its value), Tailwind utility and custom property it draws with. `design.mjs`
+   requires each one to still be in Buzz's stylesheets or design-system
+   components. It requires each utility to still be used in Buzz's own
+   source, because Tailwind writes only those, so a utility Buzz stops using
+   disappears even though nothing was renamed. `tests/kit.test.mjs` keeps
+   `uses.json` complete. An attribute counts only on its own component, and
+   one Buzz styles must stay styled; `setOnly` lists the few Buzz sets but
+   never styles. On 2026-11-17 it passed against v1.0.4, v1.0.5-preview.2
+   and `main`. Against a copy of v1.0.4 with five deliberate changes (a
+   renamed class, a renamed card layout, a renamed small-button size that
+   other components keep, a utility Buzz stopped using and a renamed popup
+   property) it failed with one sentence for each.
+4. **The machine pairing** (`scripts/check-machine-pins.mjs`, in `npm run check`).
    [`machine/pins.json`](../machine/pins.json) declares the buzz-acp harness
    release and the ACP adapter and SDK versions that must go together. The
    check fails when `machine/setup.sh`, its comments or the machine tests
    disagree with it.
-4. **The contract stays complete** (`tests/canary-contract.test.mjs`, in
+5. **The contract stays complete** (`tests/canary-contract.test.mjs`, in
    `npm test`). It fails when a plugin starts using a `ctx` API the contract
    does not list, or when a plugin's `inject` list changes.
 
@@ -98,7 +113,11 @@ change the contract part could not see.
    ```
    For the load part, install the checkout's dependencies first (`pnpm install
    --frozen-lockfile --ignore-scripts` in it), then `node canary/load.mjs <checkout>`.
-5. If the canary itself is wrong (Buzz moved a file, the check misreads a
+5. A red **Design** step names a class, attribute, utility or property the
+   UI kit draws with that Buzz dropped. Follow
+   [kit/README.md](../kit/README.md#when-buzz-changes), then look at the
+   screens.
+6. If the canary itself is wrong (Buzz moved a file, the check misreads a
    type), fix the canary, not the contract.
 
 ## Updating the contract

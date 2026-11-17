@@ -2,7 +2,7 @@
 
 Status: current  
 Owner: Black 4 platform  
-Updated: 2026-11-16
+Updated: 2026-11-17
 
 Black 4 runs its AI workforce in [Buzz](https://github.com/block/buzz-app).
 Buzz stays stock, so it can be updated at any time; everything Black 4 adds is
@@ -344,7 +344,7 @@ commit. Buzz never installs it without the person's click.
 Updating **Buzz itself** is a separate question: its plugin API is a preview
 and can change. The [Buzz canary](canary/README.md) checks every day whether
 the latest Buzz release, preview and `main` still offer everything these
-plugins use. Its workflow going red on the release means: do not update Buzz
+plugins use, and still paint the UI kit as Buzz paints its own screens. Its workflow going red on the release means: do not update Buzz
 yet.
 
 ## What is here
@@ -358,7 +358,8 @@ yet.
 | `install.sh` | Optional: opens Buzz's install review for the plugin, and with `--hardware` / `--check-hardware` sets up legacy direct SSH access for admins. |
 | `tests/` | Unit tests against the plugin file: fake AuthKit, MCP and door servers behind `host.request` (`tests/fakes.mjs`), and fictional data. No real sign-in or network. |
 | `scripts/check-build-folder.mjs` | Refuses anything in a plugin folder that Buzz would not read. |
-| `canary/` | The Buzz canary: the Buzz API each plugin uses (`contract.json`), checked against Buzz's source by `check.mjs` and by starting the plugins in Buzz's real services (`load.mjs`). |
+| `canary/` | The Buzz canary: the Buzz API each plugin uses (`contract.json`), checked against Buzz's source by `check.mjs` and by starting the plugins in Buzz's real services (`load.mjs`)., and the Buzz design the UI kit draws with (`design.mjs`). |
+| `kit/` | The Buzz UI kit: Buzz's own design-system primitives, which every plugin screen is drawn with. `npm run kit` stamps it into each plugin. Rules in [kit/README.md](kit/README.md). |
 | `machine/pins.json`, `scripts/check-machine-pins.mjs` | The buzz-acp harness and ACP adapter versions an agent machine runs together, and the check that `machine/setup.sh` agrees. |
 
 ## Reviews
@@ -444,7 +445,8 @@ npm run check
 ```
 
 That checks the plugin parses, each plugin folder holds only what Buzz reads,
-the subscription plugins match their source, and the tests pass.
+the subscription plugins and the UI kit's copies match their source, and the
+tests pass. Screens are drawn only with the [Buzz UI kit](kit/README.md).
 `npm run test:subscriptions` runs the subscription plugins' own tests. To try a change in your own Buzz, install from
 your branch (or install the folder again: a folder install is a copy), then use Buzz's `plugin_reload` tool and confirm with
 `plugin_status` that it is active and its tools are registered. Unit tests do

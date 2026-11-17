@@ -484,6 +484,12 @@ test("render: the Create form's Heartbeat card sets how often the new agent wake
   assert.deepEqual([interval.value, interval.options], ["15", HEARTBEAT_CHOICES.map(String)]);
   interval.pick("60");
   assert.equal(changes.at(-1).heartbeat, 60);
+  const prompt = find(on, (node) => has(node, "buzz-textarea") && find(on, (label) => has(label, "buzz-field-label") && label.props.htmlFor === node.props.id && /On each heartbeat/.test(textIn(label))));
+  assert.ok(prompt, "on: what each heartbeat does can be written");
+  prompt.props.onChange({ target: { value: "Check the Paid media board." } });
+  assert.equal(changes.at(-1).heartbeatPrompt, "Check the Paid media board.");
+  assert.equal(find(tree, (node) => /On each heartbeat/.test(typeof node === "string" ? node : "") ), null);
+  assert.doesNotMatch(textIn(tree), /On each heartbeat/, "off: nothing to write");
   const parallel = rowsIn(on).find((row) => row.title === "Parallel work");
   assert.equal(parallel.description, "At least 2 while its heartbeat is on.");
   rowsIn(on).find((row) => row.title === "Heartbeat").toggle();
@@ -491,9 +497,9 @@ test("render: the Create form's Heartbeat card sets how often the new agent wake
   const box = machine((request) => (request.op === "provision" ? { ok: true, pubkey: PUBKEY } : { ok: true }));
   const remote = hardwareProvider(box.ask, () => "request-1", agentDirectory(box.ask));
   await remote.provision({ name: "Beats", community: "wss://example.communities.buzz.xyz", config: { ...hardwareDefaults(), heartbeat: 60 } });
-  await remote.activate({ pubkey: PUBKEY, name: "Beats", community: "wss://example.communities.buzz.xyz", auth: AUTH, config: { ...hardwareDefaults(), heartbeat: 60 } });
+  await remote.activate({ pubkey: PUBKEY, name: "Beats", community: "wss://example.communities.buzz.xyz", auth: AUTH, config: { ...hardwareDefaults(), heartbeat: 60, heartbeatPrompt: "Check the board." } });
   assert.deepEqual(box.ops(), ["provision", "activate"], "no extra step: activate takes the heartbeat in the config");
-  assert.equal(box.seen[1].request.config.heartbeat, 60);
+  assert.deepEqual([box.seen[1].request.config.heartbeat, box.seen[1].request.config.heartbeatPrompt], [60, "Check the board."]);
 });
 
 test("render: the Create form's Conversations card carries buzz-acp's levers into the config, and creation sends them after provision", async () => {

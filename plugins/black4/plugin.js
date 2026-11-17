@@ -1848,7 +1848,7 @@ export const PAYS = [
 const SIGN_IN_SITE = { qwen: "chat.qwen.ai" };
 
 export const hardwareDefaults = () => ({
-  machine: DEFAULT_MACHINE, harness: "claude", pays: "", model: "", effort: "", respondTo: "anyone", instructions: "",
+  machine: DEFAULT_MACHINE, harness: "claude", pays: "", model: "", effort: "", respondTo: "anyone", instructions: "", heartbeatPrompt: "",
 });
 
 /** The machine an id or a config names. Unknown or missing (an agent made
@@ -3141,15 +3141,19 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
         h(Row, { title: "Answers", trailing: h(Pill, { label: "Answers", value: value.respondTo, options: ANSWERS, disabled, onChange: (respondTo) => onChange({ ...value, respondTo }) }) }),
         ask && h(SignInRows, { machineId: machine.id, harness: value.harness, status, disabled, pays })),
       !ask && (SignInPrompt ? h(SignInPrompt, null) : ErrorLine("Sign in to Black 4 in Settings → Black 4 to reach Black 4 hardware.")),
-      // The heartbeat is set with the agent (activate takes it); its prompt is Black 4's standard until changed in Settings.
+      // The heartbeat is set with the agent (activate takes it, and what it does): empty is Black 4's standard.
       h("div", null,
         h(SectionTitle, { title: "Heartbeat" }),
-        h(Group, null,
+        h(Stack, { gap: 2 }, h(Group, null,
           h(SwitchRow, { label: "Heartbeat", description: "Wakes on its own to run the jobs due in Black 4.", checked: minutes > 0, disabled,
             onCheckedChange: (on) => onChange({ ...value, heartbeat: on ? HEARTBEAT_MINUTES : 0 }) }),
           minutes > 0 && h(Row, { title: "Wakes", trailing: h(Pill, { label: "Heartbeat interval", value: String(minutes), disabled,
             options: heartbeatChoices(minutes).map((choice) => ({ id: String(choice.value), label: choice.label })),
-            onChange: (id) => onChange({ ...value, heartbeat: Number(id) }) }) }))),
+            onChange: (id) => onChange({ ...value, heartbeat: Number(id) }) }) })),
+          minutes > 0 && h(TextField, { label: "On each heartbeat", optional: true, rows: 6, maxLength: 8000, disabled,
+            description: "Empty runs Black 4’s standard: the jobs due for this agent in Black 4, one after another.",
+            placeholder: "Check the Paid media board for every business, and raise a Review for any campaign over budget.",
+            value: value.heartbeatPrompt ?? "", onChange: (heartbeatPrompt) => onChange({ ...value, heartbeatPrompt }) }))),
       schema && h("div", null,
         h(SectionTitle, { title: "Conversations" }),
         h(Group, null, h(ConversationRows, { schema, controls, heartbeat: minutes > 0, disabled,

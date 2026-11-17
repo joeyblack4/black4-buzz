@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import {
   askMachine, hardwareProvider, hardwareDefaults, HEARTBEAT_MINUTES, HEARTBEAT_CHOICES, heartbeatChoices, beatFrom, heartbeatRemote, MACHINES, machineOf, statusReader, harnessOptions, signInState, readyToCreate, takesKey, defaultPays, PAYS,
   createLogin, agentDirectory, summaryOf, signInOf, doorTransport, bodySha256, createSession, createMcp, readAnswer, memoryStore,
-  modelsReader, modelChoices, applyPick, setModel, applyHardware, COMPACT_OPTIONS,
+  modelsReader, modelChoices, applyPick, setModel, applyHardware, COMPACT_OPTIONS, buzzUi, CONVERSATION_ROWS, controlOptions, controlValue,
 } from "../plugins/black4/plugin.js";
 import { fakeAuthKit, fakeMcp, fakeDoor, https, sha256url, DOOR } from "./fakes.mjs";
 
@@ -279,6 +279,11 @@ function testReact() {
   let path = "";
   let index = 0;
   const slot = (make) => { const key = `${path}:${index++}`; if (!slots.has(key)) slots.set(key, make()); return key; };
+  const useEffect = (effect, deps) => {
+    const key = `${path}:${index++}`;
+    const before = slots.get(key);
+    if (!before || !deps || deps.some((dep, i) => dep !== before[i])) { slots.set(key, deps ?? []); effects.push(effect); }
+  };
   const React = {
     Fragment: "fragment",
     Component: class { constructor(props) { this.props = props; this.state = {}; } },
@@ -288,11 +293,9 @@ function testReact() {
       return [slots.get(key), (next) => slots.set(key, typeof next === "function" ? next(slots.get(key)) : next)];
     },
     useRef(value) { return slots.get(slot(() => ({ current: value }))); },
-    useEffect(effect, deps) {
-      const key = `${path}:${index++}`;
-      const before = slots.get(key);
-      if (!before || !deps || deps.some((dep, i) => dep !== before[i])) { slots.set(key, deps ?? []); effects.push(effect); }
-    },
+    useId() { return slots.get(slot(() => `id-${slots.size}`)); },
+    useEffect,
+    useLayoutEffect: useEffect,
   };
   const render = (node, at = "r") => {
     if (!node || typeof node !== "object") return node;
@@ -303,38 +306,59 @@ function testReact() {
     }
     return { ...node, props: { ...node.props, children: node.props.children.map((child, i) => render(child, `${at}.${i}`)) } };
   };
+  const cleanups = [];
   const settle = async (element) => {
     let tree;
     for (let pass = 0; pass < 6; pass++) {
       tree = render(element);
       const run = effects; effects = [];
-      for (const effect of run) effect();
+      for (const effect of run) { const off = effect(); if (typeof off === "function") cleanups.push(off); }
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
     return tree;
   };
-  return { React, settle };
+  /** As Buzz leaving a tab: effects clean up, and hook state is gone. */
+  const unmount = () => { for (const off of cleanups.splice(0)) off(); slots.clear(); };
+  return { React, settle, unmount };
 }
 
-/** Every labelled select in a rendered tree: { label, value, options }. */
-function selectsIn(tree) {
-  const out = [];
-  const walk = (node) => {
-    if (!node || typeof node !== "object") return;
-    const kids = node.props?.children ?? [];
-    const select = node.type === "label" && kids.find((child) => child?.type === "select");
-    if (select) out.push({ label: kids.find((child) => typeof child === "string"), value: select.props.value,
-      options: select.props.children.map((option) => option.props.value) });
-    kids.forEach(walk);
-  };
-  walk(tree);
-  return out;
-}
 const textIn = (tree) => (!tree || typeof tree !== "object" ? (typeof tree === "string" ? tree : "") : (tree.props?.children ?? []).map(textIn).join(" "));
+const has = (node, className) => typeof node?.props?.className === "string" && node.props.className.split(" ").includes(className);
+const find = (node, test) => {
+  if (!node || typeof node !== "object") return null;
+  if (test(node)) return node;
+  for (const child of node.props?.children ?? []) { const hit = find(child, test); if (hit) return hit; }
+  return null;
+};
+const all = (node, test, out = []) => {
+  if (!node || typeof node !== "object") return out;
+  if (test(node)) out.push(node);
+  for (const child of node.props?.children ?? []) all(child, test, out);
+  return out;
+};
+
+/** Every row of every card in a rendered tree, as Buzz draws them: its title,
+ * and its dropdown ({ value, options, pick }) or switch when it has one. */
+function rowsIn(tree) {
+  return all(tree, (node) => has(node, "buzz-preference-row")).map((row) => {
+    const title = textIn(find(row, (node) => has(node, "buzz-preference-row-label"))).trim();
+    const select = find(row, (node) => has(node, "buzz-select"));
+    const options = select ? all(select, (node) => node.props.role === "option") : [];
+    const toggle = find(row, (node) => node.props.role === "switch");
+    return { title, description: textIn(find(row, (node) => has(node, "buzz-preference-row-description"))).trim(),
+      ...(select ? { label: textIn(find(select, (node) => has(node, "sr-only"))).trim(), value: options.find((option) => option.props["aria-selected"])?.props["data-value"],
+        options: options.map((option) => option.props["data-value"]), pick: (id) => options.find((option) => option.props["data-value"] === id).props.onClick() } : {}),
+      ...(toggle ? { checked: toggle.props["aria-checked"], toggle: () => toggle.props.onClick() } : {}) };
+  });
+}
+/** The dropdown rows: [title, value]. */
+const pillsIn = (tree) => rowsIn(tree).filter((row) => row.options);
+/** The buttons in a tree, by label. */
+const buttonsIn = (tree) => all(tree, (node) => has(node, "buzz-button")).map((button) => ({ label: textIn(button).trim(), disabled: button.props.disabled, click: () => button.props.onClick?.({ preventDefault() {} }) }));
 
 /** The hardware type registered on a test host whose machine answers `reply`. */
 function hardwareOn(reply) {
-  const { React, settle } = testReact();
+  const { React, settle, unmount } = testReact();
   const asked = [];
   let type;
   const ctx = {
@@ -343,8 +367,12 @@ function hardwareOn(reply) {
     agents: { register: (registered) => { type = registered; } },
   };
   applyHardware(ctx, { sign: async () => ({ pass: "test-pass" }) });
-  return { type, React, settle, asked };
+  return { type, React, settle, unmount, asked };
 }
+
+const CONTROLS = { agents: { min: 1, max: 8, default: 1 }, sessionPolicy: { values: ["channel", "thread"], default: "channel" },
+  multipleEventHandling: { values: ["steer", "queue", "interrupt", "owner-interrupt"], default: "steer" },
+  maxTurnsPerSession: { min: 0, max: 10000, default: 0 }, maxTurnDuration: { min: 60, max: 86400, default: 7200 }, contextMessageLimit: { min: 0, max: 100, default: 12 } };
 
 const fleet = (request) => {
   if (request.op === "machine.status") return { ok: true, machine: "commerce", harnesses: harnesses({ signedIn: true }) };
@@ -356,19 +384,141 @@ const fleet = (request) => {
   return { ok: true };
 };
 
-test("render: the Create agent form shows Model and Effort from the machine, at its defaults", async () => {
+test("buzzUi draws Buzz's primitives: its classes, data attributes and structure", () => {
+  const { React } = testReact();
+  const ui = buzzUi(React);
+  const h = React.createElement;
+  const row = h(ui.Row, { title: "Mode", description: "Light or dark.", trailing: h(ui.Button, { variant: "prominent", size: "sm" }, "Save") });
+  const tree = (function render(node) {
+    if (!node || typeof node !== "object") return node;
+    if (typeof node.type === "function") return render(node.type(node.props));
+    return { ...node, props: { ...node.props, children: node.props.children.map(render) } };
+  })(h(ui.Group, null, row, h(ui.SwitchRow, { label: "Heartbeat", checked: true, onCheckedChange: () => {} }),
+    h(ui.Row, { title: "Model", trailing: h(ui.Pill, { label: "Model", value: "b", options: [{ id: "a", label: "A" }, { id: "b", label: "B" }, { id: "c", label: "C", unavailable: true }], onChange: () => {} }) })));
+  assert.equal(tree.props.className, "buzz-settings-group");
+  assert.deepEqual([tree.props["data-buzz-ui"], tree.props["data-layout"]], ["", "rows"]);
+  const [first, second, third] = tree.props.children;
+  assert.deepEqual([first.props.className, first.props["data-buzz-ui"], first.props["data-variant"]], ["buzz-preference-row", "", "default"]);
+  const [content, trailing] = first.props.children.filter(Boolean);
+  assert.deepEqual(content.props.children.map((node) => [node.type, node.props.className]), [["div", "buzz-preference-row-label"], ["span", "buzz-preference-row-description"]]);
+  const button = trailing.props.children[0];
+  assert.deepEqual([button.type, button.props.className, button.props["data-variant"], button.props["data-size"], button.props["data-button-shape"], button.props.type],
+    ["button", "buzz-button", "prominent", "sm", "capsule", "button"]);
+  assert.equal(button.props.children[0].props.className, "buzz-button-label");
+  const label = find(second, (node) => has(node, "buzz-preference-row-label"));
+  const toggle = find(second, (node) => node.props.role === "switch");
+  assert.equal(label.type, "label", "a switch row's title labels the switch");
+  assert.equal(label.props.htmlFor, toggle.props.id);
+  assert.deepEqual([toggle.props.className, toggle.props["data-checked"], toggle.props["aria-checked"], toggle.props.children[0].props.className], ["buzz-switch-control", "", true, "buzz-switch-thumb"]);
+  const select = find(third, (node) => has(node, "buzz-select"));
+  assert.deepEqual([select.props["data-variant"], select.props["data-appearance"]], ["compact", "outlined"]);
+  const trigger = find(select, (node) => has(node, "buzz-button"));
+  assert.deepEqual([trigger.props["data-variant"], trigger.props["data-size"], trigger.props.role, trigger.props["aria-haspopup"], trigger.props["aria-expanded"]], ["outline", "sm", "combobox", "listbox", false]);
+  assert.equal(textIn(find(trigger, (node) => has(node, "buzz-select-value"))).trim(), "B");
+  assert.equal(find(trigger, (node) => has(node, "buzz-dropdown-chevron")).props.children[0].props.d, "M6 9l6 6l6 -6", "Tabler chevron-down, as Buzz's CaretDownIcon");
+  const popup = find(select, (node) => has(node, "buzz-select-popup"));
+  assert.deepEqual([popup.props.role, popup.props.popover, popup.props["data-variant"]], ["listbox", "manual", "compact"]);
+  const options = popup.props.children;
+  assert.deepEqual(options.map((option) => [option.props.className, option.props["aria-selected"], option.props["data-disabled"]]),
+    [["buzz-select-option", false, undefined], ["buzz-select-option", true, undefined], ["buzz-select-option", false, ""]]);
+  assert.equal(find(options[1], (node) => has(node, "buzz-select-indicator")).props["data-selected"], "", "the check shows on the chosen one only");
+  const loading = (function render(node) { return typeof node.type === "function" ? render(node.type(node.props)) : node; })(h(ui.Button, { loading: true }, "Save"));
+  assert.deepEqual([loading.props["data-loading"], loading.props.disabled, loading.props.children[1].props.className], [true, true, "buzz-button-spinner tabler-icon tabler-icon-loader-2"]);
+  const native = (function render(node) { return typeof node.type === "function" ? render(node.type(node.props)) : node; })(
+    h(buzzUi(React, { nativeSelect: true }).Pill, { label: "Model", value: "a", options: [{ id: "a", label: "A" }], onChange: () => {} }));
+  assert.ok(find(native, (node) => node.type === "select"), "the fallback keeps a native select under the same pill");
+});
+
+test("conversation levers: the machine's bounds pick the presets, the default is named, and a heartbeat agent runs at least two", () => {
+  const [agents, sessions, events, turns, duration, context] = CONVERSATION_ROWS;
+  assert.deepEqual(controlOptions(agents, CONTROLS.agents, null).options.map((option) => option.label), ["Default (1)", "1", "2", "3", "4", "5", "6", "7", "8"]);
+  const beating = controlOptions(agents, CONTROLS.agents, 3, { heartbeat: true });
+  assert.deepEqual([beating.value, beating.options[0].label, beating.options[1].unavailable], ["3", "Default (2)", true]);
+  assert.deepEqual(controlOptions(sessions, CONTROLS.sessionPolicy, "thread"), { value: "thread", numeric: false,
+    options: [{ id: "", label: "Default (Channel)" }, { id: "channel", label: "Channel" }, { id: "thread", label: "Thread" }] });
+  assert.deepEqual(controlOptions(events, CONTROLS.multipleEventHandling, null).options.map((option) => option.label), ["Default (Weave it in)", "Weave it in", "Wait", "Replace the task", "Replace only for me"]);
+  assert.deepEqual(controlOptions(turns, CONTROLS.maxTurnsPerSession, 42).options.map((option) => option.label), ["Default (Never)", "Never", "10 turns", "25 turns", "50 turns", "100 turns", "250 turns", "500 turns", "1000 turns", "42 turns"]);
+  assert.deepEqual(controlOptions(duration, { min: 60, max: 3600, default: 3600 }, null).options.map((option) => option.label), ["Default (1 hour)", "5 minutes", "15 minutes", "30 minutes", "1 hour"], "presets stay within the machine's bounds");
+  assert.deepEqual(controlOptions(context, CONTROLS.contextMessageLimit, 0).options.slice(0, 2).map((option) => option.label), ["Default (12 messages)", "None"]);
+  assert.equal(controlOptions(context, undefined, 3), null, "an older machine lists no levers");
+  assert.deepEqual([controlValue(agents, CONTROLS.agents, ""), controlValue(agents, CONTROLS.agents, "4"), controlValue(sessions, CONTROLS.sessionPolicy, "thread")], [null, 4, "thread"]);
+});
+
+test("render: the Create agent form is one card of rows, with Model and Thinking from the machine at its defaults", async () => {
   const { type, React, settle } = hardwareOn(fleet);
   const changes = [];
+  const harnessControl = React.createElement("div", { className: "buzz-preference-row host", "data-buzz-ui": "" }, React.createElement("div", { className: "buzz-preference-row-label" }, "Harness"));
   const tree = await settle(React.createElement(type.CreateConfiguration, {
-    config: { ...hardwareDefaults(), harness: "claude" }, onChange: (next) => changes.push(next), disabled: false }));
-  const selects = selectsIn(tree);
-  assert.deepEqual(selects.map((entry) => entry.label), ["Runs on", "Runs", "Model", "Effort", "Answers"]);
-  assert.deepEqual(selects[2], { label: "Model", value: "claude-fable-5-2", options: ["claude-fable-5-2", "opus"] });
-  assert.deepEqual(selects[3], { label: "Effort", value: "high", options: ["low", "medium", "high", "xhigh", "max"] });
+    config: { ...hardwareDefaults(), harness: "claude" }, onChange: (next) => changes.push(next), disabled: false, harnessControl }));
+  const card = find(tree, (node) => has(node, "buzz-settings-group"));
+  assert.ok(card, "a Buzz settings card");
+  assert.ok(has(card.props.children.filter(Boolean)[0], "host"), "the host's Harness row comes first in the card");
+  assert.deepEqual(rowsIn(tree).map((row) => row.title), ["Harness", "Runs on", "Runs", "Model", "Thinking", "Answers", "Sign-in", "Heartbeat"]);
+  const pills = pillsIn(tree);
+  assert.deepEqual(pills.map((entry) => [entry.title, entry.value]), [["Runs on", "commerce"], ["Runs", "claude"], ["Model", "claude-fable-5-2"], ["Thinking", "high"], ["Answers", "anyone"]]);
+  assert.deepEqual(pills[2].options, ["claude-fable-5-2", "opus"]);
+  assert.deepEqual(pills[3].options, ["low", "medium", "high", "xhigh", "max"]);
+  pills[2].pick("opus");
+  assert.deepEqual([changes.at(-1).model, changes.at(-1).effort], ["opus", ""], "a pick changes the config, as Buzz's selects apply on change");
+  assert.match(rowsIn(tree).find((row) => row.title === "Sign-in").description, /Signed in as|is signed in/);
   assert.doesNotMatch(textIn(tree), /could not show/);
+  assert.ok(!all(tree, (node) => ["select", "input", "button", "textarea"].includes(node.type) && !has(node, "buzz-button") && !has(node, "buzz-input") && !has(node, "buzz-switch-control") && !has(node, "buzz-textarea")).length,
+    "every control is a Buzz primitive");
   const older = hardwareOn((request) => (request.op === "models" ? UNKNOWN : fleet(request)));
   const plain = await older.settle(older.React.createElement(older.type.CreateConfiguration, { config: hardwareDefaults(), onChange: () => {} }));
-  assert.deepEqual(selectsIn(plain).map((entry) => entry.label), ["Runs on", "Runs", "Answers"], "an older machine: no Model or Effort");
+  assert.deepEqual(pillsIn(plain).map((entry) => entry.title), ["Runs on", "Runs", "Answers"], "an older machine: no Model or Thinking, no Conversations");
+  assert.deepEqual(all(plain, (node) => has(node, "buzz-content-header-title")).map((node) => textIn(node).trim()), ["Heartbeat"]);
+});
+
+test("render: the Create form's Heartbeat card sets how often the new agent wakes, which creation carries to activate", async () => {
+  const { type, React, settle } = hardwareOn((request) => (request.op === "models" ? { ...MODELS, controls: CONTROLS } : fleet(request)));
+  const changes = [];
+  const tree = await settle(React.createElement(type.CreateConfiguration, { config: hardwareDefaults(), onChange: (next) => changes.push(next), disabled: false }));
+  const beat = rowsIn(tree).find((row) => row.title === "Heartbeat");
+  assert.equal(beat.checked, false, "off for a new agent");
+  assert.equal(pillsIn(tree).find((entry) => entry.title === "Parallel work").options.find((option) => option === "1") !== undefined, true);
+  beat.toggle();
+  assert.equal(changes.at(-1).heartbeat, HEARTBEAT_MINUTES);
+  const on = await settle(React.createElement(type.CreateConfiguration, { config: { ...hardwareDefaults(), heartbeat: 15 }, onChange: (next) => changes.push(next), disabled: false }));
+  const interval = pillsIn(on).find((entry) => entry.label === "Heartbeat interval");
+  assert.deepEqual([interval.value, interval.options], ["15", HEARTBEAT_CHOICES.map(String)]);
+  interval.pick("60");
+  assert.equal(changes.at(-1).heartbeat, 60);
+  const parallel = rowsIn(on).find((row) => row.title === "Parallel work");
+  assert.equal(parallel.description, "At least 2 while its heartbeat is on.");
+  rowsIn(on).find((row) => row.title === "Heartbeat").toggle();
+  assert.equal(changes.at(-1).heartbeat, 0);
+  const box = machine((request) => (request.op === "provision" ? { ok: true, pubkey: PUBKEY } : { ok: true }));
+  const remote = hardwareProvider(box.ask, () => "request-1", agentDirectory(box.ask));
+  await remote.provision({ name: "Beats", community: "wss://example.communities.buzz.xyz", config: { ...hardwareDefaults(), heartbeat: 60 } });
+  await remote.activate({ pubkey: PUBKEY, name: "Beats", community: "wss://example.communities.buzz.xyz", auth: AUTH, config: { ...hardwareDefaults(), heartbeat: 60 } });
+  assert.deepEqual(box.ops(), ["provision", "activate"], "no extra step: activate takes the heartbeat in the config");
+  assert.equal(box.seen[1].request.config.heartbeat, 60);
+});
+
+test("render: the Create form's Conversations card carries buzz-acp's levers into the config, and creation sends them after provision", async () => {
+  const { type, React, settle } = hardwareOn((request) => (request.op === "models" ? { ...MODELS, controls: CONTROLS } : fleet(request)));
+  const changes = [];
+  const tree = await settle(React.createElement(type.CreateConfiguration, { config: hardwareDefaults(), onChange: (next) => changes.push(next), disabled: false }));
+  assert.deepEqual(all(tree, (node) => has(node, "buzz-content-header-title")).map((node) => textIn(node).trim()), ["Heartbeat", "Conversations"]);
+  const pills = pillsIn(tree);
+  assert.deepEqual(pills.slice(-6).map((entry) => [entry.title, entry.value]), [["Parallel work", ""], ["Session per", ""], ["New message while working", ""], ["Fresh session after", ""], ["Max turn length", ""], ["Context for replies", ""]]);
+  pills.find((entry) => entry.title === "Parallel work").pick("3");
+  assert.deepEqual(changes.at(-1).controls, { agents: 3 });
+  const again = await settle(React.createElement(type.CreateConfiguration, { config: { ...hardwareDefaults(), controls: { agents: 3 } }, onChange: (next) => changes.push(next), disabled: false }));
+  pillsIn(again).find((entry) => entry.title === "New message while working").pick("queue");
+  assert.deepEqual(changes.at(-1).controls, { agents: 3, multipleEventHandling: "queue" });
+  pillsIn(again).find((entry) => entry.title === "Parallel work").pick("");
+  assert.deepEqual(changes.at(-1).controls, { agents: null }, "back to buzz-acp's default");
+
+  const box = machine((request) => (request.op === "provision" ? { ok: true, pubkey: PUBKEY } : { ok: true }));
+  const remote = hardwareProvider(box.ask, () => "request-1", agentDirectory(box.ask));
+  await remote.provision({ name: "Talks", community: "wss://example.communities.buzz.xyz", config: { ...hardwareDefaults(), controls: { agents: 3, multipleEventHandling: "queue", maxTurnDuration: null } } });
+  assert.deepEqual(box.ops(), ["provision", "settings.set"]);
+  assert.deepEqual(box.seen[1].request, { op: "settings.set", pubkey: PUBKEY, agents: 3, multipleEventHandling: "queue" }, "only the levers chosen; defaults are not sent");
+  const plain = machine((request) => (request.op === "provision" ? { ok: true, pubkey: PUBKEY } : { ok: true }));
+  await hardwareProvider(plain.ask, () => "request-1", agentDirectory(plain.ask)).provision({ name: "Quiet", community: "wss://example.communities.buzz.xyz", config: hardwareDefaults() });
+  assert.deepEqual(plain.ops(), ["provision"]);
 });
 
 const qwenFleet = (request) => {
@@ -378,10 +528,11 @@ const qwenFleet = (request) => {
       compact: { supported: true, min: 20000, max: 2000000, default: 150000 },
       key: { checked: true, model: "qwen4-max", effort: null, models: [{ id: "qwen4-max", label: "qwen4-max", efforts: [] }, { id: "qwen3.7-plus", label: "qwen3.7-plus", efforts: [] }],
         compact: { supported: true, min: 20000, max: 2000000, default: 150000 } } },
-  ] };
+  ], controls: CONTROLS };
   if (request.op === "list") return { ok: true, agents: [] };
   if (request.op === "status") return { ok: true, running: true, activated: true, harness: "qwen", pays: "key", respondTo: "anyone",
-    model: "qwen3.7-plus", effort: null, modelChosen: true, effortChosen: false, compactAt: 250000 };
+    model: "qwen3.7-plus", effort: null, modelChosen: true, effortChosen: false, compactAt: 250000,
+    controls: { agents: null, sessionPolicy: "thread", multipleEventHandling: null, maxTurnsPerSession: null, maxTurnDuration: null, contextMessageLimit: 20 } };
   if (request.op === "instructions.get") return { ok: true, instructions: "" };
   return { ok: true };
 };
@@ -391,59 +542,102 @@ test("render: a harness that takes an API key gets Pays with, and the model list
   const changes = [];
   const tree = await settle(React.createElement(type.CreateConfiguration, {
     config: { ...hardwareDefaults(), harness: "qwen" }, onChange: (next) => changes.push(next), disabled: false }));
-  const selects = selectsIn(tree);
-  assert.deepEqual(selects.map((entry) => entry.label), ["Runs on", "Runs", "Pays with", "Model", "Compact at", "Answers"]);
-  assert.deepEqual(selects[2], { label: "Pays with", value: "subscription", options: ["subscription", "key"] });
-  assert.deepEqual(selects[3].options, ["qwen4-max", "qwen3.8-max"]);
-  assert.deepEqual(selects[4], { label: "Compact at", value: "150000", options: ["", "50000", "100000", "150000", "250000", "500000"] });
-  const compactSelect = (function find(node) {
-    if (!node || typeof node !== "object") return null;
-    if (node.type === "select" && node.props.value === "150000") return node;
-    for (const child of node.props?.children ?? []) { const hit = find(child); if (hit) return hit; }
-    return null;
-  })(tree);
-  compactSelect.props.onChange({ target: { value: "" } });
+  const pills = pillsIn(tree);
+  assert.deepEqual(pills.slice(0, 6).map((entry) => entry.title), ["Runs on", "Runs", "Pays with", "Model", "Compact at", "Answers"]);
+  assert.deepEqual([pills[2].value, pills[2].options], ["subscription", ["subscription", "key"]]);
+  assert.deepEqual(pills[3].options, ["qwen4-max", "qwen3.8-max"]);
+  assert.deepEqual([pills[4].value, pills[4].options], ["150000", ["", "50000", "100000", "150000", "250000", "500000"]]);
+  pills[4].pick("");
   assert.equal(changes.at(-1).compactAt, null, "Harness default is sent as null");
-  compactSelect.props.onChange({ target: { value: "500000" } });
+  pills[4].pick("500000");
   assert.equal(changes.at(-1).compactAt, 500000);
   const byKey = await settle(React.createElement(type.CreateConfiguration, {
     config: { ...hardwareDefaults(), harness: "qwen", pays: "key" }, onChange: () => {}, disabled: false }));
-  assert.deepEqual(selectsIn(byKey)[3].options, ["qwen4-max", "qwen3.7-plus"], "the key's listing");
-  assert.match(textIn(byKey), /has an API key|Signed in/);
+  assert.deepEqual(pillsIn(byKey)[3].options, ["qwen4-max", "qwen3.7-plus"], "the key's listing");
+  assert.match(rowsIn(byKey).find((row) => row.title === "API key").description, /has an API key|Signed in/);
   const claude = await settle(React.createElement(type.CreateConfiguration, {
     config: { ...hardwareDefaults(), harness: "claude" }, onChange: () => {}, disabled: false }));
-  assert.ok(selectsIn(claude).some((entry) => entry.label === "Pays with"), "every harness that reports a key gets the choice");
+  assert.ok(pillsIn(claude).some((entry) => entry.title === "Pays with"), "every harness that reports a key gets the choice");
   const before = hardwareOn((request) => (request.op === "machine.status" ? { ok: true, machine: "commerce", harnesses: harnesses({ signedIn: true }) } : qwenFleet(request)));
   const old = await before.settle(before.React.createElement(before.type.CreateConfiguration, {
     config: { ...hardwareDefaults(), harness: "claude" }, onChange: () => {}, disabled: false }));
-  assert.ok(!selectsIn(old).some((entry) => entry.label === "Pays with"), "a machine from before keys: no choice");
+  assert.ok(!pillsIn(old).some((entry) => entry.title === "Pays with"), "a machine from before keys: no choice");
 });
 
-test("render: Settings shows how the agent pays, and a change goes to its machine as settings.set with pays", async () => {
+test("render: Settings splits into Identity and Settings, each a titled card of rows", async () => {
+  const { type, React, settle } = hardwareOn(qwenFleet);
+  const [tab] = type.tabs;
+  assert.deepEqual([tab.role, tab.splitSettings], ["settings", true]);
+  const host = { typeControl: () => React.createElement("div", { className: "buzz-preference-row host", "data-buzz-ui": "" }, React.createElement("div", { className: "buzz-preference-row-label" }, "Harness")) };
+  const identity = await settle(React.createElement(tab.component, { agent: { pubkey: PUBKEY }, settingsHost: host, settingsSection: "identity", settingsContent: "HOST" }));
+  assert.deepEqual(rowsIn(identity).map((row) => row.title), ["Harness", "Model", "Compact at"]);
+  assert.ok(has(find(identity, (node) => has(node, "buzz-settings-group")).props.children.filter(Boolean)[0], "host"), "the host's Harness row comes first");
+  assert.equal(find(identity, (node) => has(node, "buzz-textarea")).props.id, find(identity, (node) => has(node, "buzz-field-label")).props.htmlFor, "Instructions is a Buzz field");
+  assert.doesNotMatch(textIn(identity), /HOST/, "the host's own settings show on the Settings tab only");
+  const runtime = await settle(React.createElement(tab.component, { agent: { pubkey: PUBKEY }, settingsHost: host, settingsSection: "runtime", settingsContent: "HOST" }));
+  assert.deepEqual(all(runtime, (node) => has(node, "buzz-content-header-title")).map((node) => textIn(node).trim()), ["Machine", "Heartbeat", "Conversations"]);
+  assert.deepEqual(rowsIn(runtime).map((row) => row.title), ["Runs on", "Runs", "Pays with", "API key", "Status", "Answers", "Heartbeat",
+    "Parallel work", "Session per", "New message while working", "Fresh session after", "Max turn length", "Context for replies"]);
+  assert.match(textIn(runtime), /HOST$/);
+  assert.equal(rowsIn(runtime).find((row) => row.title === "Runs on").description, "");
+  const both = await settle(React.createElement(tab.component, { agent: { pubkey: PUBKEY }, settingsHost: host }));
+  assert.equal(rowsIn(both).length, 3 + 13, "no section named: both halves");
+});
+
+test("render: Settings shows how the agent pays and its levers, and a change goes to its machine as settings.set", async () => {
   const { type, React, settle, asked } = hardwareOn(qwenFleet);
   const tree = await settle(React.createElement(type.tabs[0].component, { agent: { pubkey: PUBKEY } }));
-  const selects = selectsIn(tree);
-  assert.deepEqual(selects.map((entry) => [entry.label, entry.value]), [["Pays with", "key"], ["Model", "qwen3.7-plus"], ["Compact at", "250000"]]);
-  assert.deepEqual(selects[1].options, ["qwen4-max", "qwen3.7-plus"], "the key's listing");
-  const compactSelect = (function find(node) {
-    if (!node || typeof node !== "object") return null;
-    if (node.type === "select" && node.props.value === "250000") return node;
-    for (const child of node.props?.children ?? []) { const hit = find(child); if (hit) return hit; }
-    return null;
-  })(tree);
-  compactSelect.props.onChange({ target: { value: "100000" } });
-  await new Promise((resolve) => setTimeout(resolve, 10));
-  assert.deepEqual(asked.find((request) => request.op === "settings.set"), { op: "settings.set", pubkey: PUBKEY, compactAt: 100000 }, "the model and effort stay as they are");
-  asked.length = 0;
-  const select = (function find(node) {
-    if (!node || typeof node !== "object") return null;
-    if (node.type === "select" && node.props.value === "key") return node;
-    for (const child of node.props?.children ?? []) { const hit = find(child); if (hit) return hit; }
-    return null;
-  })(tree);
-  select.props.onChange({ target: { value: "subscription" } });
-  await new Promise((resolve) => setTimeout(resolve, 10));
-  assert.deepEqual(asked.find((request) => request.op === "settings.set"), { op: "settings.set", pubkey: PUBKEY, model: "", effort: "", pays: "subscription" });
+  const pills = pillsIn(tree);
+  assert.deepEqual(pills.map((entry) => [entry.title, entry.value]), [["Model", "qwen3.7-plus"], ["Compact at", "250000"], ["Pays with", "key"],
+    ["Parallel work", ""], ["Session per", "thread"], ["New message while working", ""], ["Fresh session after", ""], ["Max turn length", ""], ["Context for replies", "20"]]);
+  assert.deepEqual(pills[0].options, ["qwen4-max", "qwen3.7-plus"], "the key's listing");
+  const sent = async () => { await new Promise((resolve) => setTimeout(resolve, 10)); const request = asked.find((entry) => entry.op === "settings.set"); asked.length = 0; return request; };
+  pills[1].pick("100000");
+  assert.deepEqual(await sent(), { op: "settings.set", pubkey: PUBKEY, compactAt: 100000 }, "the model and effort stay as they are");
+  pills[2].pick("subscription");
+  assert.deepEqual(await sent(), { op: "settings.set", pubkey: PUBKEY, model: "", effort: "", pays: "subscription" });
+  const later = await settle(React.createElement(type.tabs[0].component, { agent: { pubkey: PUBKEY } }));
+  pillsIn(later).find((entry) => entry.title === "Session per").pick("channel");
+  assert.deepEqual(await sent(), { op: "settings.set", pubkey: PUBKEY, sessionPolicy: "channel" });
+  const again = await settle(React.createElement(type.tabs[0].component, { agent: { pubkey: PUBKEY } }));
+  pillsIn(again).find((entry) => entry.title === "Context for replies").pick("");
+  assert.deepEqual(await sent(), { op: "settings.set", pubkey: PUBKEY, contextMessageLimit: null }, "back to buzz-acp's default");
+  const more = await settle(React.createElement(type.tabs[0].component, { agent: { pubkey: PUBKEY } }));
+  pillsIn(more).find((entry) => entry.title === "Max turn length").pick("3600");
+  assert.deepEqual(await sent(), { op: "settings.set", pubkey: PUBKEY, maxTurnDuration: 3600 });
+});
+
+test("render: a lever the machine refuses says so under its card, on the tab where it was picked", async () => {
+  const { type, React, settle } = hardwareOn((request) => (request.op === "settings.set"
+    ? { ok: false, error: "agents is a whole number from 1 to 8, or null for buzz-acp's default" } : qwenFleet(request)));
+  const element = React.createElement(type.tabs[0].component, { agent: { pubkey: PUBKEY }, settingsSection: "runtime" });
+  const tree = await settle(element);
+  pillsIn(tree).find((entry) => entry.title === "Parallel work").pick("8");
+  const after = await settle(element);
+  const errors = all(after, (node) => has(node, "buzz-field-error")).map((node) => textIn(node).trim());
+  assert.deepEqual(errors, ["agents is a whole number from 1 to 8, or null for buzz-acp's default"]);
+  const conversations = find(after, (node) => has(node, "buzz-content-header-title") && textIn(node).includes("Conversations"));
+  assert.ok(conversations, "the Conversations card is on this tab");
+  pillsIn(after).find((entry) => entry.title === "Pays with").pick("subscription");
+  const again = await settle(element);
+  assert.equal(all(again, (node) => has(node, "buzz-field-error")).length, 1, "one line: the latest pick's");
+});
+
+test("render: an unsaved edit outlives Buzz mounting the Identity tab anew", async () => {
+  const { type, React, settle, unmount } = hardwareOn(fleet);
+  const identity = React.createElement(type.tabs[0].component, { agent: { pubkey: PUBKEY }, settingsSection: "identity" });
+  const tree = await settle(identity);
+  find(tree, (node) => has(node, "buzz-textarea")).props.onChange({ target: { value: "Be brief. Be kind." } });
+  const edited = await settle(identity);
+  assert.deepEqual(buttonsIn(edited).map((button) => button.label), ["Opus 5.5", "Max", "Discard", "Save"], "dirty: Discard and Save");
+  unmount();
+  const back = await settle(identity);
+  assert.equal(find(back, (node) => has(node, "buzz-textarea")).props.value, "Be brief. Be kind.", "the draft is back");
+  buttonsIn(back).find((button) => button.label === "Discard").click();
+  await settle(identity);
+  unmount();
+  const clean = await settle(identity);
+  assert.equal(find(clean, (node) => has(node, "buzz-textarea")).props.value, "Be brief.", "discarded: nothing kept");
 });
 
 test("render: Settings shows what an agent with no choice was started with, and its problem", async () => {
@@ -452,44 +646,67 @@ test("render: Settings shows what an agent with no choice was started with, and 
       modelChosen: false, effortChosen: false, modelProblem: "Claude Code does not offer the model x on this machine. Choose another model for this agent." }
     : fleet(request)));
   const tree = await settle(React.createElement(type.tabs[0].component, { agent: { pubkey: PUBKEY } }));
-  assert.deepEqual(selectsIn(tree).map((entry) => [entry.label, entry.value]), [["Model", "opus"], ["Effort", "medium"]]);
-  assert.match(textIn(tree), /does not offer the model x on this machine/);
+  assert.deepEqual(pillsIn(tree).map((entry) => [entry.title, entry.value]), [["Model", "opus"], ["Thinking", "medium"]]);
+  assert.match(textIn(find(tree, (node) => has(node, "buzz-field-error"))), /does not offer the model x on this machine/);
+  assert.deepEqual(rowsIn(tree).find((row) => row.title === "Status") && textIn(find(tree, (node) => node.props.children?.includes?.("Stopped"))).trim(), "Stopped");
 });
 
 test("render: Settings shows the agent's own model and effort, and a change is sent to its machine", async () => {
   const { type, React, settle, asked } = hardwareOn(fleet);
   const tree = await settle(React.createElement(type.tabs[0].component, { agent: { pubkey: PUBKEY } }));
-  const selects = selectsIn(tree);
-  assert.deepEqual(selects.map((entry) => [entry.label, entry.value]), [["Model", "opus"], ["Effort", "max"]]);
-  const select = (function find(node) {
-    if (!node || typeof node !== "object") return null;
-    if (node.type === "select" && node.props.value === "opus") return node;
-    for (const child of node.props?.children ?? []) { const hit = find(child); if (hit) return hit; }
-    return null;
-  })(tree);
-  select.props.onChange({ target: { value: "claude-fable-5-2" } });
+  const pills = pillsIn(tree);
+  assert.deepEqual(pills.map((entry) => [entry.title, entry.value]), [["Model", "opus"], ["Thinking", "max"]]);
+  pills[0].pick("claude-fable-5-2");
   await new Promise((resolve) => setTimeout(resolve, 10));
   assert.deepEqual(asked.find((request) => request.op === "settings.set"), { op: "settings.set", pubkey: PUBKEY, model: "", effort: "max" });
+  assert.equal(pillsIn(tree).length, 2, "no Conversations card: this machine lists no levers");
+  assert.deepEqual(buttonsIn(tree).map((button) => button.label), ["Opus 5.5", "Max", "Restart"], "the pills (showing their value), and Restart; Save shows once the instructions change");
 });
 
-test("render: Settings shows the heartbeat interval as a choice, and a change is sent to its machine", async () => {
+test("render: the heartbeat is a switch row, its interval a choice, and a change is sent to its machine", async () => {
+  let minutes = 15;
   const { type, React, settle, asked } = hardwareOn((request) => (request.op === "heartbeat.get"
-    ? { ok: true, heartbeat: 15, prompt: "Standard", custom: false, defaultPrompt: "Standard" }
-    : request.op === "heartbeat.set" ? { ok: true, heartbeat: request.minutes, prompt: "Standard", custom: false, defaultPrompt: "Standard" }
+    ? { ok: true, heartbeat: minutes, prompt: "Standard", custom: false, defaultPrompt: "Standard" }
+    : request.op === "heartbeat.set" ? { ok: true, heartbeat: (minutes = request.minutes), prompt: "Standard", custom: false, defaultPrompt: "Standard" }
     : fleet(request)));
   const tree = await settle(React.createElement(type.tabs[0].component, { agent: { pubkey: PUBKEY } }));
-  const interval = (function find(node) {
-    if (!node || typeof node !== "object") return null;
-    if (node.type === "select" && node.props["aria-label"] === "Heartbeat interval") return node;
-    for (const child of node.props?.children ?? []) { const hit = find(child); if (hit) return hit; }
-    return null;
-  })(tree);
-  assert.ok(interval, "a heartbeat that is on shows its interval as a select");
-  assert.equal(interval.props.value, "15");
-  assert.deepEqual(interval.props.children.map((option) => option.props.value), HEARTBEAT_CHOICES.map(String));
-  interval.props.onChange({ target: { value: "60" } });
+  const beat = rowsIn(tree).find((row) => row.title === "Heartbeat");
+  assert.equal(beat.checked, true, "a switch, on");
+  const interval = pillsIn(tree).find((entry) => entry.label === "Heartbeat interval");
+  assert.ok(interval, "a heartbeat that is on shows its interval as a choice");
+  assert.equal(interval.value, "15");
+  assert.deepEqual(interval.options, HEARTBEAT_CHOICES.map(String));
+  interval.pick("60");
   await new Promise((resolve) => setTimeout(resolve, 10));
   assert.deepEqual(asked.find((request) => request.op === "heartbeat.set"), { op: "heartbeat.set", pubkey: PUBKEY, minutes: 60 });
+  asked.length = 0;
+  beat.toggle();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(asked.find((request) => request.op === "heartbeat.set"), { op: "heartbeat.set", pubkey: PUBKEY, minutes: 0 });
+  const off = await settle(React.createElement(type.tabs[0].component, { agent: { pubkey: PUBKEY } }));
+  assert.equal(pillsIn(off).find((entry) => entry.label === "Heartbeat interval"), undefined, "off: no interval row");
+  assert.equal(find(off, (node) => has(node, "buzz-field-label") && textIn(node).includes("On each heartbeat")) !== null, true, "the prompt stays editable while off");
+});
+
+test("render: a sign-in under way is rows of the same card, with Buzz's input and buttons", async () => {
+  const pending = { step: "idle" };
+  const { type, React, settle } = hardwareOn((request) => {
+    if (request.op === "machine.status") return { ok: true, machine: "commerce", harnesses: harnesses({ signedIn: false, signIn: "code" }) };
+    if (request.op === "login.start") return { ok: true, loginId: "login-1", url: "https://example.com/sign-in", needsCode: true, flow: "code" };
+    return fleet(request);
+  });
+  const tree = await settle(React.createElement(type.CreateConfiguration, { config: { ...hardwareDefaults(), harness: "claude" }, onChange: () => {}, disabled: false }));
+  const signIn = rowsIn(tree).find((row) => row.title === "Sign-in");
+  assert.equal(signIn.description, "Claude Code is not signed in");
+  buttonsIn(tree).find((button) => button.label === "Sign in").click();
+  const flow = await settle(React.createElement(type.CreateConfiguration, { config: { ...hardwareDefaults(), harness: "claude" }, onChange: () => {}, disabled: false }));
+  assert.deepEqual(rowsIn(flow).map((row) => row.title).filter((title) => /sign-in|code/i.test(title)), ["Sign-in", "Open Claude Code sign-in", "Paste the code"]);
+  const input = find(flow, (node) => has(node, "buzz-input"));
+  assert.deepEqual([input.props.type, input.props["data-size"], input.props.placeholder], ["password", "sm", "Code"]);
+  assert.equal(find(flow, (node) => has(node, "buzz-preference-row-label") && node.type === "label").props.htmlFor, input.props.id, "the row's title labels the code field");
+  assert.deepEqual(buttonsIn(flow).map((button) => button.label).slice(-4), ["Cancel", "Open", "Copy link", "Finish"]);
+  assert.equal(find(flow, (node) => node.type === "a" && has(node, "buzz-button")).props.href, "https://example.com/sign-in", "Open is Buzz's button as a link");
+  void pending;
 });
 
 test("harness choices follow what the machine has installed", () => {

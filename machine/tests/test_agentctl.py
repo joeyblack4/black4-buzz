@@ -1902,6 +1902,21 @@ class CompactAt(DeviceBase):
         self.assertIn("compact at 500,000 tokens", self.a.heartbeat_prompt(self.a.read_settings(qwen_agent)))
         self.assertIn("compaction at your harness's default", self.a.heartbeat_prompt({"name": "x"}))
 
+    def test_levers_chosen_before_activation_only_write_and_apply_when_it_starts(self):
+        # The Create form's picks follow provision as settings.set, before the owner attestation.
+        agent = self.make_agent("claude", activate=False)
+        done = self.req(op="settings.set", pubkey=agent.name, agents=3, sessionPolicy="thread")
+        self.assertTrue(done["ok"], done)
+        self.assertEqual(done["controls"]["agents"], 3)
+        self.assertIsNone(self.a.running(agent), "nothing starts without an owner attestation")
+        self.assertFalse((agent / "work" / "env.json").exists())
+        activated = self.req(op="activate", pubkey=agent.name, auth=["auth", "a" * 64, "", "b" * 128],
+                             community="wss://relay.example.com", config={"heartbeat": 15})
+        self.assertTrue(activated["ok"], activated)
+        env = json.loads((agent / "work" / "env.json").read_text())
+        self.assertEqual((env["BUZZ_ACP_AGENTS"], env["BUZZ_ACP_SESSION_POLICY"]), ("3", "thread"))
+        self.assertEqual(self.a.heartbeat_minutes(self.a.read_settings(agent)), 15, "activate takes the heartbeat from the form")
+
     def test_buzz_acps_own_levers_are_per_agent_and_a_heartbeat_keeps_two_in_parallel(self):
         agent = self.make_agent("claude")
         self.assertEqual(self.req(op="settings.set", pubkey=agent.name, agents=9)["error"], "agents is a whole number from 1 to 8, or null for buzz-acp's default")

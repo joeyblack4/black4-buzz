@@ -147,7 +147,7 @@ sees only the sign-in it pays with.
 Qwen Code runs in a private home per sign-in with its self-update, usage
 statistics and managed memory off (`tools.toolOutputBatchBudget` 100k
 characters). When an agent compacts its context is its own setting, **Compact
-at** next to Model and Effort (a new agent: 150k tokens; *Harness default*
+at** next to Model and Thinking (a new agent: 150k tokens; *Harness default*
 leaves it to the harness), through the lever each harness has per process;
 where a harness has none, or the machine does not know the model's window yet,
 the choice is greyed with the reason. Black 4 tool results are large, so this
@@ -158,6 +158,16 @@ the model applies.
 
 A harness that the machine has installed but Buzz can't sign in (Goose) is
 listed as unavailable, with the reason.
+
+The form and the agent's tabs are Buzz's own rows. **Identity** holds
+Harness, Model, Thinking, Compact at and Instructions. **Settings** holds the
+machine (Runs on, Runs, Pays with, Sign-in, Status with Restart, Answers), the
+Heartbeat (on or off, how often it wakes, and what it does each time) and
+**Conversations**: buzz-acp's own levers for this agent (Parallel work, Session
+per, New message while working, Fresh session after, Max turn length, Context
+for replies), each at buzz-acp's default until you choose one. A choice in a
+dropdown applies at once; Instructions and the heartbeat prompt have Save.
+The Create form offers the same rows at their defaults.
 
 You should see the agent in your list with *Claude Code · Commerce Mac* under
 its name, and **Status: Running** in its **Settings** tab. @mention it in a

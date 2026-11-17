@@ -173,9 +173,10 @@ test("Settings → Black 4: Sign in shows the prefilled link and code, then Conn
   const net = https({ authkit, mcp });
   let card;
   const cleanups = [];
-  const h = (type, props, ...children) => ({ type, props: props ?? {}, children });
+  // Children sit in props as well, as React keeps them, for components that render their children.
+  const h = (type, props, ...children) => { const kids = children.flat(); return { type, props: { ...(props ?? {}), children: kids }, children: kids }; };
   apply({
-    react: { createElement: h, useState: (v) => [typeof v === "function" ? v() : v, () => {}], useEffect: () => {}, useRef: (v) => ({ current: v }), Component: class {} },
+    react: { createElement: h, useState: (v) => [typeof v === "function" ? v() : v, () => {}], useEffect: () => {}, useLayoutEffect: () => {}, useRef: (v) => ({ current: v }), useId: (() => { let n = 0; return () => `id-${++n}`; })(), Component: class {} },
     agents: { snapshot: () => ({ running: [] }), addTool: () => () => {}, register: () => {} },
     settingsCards: { register: (value) => { card = value; } },
     pages: { register() {} }, panels: { register() {} }, conversation: {}, browser: { available: false },
@@ -232,9 +233,10 @@ test("Cancel, then Sign in again: the cancelled attempt ending later leaves the 
   const net = https({ authkit, mcp: fakeMcp(authkit) });
   let card;
   const cleanups = [];
-  const h = (type, props, ...children) => ({ type, props: props ?? {}, children });
+  // Children sit in props as well, as React keeps them, for components that render their children.
+  const h = (type, props, ...children) => { const kids = children.flat(); return { type, props: { ...(props ?? {}), children: kids }, children: kids }; };
   apply({
-    react: { createElement: h, useState: (v) => [typeof v === "function" ? v() : v, () => {}], useEffect: () => {}, useRef: (v) => ({ current: v }), Component: class {} },
+    react: { createElement: h, useState: (v) => [typeof v === "function" ? v() : v, () => {}], useEffect: () => {}, useLayoutEffect: () => {}, useRef: (v) => ({ current: v }), useId: (() => { let n = 0; return () => `id-${++n}`; })(), Component: class {} },
     agents: { snapshot: () => ({ running: [] }), addTool: () => () => {}, register: () => {} },
     settingsCards: { register: (value) => { card = value; } },
     pages: { register() {} }, panels: { register() {} }, conversation: {}, browser: { available: false },

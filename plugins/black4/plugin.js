@@ -1879,14 +1879,16 @@ const MODELS_RECHECK_MS = 15 * 1000;
 const LOGIN_TIMEOUT_MS = 120 * 1000; // the machine waits up to 90 s for a code, 85 s per wait for a device approval
 /** Sign-in flows this plugin can show. "code": open a link, paste the code its
  * page shows. "device": open a link and approve the short code shown here;
- * the machine finishes by itself. A machine offers a device sign-in only to a
+ * the machine finishes by itself. "key": open a link to where an API key is
+ * made, paste the key. A machine offers a device or key sign-in only to a
  * plugin that says it can show one. */
-const SIGN_IN_FLOWS = ["code", "device"];
+const SIGN_IN_FLOWS = ["code", "device", "key"];
 
 export const HARNESSES = [
   { id: "claude", label: "Claude Code" },
   { id: "codex", label: "Codex" },
   { id: "grok", label: "Grok Build" },
+  { id: "qwen", label: "Qwen Code" },
   { id: "goose", label: "Goose" },
 ];
 const ANSWERS = [
@@ -2018,9 +2020,9 @@ export function statusReader(ask, { op = "machine.status", ttlMs = STATUS_TTL_MS
   };
 }
 
-/** How Buzz signs this harness in on the machine: "code", "device", or null
- * with a one-sentence reason. A machine from before Codex and Grok sign-in
- * reports no `signIn`; there only Claude Code signs in from Buzz. */
+/** How Buzz signs this harness in on the machine: "code", "device", "key", or
+ * null with a one-sentence reason. A machine from before Codex and Grok
+ * sign-in reports no `signIn`; there only Claude Code signs in from Buzz. */
 export function signInOf(row) {
   if (!row) return { flow: null, reason: null };
   if ("signIn" in row) {
@@ -2142,7 +2144,10 @@ export function applyPick(models, harness, value, change) {
  * A device sign-in (needsCode false: Codex, Grok) shows the link and the
  * machine's short userCode, then waits by itself: login.finish with no code
  * waits on the machine for the approval and answers `pending` if it has not
- * come yet, and is asked again until it signs in, fails or is cancelled. */
+ * come yet, and is asked again until it signs in, fails or is cancelled.
+ * A key sign-in (flow "key": Qwen Code) shows the link to where a key is made
+ * and takes the key in place of a code; a key the machine refuses leaves the
+ * same sign-in open to paste again (state `flow: "key"`, no new link). */
 export function createLogin(ask, machine, harness, { onChange, onSignedIn, timeoutMs = LOGIN_TIMEOUT_MS } = {}) {
   let state = Object.freeze({ step: "idle" });
   let loginId = null;
@@ -2177,7 +2182,8 @@ export function createLogin(ask, machine, harness, { onChange, onSignedIn, timeo
       loginId = id;
       const needsCode = reply.needsCode !== false;
       const userCode = !needsCode && typeof reply.userCode === "string" && /^[A-Za-z0-9-]{4,32}$/.test(reply.userCode) ? reply.userCode : null;
-      set({ step: "waiting", url, needsCode, ...(userCode ? { userCode } : {}), ...extra });
+      const key = needsCode && reply.flow === "key";
+      set({ step: "waiting", url, needsCode, ...(key ? { flow: "key" } : {}), ...(userCode ? { userCode } : {}), ...extra });
       if (!needsCode) approval(mine, id).catch((error) => {
         if (disposed || mine !== generation) return;
         loginId = null;
@@ -2225,10 +2231,12 @@ export function createLogin(ask, machine, harness, { onChange, onSignedIn, timeo
       if (pending) return pending;
       if (state.step !== "waiting" || !loginId) return Promise.resolve();
       if (!state.needsCode) return Promise.resolve(); // a device sign-in finishes by itself
-      if (state.needsCode && !pasted) { set({ ...state, error: "Paste the code first." }); return Promise.resolve(); }
+      const key = state.flow === "key";
+      if (state.needsCode && !pasted) { set({ ...state, error: key ? "Paste the API key first." : "Paste the code first." }); return Promise.resolve(); }
       const mine = ++generation;
       const used = loginId;
-      set({ step: "finishing", url: state.url, needsCode: state.needsCode, ...(state.renewed ? { renewed: true } : {}) });
+      const url = state.url;
+      set({ step: "finishing", url, needsCode: state.needsCode, ...(key ? { flow: "key" } : {}), ...(state.renewed ? { renewed: true } : {}) });
       return track(askMachine(ask, machine, { op: "login.finish", loginId: used, ...(pasted ? { code: pasted } : {}) }, { timeoutMs })
         .then(async (reply) => {
           if (reply.signedIn === false) throw new Error("Sign-in did not finish.");
@@ -2236,11 +2244,18 @@ export function createLogin(ask, machine, harness, { onChange, onSignedIn, timeo
           if (mine !== generation) return;
           await signedIn(mine, reply);
         }, async (error) => {
+          const reason = message(error, pasted);
+          if (key && !/expired|cancelled/i.test(reason)) {
+            // The machine keeps a key sign-in open after a refused or unchecked
+            // key: the same link and id take the next paste.
+            if (mine === generation) set({ step: "waiting", url, needsCode: true, flow: "key", error: reason });
+            return;
+          }
           // A failed finish closes that sign-in on the machine: its link and
           // id are dead. Start one fresh sign-in (once, no loop) for a new link.
           if (loginId === used) loginId = null;
           if (mine !== generation) return;
-          const reason = message(error, pasted);
+          if (key) { set({ step: "idle", error: reason }); return; }
           set({ step: "renewing", error: reason });
           try {
             await open(mine, { renewed: true, error: `${reason} Open the new link and paste its code.` });
@@ -2546,20 +2561,27 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
         login.step === "finishing" ? "Signing in…" : `Waiting for you to approve it. The ${machine.label} finishes by itself.`,
         h("button", { type: "button", onClick: () => void flow.current?.cancel() }, "Cancel")),
       login.error && h("span", { role: "alert" }, login.error));
+    // A key sign-in (Qwen Code): the link opens the page where an API key is
+    // made, and the key is pasted in place of a code. It goes to the machine
+    // once and is kept there; it is never shown or kept here.
+    const key = login.flow === "key";
     return h("div", { style: { display: "grid", gap: 8 } },
       h("div", { style: row },
-        h("a", { href: login.url, target: "_blank", rel: "noopener noreferrer" }, login.renewed ? `Open new ${label} sign-in` : `Open ${label} sign-in`),
+        h("a", { href: login.url, target: "_blank", rel: "noopener noreferrer" },
+          key ? "Open the API keys page" : login.renewed ? `Open new ${label} sign-in` : `Open ${label} sign-in`),
         h("button", { type: "button", onClick: () => {
           Promise.resolve(globalThis.navigator?.clipboard?.writeText?.(login.url))
             .then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }, () => {});
         } }, copied ? "Copied" : "Copy link")),
+      key && h("span", { style: muted }, `Make a key there and paste it here. It is kept on the ${machine.label} only.`),
       // Not a <form>: this sits inside Buzz's own Create agent form, and a
       // nested form's submit goes to the outer one, which abandons the dialog.
       h("div", { style: row },
-          h("input", { type: "password", autoComplete: "off", spellCheck: false, placeholder: "Paste code", "aria-label": "Sign-in code",
+          h("input", { type: "password", autoComplete: "off", spellCheck: false,
+            placeholder: key ? "Paste API key" : "Paste code", "aria-label": key ? "API key" : "Sign-in code",
             value: code, disabled: busy, onChange: (event) => setCode(event.target.value), style: { flex: 1, minWidth: 160 },
             onKeyDown: (event) => { if (event.key === "Enter") { event.preventDefault(); event.stopPropagation(); if (!busy && code.trim()) submit(); } } }),
-          h("button", { type: "button", disabled: busy || !code.trim(), "aria-busy": busy, onClick: submit }, busy ? h(Spinner) : "Finish"),
+          h("button", { type: "button", disabled: busy || !code.trim(), "aria-busy": busy, onClick: submit }, busy ? h(Spinner) : key ? "Save key" : "Finish"),
           h("button", { type: "button", onClick: () => { setCode(""); void flow.current?.cancel(); } }, "Cancel")),
       login.error && h("span", { role: "alert" }, login.error));
   };

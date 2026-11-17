@@ -387,9 +387,9 @@ test("render: Settings shows the agent's own model and effort, and a change is s
 test("harness choices follow what the machine has installed", () => {
   const ok = { kind: "ok", harnesses: harnesses() };
   assert.deepEqual(harnessOptions(ok).map((entry) => entry.id), ["claude", "codex", "goose"]);
-  assert.deepEqual(harnessOptions(undefined).map((entry) => entry.id), ["claude", "codex", "grok", "goose"], "loading");
-  assert.equal(harnessOptions({ kind: "unsupported" }).length, 4);
-  assert.equal(harnessOptions({ kind: "unreachable", error: "x" }).length, 4);
+  assert.deepEqual(harnessOptions(undefined).map((entry) => entry.id), ["claude", "codex", "grok", "qwen", "goose"], "loading");
+  assert.equal(harnessOptions({ kind: "unsupported" }).length, 5);
+  assert.equal(harnessOptions({ kind: "unreachable", error: "x" }).length, 5);
   assert.deepEqual(harnessOptions({ kind: "ok", harnesses: [] }), []);
 });
 
@@ -413,11 +413,12 @@ test("readiness for each sign-in state", () => {
   assert.equal(signInState({ kind: "ok", harnesses: harnesses({ signedIn: true, account: null }) }, "claude").account, null);
 });
 
-// What a runner with Codex and Grok sign-in reports (machine/agentctl machine.status).
-const deviceRows = ({ codex = false, grok = false } = {}) => [
+// What a runner with Codex, Grok and Qwen Code sign-in reports (machine/agentctl machine.status).
+const deviceRows = ({ codex = false, grok = false, qwen = false } = {}) => [
   { id: "claude", label: "Claude Code", installed: true, signedIn: true, account: null, signIn: "code" },
   { id: "codex", label: "Codex", installed: true, signedIn: codex, account: codex ? "owner@example.com" : null, signIn: "device" },
   { id: "grok", label: "Grok Build", installed: true, signedIn: grok, account: null, signIn: "device" },
+  { id: "qwen", label: "Qwen Code", installed: true, signedIn: qwen, account: null, signIn: "key" },
   { id: "goose", label: "Goose", installed: true, signedIn: null, account: null, signIn: null,
     note: "Goose takes its model settings from the machine itself; Buzz cannot sign it in." },
 ];
@@ -425,11 +426,11 @@ const deviceRows = ({ codex = false, grok = false } = {}) => [
 test("Codex and Grok sign in from Buzz; an installed harness Buzz cannot sign in is shown unavailable", () => {
   const ok = { kind: "ok", harnesses: deviceRows() };
   const options = harnessOptions(ok);
-  assert.deepEqual(options.map((entry) => entry.id), ["claude", "codex", "grok", "goose"]);
+  assert.deepEqual(options.map((entry) => entry.id), ["claude", "codex", "grok", "qwen", "goose"]);
   assert.equal(options.find((entry) => entry.id === "goose").label, "Goose (unavailable)");
   assert.match(options.find((entry) => entry.id === "goose").unavailable, /cannot sign it in/);
   assert.ok(!options.find((entry) => entry.id === "codex").unavailable);
-  for (const harness of ["codex", "grok"]) {
+  for (const harness of ["codex", "grok", "qwen"]) {
     assert.equal(signInState(ok, harness).kind, "signed-out");
     assert.equal(readyToCreate(signInState(ok, harness)), false);
   }
@@ -471,7 +472,7 @@ test("sign-in: a device sign-in shows the link and code, then waits by itself un
   await login.start();
   assert.deepEqual(states.find((state) => state.step === "waiting"),
     { step: "waiting", url: "https://auth.openai.com/codex/device", needsCode: false, userCode: "ABCD-12EFG" });
-  assert.deepEqual(box.seen[0].request, { op: "login.start", harness: "codex", flows: ["code", "device"] });
+  assert.deepEqual(box.seen[0].request, { op: "login.start", harness: "codex", flows: ["code", "device", "key"] });
   for (let i = 0; i < 50 && login.state.step !== "idle"; i++) await new Promise((resolve) => setTimeout(resolve, 5));
   assert.deepEqual(login.state, { step: "idle" });
   assert.deepEqual(box.ops(), ["login.start", "login.finish", "login.finish", "login.finish", "machine.status"]);
@@ -637,6 +638,76 @@ test("sign-in: an empty code is not sent", async () => {
   await login.finish("   ");
   assert.equal(login.state.error, "Paste the code first.");
   assert.deepEqual(box.ops(), ["login.start"]);
+});
+
+const KEY_URL = "https://docs.qwencloud.com/developer-guides/administration/api-keys";
+const FAKE_KEY = "sk-fictional-qwencloud-key-0000000000000000";
+
+test("sign-in: a key sign-in shows the key page, takes the key once, and signs in", async () => {
+  let saved = false;
+  const box = machine((request) => {
+    if (request.op === "login.start") return { ok: true, loginId: "K1", url: KEY_URL, needsCode: true, flow: "key", expiresAt: 1 };
+    if (request.op === "login.finish") { saved = request.code === FAKE_KEY; return saved ? { ok: true, signedIn: true, account: null } : { ok: false, error: "QwenCloud did not accept that key. Check it and paste it again." }; }
+    if (request.op === "machine.status") return { ok: true, harnesses: deviceRows({ qwen: saved }) };
+    return { ok: true };
+  });
+  const reader = statusReader(box.ask);
+  const states = [];
+  const said = await console_(async () => {
+    const login = createLogin(box.ask, "commerce", "qwen", {
+      onChange: (state) => states.push(state),
+      onSignedIn: () => reader.read("commerce", { force: true }),
+    });
+    await login.start();
+    assert.deepEqual(login.state, { step: "waiting", url: KEY_URL, needsCode: true, flow: "key" });
+    assert.deepEqual(box.seen[0].request, { op: "login.start", harness: "qwen", flows: ["code", "device", "key"] });
+    await login.finish("   ");
+    assert.equal(login.state.error, "Paste the API key first.");
+    await login.finish(`  ${FAKE_KEY}\n`);
+    assert.deepEqual(login.state, { step: "idle" });
+  });
+  assert.deepEqual(box.ops(), ["login.start", "login.finish", "machine.status"], "an empty paste is not sent");
+  assert.equal(box.seen[1].request.code, FAKE_KEY, "the key is trimmed and sent as the code");
+  assert.deepEqual(signInState(reader.peek("commerce"), "qwen"), { kind: "signed-in", account: null });
+  assert.ok(states.some((state) => state.step === "finishing" && state.flow === "key"));
+  assert.ok(!JSON.stringify(states).includes(FAKE_KEY), "the key is never kept in state");
+  assert.ok(!said.join("\n").includes(FAKE_KEY), "the key is never logged");
+});
+
+test("sign-in: a refused key keeps the same sign-in open to paste again, with no new link", async () => {
+  let finishes = 0;
+  const box = machine((request) => {
+    if (request.op === "login.start") return { ok: true, loginId: "K1", url: KEY_URL, needsCode: true, flow: "key" };
+    if (request.op === "login.finish") return ++finishes === 1
+      ? { ok: false, error: "QwenCloud did not accept that key. Check it and paste it again." }
+      : { ok: true, signedIn: true, account: null };
+    return { ok: true };
+  });
+  const login = createLogin(box.ask, "commerce", "qwen");
+  await login.start();
+  await login.finish("sk-wrong-key-00000000000000000000");
+  assert.deepEqual(login.state, { step: "waiting", url: KEY_URL, needsCode: true, flow: "key", error: "QwenCloud did not accept that key. Check it and paste it again." });
+  assert.ok(!JSON.stringify(login.state).includes("sk-wrong-key"), "the refused key is not echoed");
+  await login.finish(FAKE_KEY);
+  assert.deepEqual(login.state, { step: "idle" });
+  assert.deepEqual(box.ops(), ["login.start", "login.finish", "login.finish"], "no automatic new sign-in for a key");
+  assert.ok(box.seen.slice(1).every((entry) => entry.request.loginId === "K1"), "the same sign-in takes the second paste");
+});
+
+test("sign-in: an expired key sign-in goes back to Sign in, and Cancel cancels it on the machine", async () => {
+  const box = machine((request) => {
+    if (request.op === "login.start") return { ok: true, loginId: "K2", url: KEY_URL, needsCode: true, flow: "key" };
+    if (request.op === "login.finish") return { ok: false, error: "This sign-in has expired or was cancelled. Start the sign-in again." };
+    return { ok: true };
+  });
+  const login = createLogin(box.ask, "commerce", "qwen");
+  await login.start();
+  await login.finish(FAKE_KEY);
+  assert.deepEqual(login.state, { step: "idle", error: "This sign-in has expired or was cancelled. Start the sign-in again." });
+  assert.deepEqual(box.ops(), ["login.start", "login.finish"], "a dead key sign-in is not restarted by itself");
+  await login.start();
+  await login.cancel();
+  assert.deepEqual(box.seen.at(-1).request, { op: "login.cancel", loginId: "K2" });
 });
 
 test("sign-in: Cancel cancels on the machine, also when it lands mid-start", async () => {

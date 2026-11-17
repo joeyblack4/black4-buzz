@@ -2,12 +2,15 @@
 
 Each test gets a temporary home with fake `claude`, `claude-agent-acp`,
 `buzz-acp` and `buzz` programs (and, where a test needs them, fake `codex`,
-`codex-acp` and `grok`), so nothing touches the real machine, the network or
-the crontab. The fake `claude setup-token` behaves like the real one over a
-pty: banner, link, "Paste code" prompt, then a token or an OAuth error. The fake
-`codex login --device-auth` and `grok login --device-auth` print what the real
-ones printed on the machine (a link and a one-time code), then wait for the
-test to approve or refuse (the file approve.txt in the test home).
+`codex-acp`, `grok` and `qwen`), so nothing touches the real machine, the
+network or the crontab. The fake `claude setup-token` behaves like the real
+one over a pty: banner, link, "Paste code" prompt, then a token or an OAuth
+error. The fake `codex login --device-auth` and `grok login --device-auth`
+print what the real ones printed on the machine (a link and a one-time code),
+then wait for the test to approve or refuse (the file approve.txt in the test
+home). QwenCloud's GET /models (the key check and listing) is a fake in
+process: it answers 200 for the fake keys, 401 for any other, and nothing at
+all for a key starting sk-offline.
 """
 import contextlib, io, re, importlib.machinery, importlib.util, json, os, signal, stat, subprocess, sys, tempfile, textwrap, time, unittest
 from pathlib import Path
@@ -86,7 +89,7 @@ if sys.argv[1:2] == ["models"]:  # what 0.5.30 printed for claude-agent-acp 0.94
 if os.path.exists(os.path.join(home, "crash.txt")):
     print("buzz-acp: relay refused the connection", flush=True); sys.exit(1)
 with open("env.json", "w") as f:
-    json.dump({{k: v for k, v in os.environ.items() if k.startswith(("BUZZ_ACP", "CLAUDE_CODE", "PATH", "CODEX", "GROK", "NO_BROWSER", "OPENAI", "XAI", "INITIAL_AGENT_MODE", "GOOSE", "ANTHROPIC"))}}, f)
+    json.dump({{k: v for k, v in os.environ.items() if k.startswith(("BUZZ_ACP", "CLAUDE_CODE", "PATH", "CODEX", "GROK", "QWEN", "NO_BROWSER", "OPENAI", "XAI", "INITIAL_AGENT_MODE", "GOOSE", "ANTHROPIC"))}}, f)
 while True: time.sleep(1)
 """
 
@@ -153,6 +156,39 @@ if args[:1] == ["models"]:  # what 1.0.70 prints; it calls no model
     print("Default model: grok-4.6\\n\\nAvailable models:\\n  * grok-4.6 (default)\\n  - grok-4.5"); sys.exit(0)
 """
 
+# Qwen Code is only started by buzz-acp (the fake above records its
+# environment); agentctl itself never runs it, so a stub will do.
+FAKE_QWEN = "#!/bin/sh\nexit 0\n"
+FAKE_QWEN_KEY = "sk-fake-qwencloud-key-" + "Q" * 24  # what the fake service accepts; not a real key
+FAKE_QWEN_PLAN_KEY = "sk-fake-token-plan-key-" + "P" * 24  # likewise, on the Token Plan base only
+QWEN_BASE = "https://maas.qwencloudapi.com/compatible-mode/v1"
+QWEN_PLAN_BASE = "https://token-plan.maas.qwencloudapi.com/compatible-mode/v1"
+# The shape QwenCloud's GET /models answers (OpenAI's list), with rows a
+# person would not pick for an agent mixed in.
+QWEN_MODELS_BODY = {"object": "list", "data": [
+    {"id": "qwen3.8-max", "object": "model"}, {"id": "qwen3-embedding-8b", "object": "model"},
+    {"id": "qwen4-max", "object": "model"}, {"id": "qwen3.7-plus", "object": "model"},
+    {"id": "qwen3-vl-plus", "object": "model"}, {"id": "deepseek-v4-pro", "object": "model"},
+    {"id": "qwen-tts-latest", "object": "model"}]}
+
+
+def fake_qwencloud(test):
+    """A fake of QwenCloud's GET /models, in place of agentctl's urllib call:
+    records (url, key) in test.http_calls; 200 for the fake key of each base,
+    401 otherwise, nothing for an sk-offline key, 500 for an sk-broken one.
+    The file qwen-revoked.txt in the test home makes every key a 401."""
+    test.http_calls = []
+
+    def get(url, key, timeout=20):
+        test.http_calls.append((url, key))
+        if key.startswith("sk-offline"): return None, None
+        if key.startswith("sk-broken"): return 500, {"error": "upstream"}
+        good = FAKE_QWEN_PLAN_KEY if url.startswith(QWEN_PLAN_BASE) else FAKE_QWEN_KEY
+        if key == good and not (test.home / "qwen-revoked.txt").exists() and url.endswith("/models"):
+            return 200, QWEN_MODELS_BODY
+        return 401, {"error": {"message": "Incorrect API key provided.", "code": "invalid_api_key"}}
+    return get
+
 
 def gone(pid):
     """True once pid has exited (reaping it first if it is our own child)."""
@@ -191,8 +227,8 @@ class Base(unittest.TestCase):
         self.a.agent_path = lambda: f"{bin_}:/usr/bin:/bin"
         # Sign-in checks run in this process, not in a detached `agentctl check`.
         self.a.spawn_check = lambda harness: self.a.run_check(harness)
-        # Likewise the Claude model listing: tests make it with refresh_claude_models.
-        self.a.spawn_models_refresh = lambda: None
+        # Likewise the Claude and Qwen model listings: tests make them with refresh_models.
+        self.a.spawn_models_refresh = lambda harness="claude": None
         self.crontab = ""  # never the test computer's own crontab
         self.a.read_crontab = lambda: self.crontab
 
@@ -308,12 +344,15 @@ class Requests(Base):
 
 
 class MachineStatus(Base):
-    def test_reports_four_harnesses_and_claude_signed_out(self):
+    def test_reports_five_harnesses_and_claude_signed_out(self):
         r = self.req(op="machine.status")
         self.assertTrue(r["ok"])
         self.assertIsInstance(r["machine"], str)
         rows = {h["id"]: h for h in r["harnesses"]}
-        self.assertEqual(list(rows), ["claude", "codex", "grok", "goose"])
+        self.assertEqual(list(rows), ["claude", "codex", "grok", "qwen", "goose"])
+        self.assertEqual(rows["qwen"]["signIn"], "key")
+        self.assertEqual(rows["qwen"]["label"], "Qwen Code")
+        self.assertFalse(rows["qwen"]["installed"])
         self.assertEqual(rows["claude"], {"id": "claude", "label": "Claude Code", "installed": True,
                                           "signedIn": False, "account": None, "signIn": "code"})
         self.assertFalse(rows["goose"]["installed"])
@@ -657,13 +696,26 @@ class Login(Base):
 
 
 class DeviceBase(Base):
-    """Codex and Grok, installed as fakes."""
+    """Codex, Grok and Qwen Code, installed as fakes, with a fake QwenCloud."""
     def setUp(self):
         super().setUp()
         write_exe(self.a.BIN / "codex", FAKE_CODEX)
         write_exe(self.a.BIN / "codex-acp", "#!/bin/sh\nexit 0\n")
         write_exe(self.a.BIN / "grok", FAKE_GROK)
+        write_exe(self.a.BIN / "qwen", FAKE_QWEN)
+        self.a.http_get_json = fake_qwencloud(self)
+        # A key sign-in restarts agents detached; here, in this process.
+        self.a.spawn_restart = lambda harness: self.a.restart_harness_agents(harness)
         self.a.FINISH_WAIT = 20
+
+    def start_key(self, harness="qwen", flows=("code", "device", "key")):
+        r = self.req(op="login.start", harness=harness, flows=list(flows))
+        self.assertTrue(r["ok"], r)
+        return r, self.a.LOGINS / r["loginId"]
+
+    def sign_in_key(self, key=FAKE_QWEN_KEY):
+        r, _ = self.start_key()
+        return self.req(op="login.finish", loginId=r["loginId"], code=key)
 
     def approve(self, answer="ok"):
         (self.home / "approve.txt").write_text(answer)
@@ -982,6 +1034,168 @@ class DeviceStatusAndStart(DeviceBase):
         self.assertTrue(self.a.running(agent))
 
 
+class KeyLogin(DeviceBase):
+    """Qwen Code on QwenCloud: a pasted API key, checked, kept privately, and
+    never on a command line."""
+    def test_a_key_sign_in_is_a_link_to_the_key_page_and_a_field(self):
+        r, d = self.start_key()
+        self.assertEqual(r["url"], "https://docs.qwencloud.com/developer-guides/administration/api-keys")
+        self.assertEqual((r["needsCode"], r["flow"]), (True, "key"))
+        self.assertGreater(r["expiresAt"], time.time())
+        self.assertEqual(stat.S_IMODE(d.stat().st_mode), 0o700)
+        info = json.loads((d / "helper.json").read_text())
+        self.assertEqual(info["kind"], "key")
+        self.assertNotIn("pid", info, "no helper process for a key")
+        self.assertEqual(self.http_calls, [], "nothing is asked until a key is pasted")
+
+    def test_an_older_plugin_gets_a_sentence_not_a_field_it_cannot_show(self):
+        r = self.req(op="login.start", harness="qwen", flows=["code", "device"])
+        self.assertEqual(r, {"ok": False, "error": "Update the Black 4 plugin in Buzz to sign in to Qwen Code from it."})
+        self.assertFalse(any(self.a.LOGINS.iterdir()) if self.a.LOGINS.exists() else False)
+
+    def test_a_good_key_is_checked_kept_privately_and_its_agents_start(self):
+        agent = self.make_agent("qwen")
+        r, d = self.start_key()
+        done = self.req(op="login.finish", loginId=r["loginId"], code=f"  {FAKE_QWEN_KEY}\n")
+        self.assertEqual(done, {"ok": True, "signedIn": True, "account": None})
+        self.assertFalse(d.exists())
+        secret = self.a.SECRETS / "qwen"
+        self.assertEqual(secret.read_text().strip(), FAKE_QWEN_KEY)
+        self.assertEqual(stat.S_IMODE(secret.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(self.a.SECRETS.stat().st_mode), 0o700)
+        info = json.loads((self.a.SECRETS / "qwen.json").read_text())
+        self.assertEqual((info["base"], info["plan"]), (QWEN_BASE, "pay-as-you-go"))
+        self.assertNotIn(FAKE_QWEN_KEY, json.dumps(info))
+        self.assertEqual(self.http_calls[0], (QWEN_BASE + "/models", FAKE_QWEN_KEY), "the pay-as-you-go base first")
+        self.assertTrue(all(FAKE_QWEN_KEY not in url for url, _ in self.http_calls), "the key is never in a URL")
+        rows = {h["id"]: h for h in self.req(op="machine.status")["harnesses"]}
+        self.assertEqual((rows["qwen"]["signedIn"], rows["qwen"]["account"], rows["qwen"]["signIn"]), (True, None, "key"))
+        self.assertTrue(self.wait_running(agent))
+        env = json.loads((agent / "work" / "env.json").read_text())
+        self.assertEqual(env["BUZZ_ACP_AGENT_COMMAND"], "qwen")
+        self.assertEqual(env["BUZZ_ACP_AGENT_ARGS"], "--acp,--approval-mode,yolo,--auth-type,openai")
+        self.assertEqual(env["OPENAI_API_KEY"], FAKE_QWEN_KEY)
+        self.assertEqual(env["OPENAI_BASE_URL"], QWEN_BASE)
+        self.assertEqual(env["OPENAI_MODEL"], "qwen4-max")
+        self.assertEqual(env["QWEN_HOME"], str(self.a.HOMES / "qwen"))
+        self.assertNotIn(FAKE_QWEN_KEY, env["BUZZ_ACP_AGENT_ARGS"])
+        self.assertEqual([k for k, v in env.items() if FAKE_QWEN_KEY in v], ["OPENAI_API_KEY"], "the key is in one place")
+        self.assertEqual(stat.S_IMODE((self.a.HOMES / "qwen").stat().st_mode), 0o700)
+        settings = json.loads((self.a.HOMES / "qwen" / "settings.json").read_text())
+        self.assertFalse(settings["general"]["enableAutoUpdate"])
+        self.assertFalse(settings["privacy"]["usageStatisticsEnabled"])
+        self.assertFalse(settings["telemetry"]["enabled"])
+        self.assertEqual(settings["memory"], {"enableManagedAutoMemory": False, "enableManagedAutoDream": False},
+                         "no shared memory folder, no second model call per turn")
+        self.assertFalse((self.home / ".qwen").exists(), "never the machine user's own ~/.qwen")
+
+    def test_the_private_home_keeps_what_qwen_code_wrote_there(self):
+        home = self.a.private_dir(self.a.HOMES / "qwen")
+        (home / "settings.json").write_text(json.dumps({"general": {"enableAutoUpdate": True, "vimMode": True}, "ui": {"theme": "dark"}}))
+        self.a.key_home("qwen")
+        settings = json.loads((home / "settings.json").read_text())
+        self.assertEqual(settings["general"], {"enableAutoUpdate": False, "vimMode": True})
+        self.assertEqual(settings["ui"], {"theme": "dark"})
+        before = (home / "settings.json").stat().st_mtime_ns
+        self.a.key_home("qwen")
+        self.assertEqual((home / "settings.json").stat().st_mtime_ns, before, "written only when it changes")
+
+    def test_a_token_plan_key_is_kept_for_its_own_base(self):
+        self.assertTrue(self.sign_in_key(FAKE_QWEN_PLAN_KEY)["signedIn"])
+        info = json.loads((self.a.SECRETS / "qwen.json").read_text())
+        self.assertEqual((info["base"], info["plan"]), (QWEN_PLAN_BASE, "token-plan"))
+        self.assertEqual([url for url, _ in self.http_calls[:2]], [QWEN_BASE + "/models", QWEN_PLAN_BASE + "/models"])
+        agent = self.make_agent("qwen")
+        self.assertTrue(self.req(op="start", pubkey=agent.name)["ok"])
+        env = json.loads((agent / "work" / "env.json").read_text())
+        self.assertEqual(env["OPENAI_BASE_URL"], QWEN_PLAN_BASE)
+
+    def test_a_refused_key_says_so_and_the_sign_in_stays_open(self):
+        r, d = self.start_key()
+        bad = self.req(op="login.finish", loginId=r["loginId"], code="sk-not-the-right-key-000000000000")
+        self.assertEqual(bad["error"], "QwenCloud did not accept that key. Check it and paste it again.")
+        self.assertTrue(d.exists(), "paste again, no new link needed")
+        self.assertFalse((self.a.SECRETS / "qwen").exists())
+        self.assertEqual(len(self.http_calls), 2, "both bases were tried")
+        good = self.req(op="login.finish", loginId=r["loginId"], code=FAKE_QWEN_KEY)
+        self.assertTrue(good["signedIn"])
+        self.assertFalse(d.exists())
+
+    def test_a_key_that_cannot_be_checked_is_not_kept(self):
+        r, d = self.start_key()
+        for key in ("sk-offline-no-answer-00000000000", "sk-broken-upstream-000000000000"):
+            with self.subTest(key=key):
+                bad = self.req(op="login.finish", loginId=r["loginId"], code=key)
+                self.assertEqual(bad["error"], "QwenCloud could not be reached to check the key. Try again in a moment.")
+                self.assertTrue(d.exists())
+                self.assertFalse((self.a.SECRETS / "qwen").exists())
+
+    def test_what_is_not_a_key_is_refused_before_any_request(self):
+        r, d = self.start_key()
+        for pasted in ("", "short", "sk-has a space-000000000000000", "sk-has\ttab-00000000000000000", "k" * 600, None):
+            with self.subTest(pasted=pasted):
+                bad = self.req(op="login.finish", loginId=r["loginId"], code=pasted)
+                self.assertEqual(bad["error"], "That does not look like an API key. Copy the whole key from the QwenCloud page and paste it again.")
+        self.assertEqual(self.http_calls, [])
+        self.assertTrue(d.exists())
+
+    def test_a_key_sign_in_stays_open_for_its_lifetime_then_expires(self):
+        r, d = self.start_key()
+        self.a.cleanup_logins(now=time.time() + 300)
+        self.assertTrue(d.exists(), "no helper to be dead: it waits for the key")
+        self.a.cleanup_logins(now=time.time() + self.a.LOGIN_TTL + 5)
+        self.assertFalse(d.exists())
+        self.assertIn("expired or was cancelled", self.req(op="login.finish", loginId=r["loginId"], code=FAKE_QWEN_KEY)["error"])
+        r, d = self.start_key()
+        (d / "helper.json").write_text(json.dumps({"harness": "qwen", "kind": "key", "startedAt": time.time() - self.a.LOGIN_TTL - 1, "ttl": self.a.LOGIN_TTL}))
+        self.assertEqual(self.req(op="login.finish", loginId=r["loginId"], code=FAKE_QWEN_KEY)["error"], "This sign-in expired. Start the sign-in again.")
+        self.assertFalse(d.exists())
+        self.assertEqual(self.http_calls, [])
+
+    def test_start_refuses_while_signed_out(self):
+        agent = self.make_agent("qwen")
+        self.assertEqual(self.req(op="start", pubkey=agent.name)["error"],
+                         "Qwen Code is not signed in on this machine. Sign in to Qwen Code from Buzz first.")
+        self.a.supervise_pass()
+        self.assertIsNone(self.a.running(agent), "the supervisor waits for a sign-in")
+
+    def test_logout_forgets_the_key_and_stops_its_agents(self):
+        agent = self.make_agent("qwen")
+        self.assertTrue(self.sign_in_key()["signedIn"])
+        self.assertTrue(self.wait_running(agent))
+        self.assertEqual(self.req(op="logout", harness="qwen"), {"ok": True})
+        for name in ("qwen", "qwen.json"): self.assertFalse((self.a.SECRETS / name).exists())
+        self.assertFalse((self.a.RUN / "qwen-models.json").exists())
+        self.assertIsNone(self.a.running(agent))
+        rows = {h["id"]: h for h in self.req(op="machine.status")["harnesses"]}
+        self.assertFalse(rows["qwen"]["signedIn"])
+        self.assertIn("not signed in", self.req(op="start", pubkey=agent.name)["error"])
+
+    def test_a_key_qwencloud_no_longer_takes_shows_in_the_check_and_blocks_start(self):
+        self.assertTrue(self.sign_in_key()["signedIn"])
+        self.assertTrue(json.loads((self.a.RUN / "qwen-check.json").read_text())["ok"])
+        (self.home / "qwen-revoked.txt").write_text("x")
+        (self.a.RUN / "qwen-check.json").unlink()
+        rows = {h["id"]: h for h in self.req(op="machine.status")["harnesses"]}
+        self.assertFalse(rows["qwen"]["signedIn"])
+        self.assertTrue(self.a.known_bad("qwen"))
+        agent = self.make_agent("qwen")
+        self.assertIn("not signed in", self.req(op="start", pubkey=agent.name)["error"])
+        self.assertTrue(all(url.endswith("/models") for url, _ in self.http_calls), "the check calls no model")
+
+    def test_a_teammate_may_sign_qwen_in_while_it_is_signed_out_only(self):
+        self.a.CALLER = "sam"
+        self.assertTrue(self.sign_in_key()["signedIn"])
+        self.assertIn("already signed in", self.req(op="login.start", harness="qwen", flows=["key"])["error"])
+        self.assertEqual(self.req(op="logout", harness="qwen")["error"], "Only a Black 4 admin can sign this machine out.")
+
+    def test_doctor_says_what_a_new_qwen_agent_runs_with_no_effort(self):
+        self.assertTrue(self.sign_in_key()["signedIn"])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out): self.a.print_doctor()
+        self.assertIn("Qwen Code: ready; full access (--approval-mode yolo, no sandbox); new agents run qwen4-max\n", out.getvalue())
+        self.assertNotIn(FAKE_QWEN_KEY, out.getvalue())
+
 
 def install_pinned(a, home):
     """Lays out what setup.sh installs, at the versions in machine/pins.json."""
@@ -991,10 +1205,11 @@ def install_pinned(a, home):
     buzz.mkdir(parents=True)
     (a.BIN / "buzz-acp").rename(buzz / "buzz-acp")
     (a.BIN / "buzz-acp").symlink_to(buzz / "buzz-acp")
-    def package(parts, version):
-        d = a.VENDOR / "acp" / "node_modules" / parts
+    def package(parts, version, folder="acp"):
+        d = a.VENDOR / folder / "node_modules" / parts
         d.mkdir(parents=True, exist_ok=True)
         (d / "package.json").write_text(json.dumps({"version": version}))
+    package("@qwen-code/qwen-code", pins["clis"]["@qwen-code/qwen-code"]["version"], folder="qwen-code")
     for name, pin in pins["adapters"].items():
         package(name, pin["version"])
     (a.VENDOR / "acp/node_modules/@agentclientprotocol/codex-acp/dist").mkdir()
@@ -1046,9 +1261,24 @@ class Health(DeviceBase):
         self.assertEqual(self.req(op="start", pubkey=agent.name)["error"],
                          "Codex cannot run on this machine: its ACP SDK is 2.0.1, pinned 1.9.0.")
 
+    def test_a_qwen_code_off_its_pin_is_a_problem_that_blocks_start(self):
+        (self.a.VENDOR / "qwen-code/node_modules/@qwen-code/qwen-code/package.json").write_text('{"version": "0.27.3"}')
+        self.assertEqual(self.rows()["qwen"]["problem"], "@qwen-code/qwen-code is 0.27.3, pinned 0.27.4")
+        self.assertIn("Qwen Code: @qwen-code/qwen-code is 0.27.3, pinned 0.27.4.", self.req(op="doctor")["problems"])
+        self.sign_in_key()
+        agent = self.make_agent("qwen")
+        self.assertEqual(self.req(op="start", pubkey=agent.name)["error"],
+                         "Qwen Code cannot run on this machine: @qwen-code/qwen-code is 0.27.3, pinned 0.27.4.")
+
+    def test_the_handshake_with_qwen_code_runs_in_its_private_home(self):
+        self.assertNotIn("problem", self.rows()["qwen"])
+        self.assertIn("qwen", (self.home / "handshakes.txt").read_text().split())
+        self.assertTrue((self.a.HOMES / "qwen" / "settings.json").exists())
+        self.assertFalse((self.home / ".qwen").exists())
+
     def test_doctor_reports_each_harness_runs_with_full_access(self):
         rows = self.rows("doctor")
-        for harness in ("claude", "codex", "grok", "goose"):
+        for harness in ("claude", "codex", "grok", "qwen", "goose"):
             self.assertTrue(rows[harness]["access"].startswith("full access"), rows[harness])
         out = io.StringIO()
         with contextlib.redirect_stdout(out): self.a.print_doctor()
@@ -1249,6 +1479,14 @@ class SetupPins(unittest.TestCase):
         self.assertEqual(self.pins["CODEX_ACP_VERSION"], "2.2.2")
         self.assertEqual(self.pins["CODEX_CLI_VERSION"], "0.160.1")
         self.assertEqual(self.pins["GROK_VERSION"], "1.0.70")
+        self.assertEqual(self.pins["QWEN_CODE_VERSION"], "0.27.4")
+
+    def test_qwen_code_is_installed_in_its_own_folder_where_agentctl_looks(self):
+        self.assertIn('"@qwen-code/qwen-code": "$QWEN_CODE_VERSION"', self.text)
+        self.assertIn('QWEN_DIR="$VENDOR/qwen-code"', self.text)
+        self.assertIn('ln -sfn "$QWEN_DIR/node_modules/.bin/qwen" "$BIN/qwen"', self.text)
+        self.assertNotIn("qwen", self.text[self.text.index('"name": "workforce-acp"'):self.text.index("npm install --prefix \"$ACP_DIR\"")],
+                         "never in the adapters' package.json: that reinstalls them under running agents")
 
     def test_grok_download_is_checked_and_never_updates_itself(self):
         self.assertRegex(self.pins["GROK_SHA256"], r"^[0-9a-f]{64}$")
@@ -1304,8 +1542,8 @@ class ModelAndEffort(DeviceBase):
             (home / "models_cache.json").write_text(json.dumps(cache))
             (home / "auth.json").write_text(json.dumps({"tokens": {"access_token": FAKE_CRED}}))
         self.sign_in()
-        # The out-of-band listing, made in this process.
-        self.a.spawn_models_refresh = lambda: self.a.refresh_claude_models()
+        # The out-of-band listings, made in this process.
+        self.a.spawn_models_refresh = lambda harness="claude": self.a.refresh_models(harness)
         self.a.MODELS_WAIT = 2
 
     def listed(self):
@@ -1318,7 +1556,8 @@ class ModelAndEffort(DeviceBase):
     def test_each_harness_offers_what_its_own_listing_says(self):
         r = self.req(op="models")
         rows = {h["id"]: h for h in r["harnesses"]}
-        self.assertEqual(set(rows), {"claude", "codex", "grok"}, "Goose takes no model")
+        self.assertEqual(set(rows), {"claude", "codex", "grok", "qwen"}, "Goose takes no model")
+        self.assertEqual((rows["qwen"]["models"], rows["qwen"]["checked"]), ([], False), "no key yet: nothing to list")
         self.assertEqual([m["id"] for m in rows["claude"]["models"]], ["claude-fable-5-2", "sonnet", "fable", "opus", "haiku"])
         self.assertEqual(rows["claude"]["models"][0]["label"], "Fable 5.2")
         self.assertEqual(rows["claude"]["models"][0]["efforts"], ["low", "medium", "high", "xhigh", "max"])
@@ -1329,6 +1568,42 @@ class ModelAndEffort(DeviceBase):
         for hid, model in (("claude", "claude-fable-5-2"), ("codex", "gpt-6-astra"), ("grok", "grok-4.7")):
             self.assertEqual((rows[hid]["model"], rows[hid]["effort"], rows[hid]["checked"]), (model, "high", True))
             self.assertNotIn("note", rows[hid])
+
+    def test_qwen_offers_the_chat_models_qwencloud_lists_for_the_key_with_no_effort(self):
+        self.assertTrue(self.sign_in_key()["signedIn"])
+        row = next(h for h in self.req(op="models")["harnesses"] if h["id"] == "qwen")
+        self.assertEqual([m["id"] for m in row["models"]], ["qwen4-max", "qwen3.8-max", "qwen3.7-plus"],
+                         "the defaults first, then QwenCloud's order; embeddings, vision, speech and other makers' models left out")
+        self.assertTrue(all(m["efforts"] == [] for m in row["models"]), "Qwen Code 0.27.4 has no effort lever for an environment model")
+        self.assertEqual((row["model"], row["effort"], row["checked"]), ("qwen4-max", None, True))
+        self.assertNotIn("note", row, "no effort is not a shortfall for Qwen")
+        self.assertEqual(self.req(op="provision", name="Q", community="wss://r.example.com", config={"harness": "qwen", "effort": "high"})["error"],
+                         "qwen4-max does not take the effort high. Choose another effort for this agent.")
+        self.assertIn("does not offer the model qwen4-max-preview",
+                      self.req(op="provision", name="Q", community="wss://r.example.com", config={"harness": "qwen", "model": "qwen4-max-preview"})["error"])
+        agent = self.make_agent("qwen")
+        self.assertTrue(self.req(op="settings.set", pubkey=agent.name, model="qwen3.7-plus")["ok"])
+        env = json.loads((agent / "work" / "env.json").read_text())
+        self.assertEqual(env["OPENAI_MODEL"], "qwen3.7-plus")
+        self.assertEqual(json.loads((agent / "launch.json").read_text()), {"model": "qwen3.7-plus", "effort": None, "note": None, "checked": True})
+        st = self.req(op="status", pubkey=agent.name)
+        self.assertEqual((st["model"], st["effort"], st["modelChosen"], st["effortChosen"]), ("qwen3.7-plus", None, True, False))
+        self.assertNotIn("modelNote", st)
+        self.assertEqual([url for url, _ in self.http_calls].count(QWEN_BASE + "/models"), 2, "one check, one listing; cached after")
+
+    def test_a_qwen_listing_that_fails_keeps_the_last_one_and_the_default_still_applies(self):
+        self.assertTrue(self.sign_in_key()["signedIn"])
+        self.assertEqual([m["id"] for m in self.a.offered("qwen")][:1], ["qwen4-max"])
+        (self.a.RUN / "qwen-models.json").unlink()
+        (self.home / "qwen-revoked.txt").write_text("x")  # the service says no for a while
+        self.a.refresh_models("qwen", wait=True)
+        self.assertIsNone(self.a.offered("qwen"))
+        cache = json.loads((self.a.RUN / "qwen-models.json").read_text())
+        self.assertEqual(cache["fails"], 1)
+        self.assertGreater(cache["retryAt"], time.time())
+        (self.a.RUN / "qwen-check.json").write_text(json.dumps({"hash": self.a.credential("qwen"), "ok": True, "at": time.time()}))
+        env = self.env_of(self.make_agent("qwen"))
+        self.assertEqual(env["OPENAI_MODEL"], "qwen4-max", "unchecked: the first default still starts")
 
     def test_fable_5_2_is_offered_only_when_it_answers_on_this_sign_in(self):
         (self.home / "refuse-claude-fable-5-2").write_text("x")
@@ -1476,7 +1751,7 @@ class ModelAndEffort(DeviceBase):
         self.assertNotIn("retryAt", json.loads((self.a.RUN / "claude-models.json").read_text()))
 
     def test_a_start_with_no_listing_yet_makes_it_first(self):
-        self.a.spawn_models_refresh = lambda: None  # as after a deploy: nothing out of band has run
+        self.a.spawn_models_refresh = lambda harness="claude": None  # as after a deploy: nothing out of band has run
         (self.home / "refuse-claude-fable-5-2").write_text("x")
         agent = self.make_agent("claude")
         env = self.env_of(agent)
@@ -1484,8 +1759,8 @@ class ModelAndEffort(DeviceBase):
         self.assertTrue(json.loads((agent / "launch.json").read_text())["checked"])
 
     def test_an_agent_started_unchecked_is_put_right_once_the_listing_is_in(self):
-        self.a.spawn_models_refresh = lambda: None
-        self.a.claude_listing_due = lambda: False  # the listing could not be made at start (offline)
+        self.a.spawn_models_refresh = lambda harness="claude": None
+        self.a.listing_due = lambda harness: False  # the listing could not be made at start (offline)
         (self.home / "refuse-claude-fable-5-2").write_text("x")
         agent = self.make_agent("claude")
         old = self.a.start(agent)
@@ -1500,10 +1775,10 @@ class ModelAndEffort(DeviceBase):
         # Its own choice, not offered: stopped and said, not left failing every turn.
         other = self.make_agent("claude")
         s = self.a.read_settings(other); s["model"] = "claude-gone-1"; self.a.write_settings(other, s)
-        real = self.a.claude_models
-        self.a.claude_models = lambda spawn=True: None  # started while nothing was known
+        real = self.a.cached_models
+        self.a.cached_models = lambda harness, spawn=True: None  # started while nothing was known
         self.a.start(other)
-        self.a.claude_models = real
+        self.a.cached_models = real
         self.a.supervise_pass(now=time.time() - 3600)  # restarts not yet due
         self.assertIsNone(self.a.running(other))
         row = next(a for a in self.req(op="list")["agents"] if a["pubkey"] == other.name)

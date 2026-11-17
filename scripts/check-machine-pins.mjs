@@ -43,6 +43,9 @@ for (const [name, cli] of Object.entries(pins.clis ?? {})) {
   if (cli.via && !setup.includes(`"${name}": "$${cli.versionVar}"`)) {
     problems.push(`machine/setup.sh no longer forces ${cli.via}'s ${name} to $${cli.versionVar} with npm overrides.`);
   }
+  if (cli.dependencyOf && !setup.includes(`"${name}": "$${cli.versionVar}"`)) {
+    problems.push(`machine/setup.sh no longer installs ${name} at $${cli.versionVar} as a dependency of ${cli.dependencyOf}.`);
+  }
 }
 for (const variable of Object.keys(vars)) {
   if (/_ACP_/.test(variable) && !declared.has(variable)) problems.push(`machine/setup.sh has ${variable}, which machine/pins.json does not declare.`);

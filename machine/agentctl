@@ -23,6 +23,8 @@ Not requests (run from cron or by agentctl itself):
   agentctl login-helper <id>  holds one sign-in open between SSH calls
   agentctl check <harness>    checks a stored sign-in, out of band for machine.status
   agentctl models claude      makes Claude's model listing again, out of band
+  agentctl models qwen        likewise Qwen Code's (QwenCloud's model list)
+  agentctl restart-agents <harness>   restarts a harness's agents after a key sign-in
 
 Callers: a teammate reaches this machine with their own SSH key, whose
 authorized_keys entry forces `agentctl --caller <label>` (machine/teammates.sh
@@ -38,8 +40,10 @@ the agents it made or ones made before creators were recorded.
 Secrets: agent keys live in agents/<pubkey>/key, the Claude subscription token
 in secrets/claude, the Codex and Grok subscription sign-ins in
 homes/codex/auth.json and homes/grok/auth.json (each CLI's own file, in a
-private home passed as CODEX_HOME / GROK_HOME). None is ever printed, logged or
-put in a reply.
+private home passed as CODEX_HOME / GROK_HOME), and the QwenCloud API key that
+Qwen Code runs on in secrets/qwen (secrets/qwen.json says which QwenCloud
+plan and base URL it is for, never the key). None is ever printed, logged or
+put in a reply, and none goes into a command line.
 
 Root: ~/workforce, or BLACK4_WORKFORCE_ROOT for a second runner beside it (its
 own agents, sign-ins and cron lines).
@@ -73,7 +77,7 @@ RESTART_MAX_DELAY = 300      # a crashing agent is retried at 5, 10, 20 ... 300 
 HEALTHY_AFTER = 300          # up this long after a restart: the count starts over
 KEEPS_STOPPING = 3           # restarts in a row before status says "keeps stopping"
 DISK_MIN_GB = 2              # doctor's floor for free disk
-PINNED = ("claude", "codex", "grok")  # harnesses setup.sh installs at pins.json versions
+PINNED = ("claude", "codex", "grok", "qwen")  # harnesses setup.sh installs at pins.json versions
 
 
 def set_root(home, root=None):
@@ -291,8 +295,12 @@ HARNESS = {  # the model CLI each choice runs, as buzz-acp's agent command
     "goose": ("goose", "acp"),
     # Buzz 0.5.30's own "Grok Build" preset runs exactly this.
     "grok": ("grok", "agent,--always-approve,stdio"),
+    # Qwen Code's own ACP mode, on an OpenAI-compatible endpoint (QwenCloud):
+    # the key, base URL and model come from the environment (see KEY below).
+    "qwen": ("qwen", "--acp,--approval-mode,yolo,--auth-type,openai"),
 }
-LABEL = {"claude": "Claude Code", "codex": "Codex", "grok": "Grok Build", "goose": "Goose"}
+LABEL = {"claude": "Claude Code", "codex": "Codex", "grok": "Grok Build", "qwen": "Qwen Code", "goose": "Goose"}
+HARNESS_ORDER = ("claude", "codex", "grok", "qwen", "goose")  # as machine.status lists them
 
 # Every agent is a full-access agent. It lives on its own computer, so no
 # harness asks permission or runs sandboxed; the one gate on customer changes
@@ -306,11 +314,14 @@ FULL_ACCESS = {
     "codex": {"INITIAL_AGENT_MODE": "agent-full-access"},
     # With --always-approve in its arguments above. Off is grok's default.
     "grok": {"GROK_SANDBOX": "off"},
+    # With --approval-mode yolo in its arguments above; no sandbox unless asked.
+    "qwen": {},
     "goose": {"GOOSE_MODE": "auto"},
 }
 ACCESS = {"claude": "full access (permission mode bypassPermissions)",
           "codex": "full access (agent-full-access: no sandbox, network on, never asks)",
           "grok": "full access (--always-approve, sandbox off)",
+          "qwen": "full access (--approval-mode yolo, no sandbox)",
           "goose": "full access (GOOSE_MODE=auto)"}
 
 
@@ -404,7 +415,7 @@ def forget_claude_token():
 # keychain) and, for Grok, never to update itself. Agents get that home and
 # nothing else: no API key is ever set, so the subscription is what pays.
 
-SIGN_IN = {"claude": "code", "codex": "device", "grok": "device"}
+SIGN_IN = {"claude": "code", "codex": "device", "grok": "device", "qwen": "key"}
 NO_SIGN_IN = {"goose": "Goose takes its model settings from the machine itself; Buzz cannot sign it in."}
 DEVICE = {
     "codex": {"cli": "codex", "home_env": "CODEX_HOME",
@@ -537,19 +548,165 @@ def judge_grok_check(code, stdout, stderr):
 DEVICE_CHECK = {"codex": run_codex_check, "grok": run_grok_check}
 
 
+# ---------------------------------------------------------------- QwenCloud key
+# Qwen Code runs on QwenCloud's OpenAI-compatible API with an API key, and
+# QwenCloud has no device sign-in: signing in is pasting a key from its console
+# (login.start gives the link to the page that makes one). login.finish checks
+# the key with one GET <base>/models (the pay-as-you-go base first, then the
+# Token Plan base: each plan has its own keys), keeps it in secrets/qwen (mode
+# 600) and which base and plan it answered on in secrets/qwen.json, and agents
+# get it as OPENAI_API_KEY with OPENAI_BASE_URL and OPENAI_MODEL, the levers
+# Qwen Code's `--auth-type openai` reads; nothing goes on a command line. Qwen
+# Code gets a private config home (homes/qwen, as QWEN_HOME), never the
+# machine user's ~/.qwen, with its self-update, usage statistics and managed
+# memory turned off in that home's settings.json: the memory would be one
+# folder shared by every Qwen agent on the machine, written by a second,
+# paid model call after every turn. The sign-in check is the same GET.
+
+KEY = {
+    "qwen": {"cli": "qwen", "home_env": "QWEN_HOME", "service": "QwenCloud",
+             # Where a person makes a key: the page Qwen Code 0.27.4 itself links to.
+             "keyUrl": "https://docs.qwencloud.com/developer-guides/administration/api-keys",
+             "bases": (("pay-as-you-go", "https://maas.qwencloudapi.com/compatible-mode/v1"),
+                       ("token-plan", "https://token-plan.maas.qwencloudapi.com/compatible-mode/v1")),
+             "settings": {"general": {"enableAutoUpdate": False}, "privacy": {"usageStatisticsEnabled": False},
+                          "telemetry": {"enabled": False},
+                          "memory": {"enableManagedAutoMemory": False, "enableManagedAutoDream": False}}},
+}
+KEY_RE = re.compile(r"^[\x21-\x7e]{16,512}$")  # printable ASCII, no spaces: it goes in a header and the environment
+
+
+def key_home(harness, base=None):
+    """A private config home for this harness. Its settings.json gets our
+    settings and keeps whatever the CLI wrote there; written only when that
+    changes it."""
+    home = private_dir(base or HOMES / harness)
+    private_dir(home.parent)
+    path = home / "settings.json"
+    old = read_json(path, {})
+    new = json.loads(json.dumps(old)) if isinstance(old, dict) else {}
+    for section, values in KEY[harness]["settings"].items():
+        if not isinstance(new.get(section), dict): new[section] = {}
+        new[section].update(values)
+    if new != old: write_private(path, json.dumps(new, indent=2) + "\n")
+    return home
+
+
+def key_env(harness, home=None):
+    env = base_env()
+    env[KEY[harness]["home_env"]] = str(home or key_home(harness))
+    env["BROWSER"] = "/usr/bin/true"  # never try to open one
+    return env
+
+
+def key_cli(harness):
+    return shutil.which(KEY[harness]["cli"], path=agent_path())
+
+
+def stored_key(harness):
+    try: key = (SECRETS / harness).read_text().strip()
+    except FileNotFoundError: return None
+    return key or None
+
+
+def key_info(harness):
+    """{base, plan, savedAt} of the stored key; never the key."""
+    info = read_json(SECRETS / f"{harness}.json", {})
+    return info if isinstance(info, dict) else {}
+
+
+def key_base(harness):
+    return key_info(harness).get("base") or KEY[harness]["bases"][0][1]
+
+
+def http_get_json(url, key, timeout=20):
+    """GET url with the key as a Bearer header: (HTTP status, the JSON body or
+    None), or (None, None) when nothing answered. The key is in the header
+    only, never in a command line or a log."""
+    import urllib.error, urllib.request
+    req = urllib.request.Request(url, headers={"Authorization": "Bearer " + key, "Accept": "application/json",
+                                               "User-Agent": "black4-agentctl"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            status, body = r.status, r.read()
+    except urllib.error.HTTPError as e:
+        status, body = e.code, e.read()
+    except (OSError, ValueError):
+        return None, None
+    try: return status, json.loads(body)
+    except ValueError: return status, None
+
+
+def judge_key_answer(status):
+    """True: the key works (200). False: rejected (401, 403). None: could not tell."""
+    if status == 200: return True
+    if status in (401, 403): return False
+    return None
+
+
+def verify_key(harness, key):
+    """(True, base, plan) when a base answers GET /models for this key;
+    (False, None, None) when every base rejected it; (None, None, None) when
+    one could not be reached or answered something else, which proves nothing."""
+    unsure = False
+    for plan, base in KEY[harness]["bases"]:
+        ok = judge_key_answer(http_get_json(base + "/models", key)[0])
+        if ok: return True, base, plan
+        if ok is None: unsure = True
+    return (None if unsure else False), None, None
+
+
+def save_key(harness, key, base, plan):
+    private_dir(SECRETS)
+    write_private(SECRETS / harness, key + "\n")
+    write_private(SECRETS / f"{harness}.json", json.dumps({"base": base, "plan": plan, "savedAt": int(time.time())}))
+    write_private(private_dir(RUN) / f"{harness}-check.json",
+                  json.dumps({"hash": token_hash(key), "ok": True, "at": time.time()}))
+
+
+def forget_key(harness):
+    for name in (harness, f"{harness}.json"):
+        (SECRETS / name).unlink(missing_ok=True)
+    for name in (f"{harness}-check.json", f"{harness}-models.json"):
+        (RUN / name).unlink(missing_ok=True)
+
+
+def run_key_check(harness):
+    """GET <base>/models with the stored key on the base it was saved for: it
+    lists the models and calls none. Returns (True/False/None, None)."""
+    key = stored_key(harness)
+    if not key: return None, None
+    return judge_key_answer(http_get_json(key_base(harness) + "/models", key)[0]), None
+
+
+KEY_CHECK = {"qwen": lambda: run_key_check("qwen")}
+
+
+def harness_env(harness):
+    """The environment this harness's own programs run in: its private home,
+    for the CLIs that keep one."""
+    if harness in DEVICE: return device_env(harness)
+    if harness in KEY: return key_env(harness)
+    return base_env()
+
+
 # ---------------------------------------------------------------- sign-in checks
 # machine.status answers from the last check of each sign-in (run/<harness>-
 # check.json). A due check runs out of band, in a detached `agentctl check
 # <harness>` holding run/<harness>-check.lock, so overlapping status calls start
 # at most one. No check can change the sign-in that agents use: Claude's token
 # is long-lived and never refreshed, Codex is only asked what its auth.json
-# holds, and `grok models` calls no model.
+# holds, `grok models` calls no model, and Qwen's GET of QwenCloud's model list
+# calls none either.
 
 def credential(harness):
     """A fingerprint of the stored sign-in (never the sign-in itself), or None."""
     if harness == "claude":
         token = claude_token()
         return token_hash(token) if token else None
+    if harness in KEY:
+        key = stored_key(harness)
+        return token_hash(key) if key else None
     return device_cred(harness)
 
 
@@ -570,7 +727,7 @@ def run_check(harness, wait=False):
         cred, old = last_check(harness)
         if not cred: return
         if harness == "claude": ok, account = run_claude_check(claude_token()), None
-        else: ok, account = DEVICE_CHECK[harness]()
+        else: ok, account = (DEVICE_CHECK.get(harness) or KEY_CHECK[harness])()
         if ok is None: ok = old.get("ok")  # could not tell (offline): the last answer stands
         write_private(RUN / f"{harness}-check.json",
                       json.dumps({"hash": cred, "ok": ok, "at": time.time(), "account": account or old.get("account")}))
@@ -631,11 +788,12 @@ def machine_status():
     """What this machine can run. Each row: installed, signedIn (true, false, or
     null when this machine cannot tell), account, and signIn: how Buzz signs it
     in ("code": open a link, paste the code back; "device": open a link, approve
-    the code shown, nothing to paste) or null with `note`, one sentence why not.
+    the code shown, nothing to paste; "key": open a link, paste the API key
+    made there) or null with `note`, one sentence why not.
     The sign-in checks run side by side so the reply stays quick."""
     import threading
     rows = []
-    for hid in ("claude", "codex", "grok", "goose"):
+    for hid in HARNESS_ORDER:
         row = {"id": hid, "label": LABEL[hid], "installed": installed(hid), "signedIn": None,
                "account": None, "signIn": SIGN_IN.get(hid)}
         if not row["signIn"]: row["note"] = NO_SIGN_IN[hid]
@@ -674,8 +832,9 @@ def vendored_version(link, name):
     return found.group(1) if found else None
 
 
-def npm_version(*parts):
-    return (read_json(VENDOR / "acp" / "node_modules" / Path(*parts) / "package.json", {}) or {}).get("version")
+def npm_version(*parts, folder="acp"):
+    """The version of a package npm installed under vendor/<folder>."""
+    return (read_json(VENDOR / folder / "node_modules" / Path(*parts) / "package.json", {}) or {}).get("version")
 
 
 def version_problems(harness):
@@ -698,6 +857,8 @@ def version_problems(harness):
         if adapter.exists() and f'"{FULL_ACCESS["codex"]["INITIAL_AGENT_MODE"]}"' not in adapter.read_text(errors="replace"):
             out.append(f"{ADAPTER_PACKAGE['codex']} has no {FULL_ACCESS['codex']['INITIAL_AGENT_MODE']} mode")
     if harness == "grok": want("grok", vendored_version(BIN / "grok", "grok"), pins["clis"]["grok"]["version"])
+    if harness == "qwen":
+        want("@qwen-code/qwen-code", npm_version("@qwen-code", "qwen-code", folder="qwen-code"), pins["clis"]["@qwen-code/qwen-code"]["version"])
     return out
 
 
@@ -712,7 +873,7 @@ def handshake(harness):
     stamp = "|".join(f"{os.path.realpath(p)}:{os.stat(p).st_mtime}" for p in (BIN / "buzz-acp", found))
     cache = RUN / f"{harness}-handshake.json"
     if (read_json(cache, {}) or {}).get("stamp") == stamp: return None
-    env = device_env(harness) if harness in DEVICE else base_env()
+    env = harness_env(harness)
     try:
         done = subprocess.run([str(BIN / "buzz-acp"), "auth-methods", "--json", "--agent-command", command, f"--agent-args={args}"],
                               env=env, cwd=private_dir(RUN), stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
@@ -858,19 +1019,26 @@ def heartbeat_view(s):
 #   Codex        CODEX_CONFIG (codex-acp's JSON config for every thread it
 #                starts): model and model_reasoning_effort.
 #   Grok Build   `grok agent --model M --reasoning-effort E ... stdio`.
+#   Qwen Code    OPENAI_MODEL (with the key and base URL, see KEY). No effort:
+#                Qwen Code 0.27.4 sends no reasoning_effort for a model it is
+#                given through the environment, whatever its settings say, so
+#                QwenCloud's own default thinking for the model applies.
 # None of them refuses an unknown model or effort before the first turn, so the
 # choice is checked here against what the harness offers: the models Codex and
-# Grok cache in their homes (they refresh it themselves), and for Claude a
+# Grok cache in their homes (they refresh it themselves), for Claude a
 # listing of the adapter's models plus a one-line call that proves each default
-# full id answers on this sign-in (run/claude-models.json, per token). A model
-# or effort chosen for an agent that is not offered is refused, at the change
-# and at start; a default that is not offered falls back to the next one, and
-# status says so (`modelNote`).
+# full id answers on this sign-in (run/claude-models.json, per token), and for
+# Qwen QwenCloud's own model list for the stored key (run/qwen-models.json, one
+# GET, no model called). A model or effort chosen for an agent that is not
+# offered is refused, at the change and at start; a default that is not offered
+# falls back to the next one, and status says so (`modelNote`).
 
-DEFAULTS = {  # harness -> (models to try, most capable first; effort)
+DEFAULTS = {  # harness -> (models to try, most capable first; effort, None for a harness with no effort lever)
     "claude": (("claude-fable-5-2", "fable", "opus"), "high"),
     "codex": (("gpt-6-astra", "gpt-6.1-sol"), "high"),
     "grok": (("grok-4.7", "grok-4.6"), "high"),
+    # Never qwen4-max-preview: it retires on 2026-11-25.
+    "qwen": (("qwen4-max", "qwen3.8-max"), None),
 }
 EFFORT_ORDER = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\[\]/-]{0,79}$")
@@ -986,22 +1154,49 @@ def list_claude_models():
     return extra + rows
 
 
-def refresh_claude_models(wait=False):
-    """Makes the Claude listing again for the stored sign-in, at most one at a
-    time (run/claude-models.lock); returns at once if one is running, unless
-    `wait`. A listing that fails (a usage limit, offline) keeps the last good
-    one, and is tried again after 10 minutes, then 20, 40 ... up to 6 hours,
-    so the paid one-line call is not repeated while it cannot succeed."""
-    lock = open(private_dir(RUN) / "claude-models.lock", "a")
+QWEN_NOT_CHAT = re.compile(r"embedding|rerank|tts|asr|audio|omni|image|video|ocr|-vl|vl-|translat|guard|moderation", re.I)
+
+
+def list_qwen_models():
+    """The chat models QwenCloud lists for the stored key (GET <base>/models on
+    the base the key was saved for), the defaults first and then the rest in
+    QwenCloud's order; None when it cannot tell (no key, rejected, offline).
+    No efforts: see "model and effort" above."""
+    key = stored_key("qwen")
+    if not key: return None
+    status, body = http_get_json(key_base("qwen") + "/models", key)
+    if status != 200 or not isinstance(body, dict) or not isinstance(body.get("data"), list): return None
+    ids = [m["id"] for m in body["data"] if isinstance(m, dict) and isinstance(m.get("id"), str) and MODEL_ID.match(m["id"])]
+    ids = [i for i in ids if i.lower().startswith("qwen") and not QWEN_NOT_CHAT.search(i)]
+    tries = DEFAULTS["qwen"][0]
+    order = [m for m in tries if m in ids] + [i for i in ids if i not in tries]
+    return [{"id": i, "label": i, "efforts": []} for i in dict.fromkeys(order)]
+
+
+# The harnesses whose listing this machine makes itself (the others cache
+# their own): harness -> (its stored sign-in, its lister). Each listing lives in
+# run/<harness>-models.json, per sign-in.
+MODEL_SOURCES = {"claude": (claude_token, list_claude_models), "qwen": (lambda: stored_key("qwen"), list_qwen_models)}
+
+
+def refresh_models(harness, wait=False):
+    """Makes this harness's listing again for the stored sign-in, at most one
+    at a time (run/<harness>-models.lock); returns at once if one is running,
+    unless `wait`. A listing that fails (a usage limit, offline) keeps the last
+    good one, and is tried again after 10 minutes, then 20, 40 ... up to 6
+    hours, so Claude's paid one-line call is not repeated while it cannot
+    succeed."""
+    signin, lister = MODEL_SOURCES[harness]
+    lock = open(private_dir(RUN) / f"{harness}-models.lock", "a")
     try:
         try: fcntl.flock(lock, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
         except OSError: return
-        token = claude_token()
+        token = signin()
         if not token: return
-        cache = read_json(RUN / "claude-models.json", {}) or {}
+        cache = read_json(RUN / f"{harness}-models.json", {}) or {}
         if cache.get("hash") != token_hash(token): cache = {}  # another sign-in: nothing of the last one holds
-        elif not claude_models_stale(cache): return
-        models = list_claude_models()
+        elif not models_stale(cache): return
+        models = lister()
         now = time.time()
         if models is not None:
             cache = {"hash": token_hash(token), "at": now, "models": models}
@@ -1009,42 +1204,51 @@ def refresh_claude_models(wait=False):
             fails = (cache.get("fails") or 0) + 1
             cache = {**cache, "hash": token_hash(token), "fails": fails, "failedAt": now,
                      "retryAt": now + min(CLAUDE_MODELS_FAIL_TTL * 2 ** (fails - 1), CLAUDE_MODELS_FAIL_MAX)}
-        write_private(RUN / "claude-models.json", json.dumps(cache))
+        write_private(RUN / f"{harness}-models.json", json.dumps(cache))
     finally:
         lock.close()
 
 
-def claude_models_stale(cache):
+def refresh_claude_models(wait=False):
+    return refresh_models("claude", wait)
+
+
+def models_stale(cache):
     if cache.get("retryAt"): return time.time() >= cache["retryAt"]
     return not cache.get("models") or time.time() - (cache.get("at") or 0) >= CLAUDE_MODELS_TTL
 
 
-def claude_models(spawn=True):
-    """The last good Claude listing for the stored sign-in, or None (none yet,
-    or another sign-in). A stale one is still used, and made again out of band."""
-    token = claude_token()
+def cached_models(harness, spawn=True):
+    """The last good listing of this harness for the stored sign-in, or None
+    (none yet, or another sign-in). A stale one is still used, and made again
+    out of band."""
+    token = MODEL_SOURCES[harness][0]()
     if not token: return None
-    cache = read_json(RUN / "claude-models.json", {}) or {}
+    cache = read_json(RUN / f"{harness}-models.json", {}) or {}
     if cache.get("hash") != token_hash(token):
-        if spawn: spawn_models_refresh()
+        if spawn: spawn_models_refresh(harness)
         return None
-    if spawn and claude_models_stale(cache): spawn_models_refresh()
+    if spawn and models_stale(cache): spawn_models_refresh(harness)
     return cache.get("models")
 
 
-def claude_listing_due():
-    """True when this sign-in has no Claude listing and none is waiting out a
-    failure: making one now is worth a few seconds of a start."""
-    token = claude_token()
-    cache = read_json(RUN / "claude-models.json", {}) or {}
-    return bool(token) and (cache.get("hash") != token_hash(token) or (not cache.get("models") and claude_models_stale(cache)))
+def claude_models(spawn=True):
+    return cached_models("claude", spawn)
 
 
-def spawn_models_refresh():
+def listing_due(harness):
+    """True when this sign-in has no listing for the harness and none is
+    waiting out a failure: making one now is worth a few seconds of a start."""
+    token = MODEL_SOURCES[harness][0]()
+    cache = read_json(RUN / f"{harness}-models.json", {}) or {}
+    return bool(token) and (cache.get("hash") != token_hash(token) or (not cache.get("models") and models_stale(cache)))
+
+
+def spawn_models_refresh(harness="claude"):
     env = {**base_env(), **root_env()}
     if os.environ.get("AGENTCTL_NO_CRON"): env["AGENTCTL_NO_CRON"] = "1"
     try:
-        subprocess.Popen([PYTHON, str(SELF), "models", "claude"], env=env, cwd=str(private_dir(RUN)),
+        subprocess.Popen([PYTHON, str(SELF), "models", harness], env=env, cwd=str(private_dir(RUN)),
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
     except OSError:
         pass
@@ -1053,7 +1257,7 @@ def spawn_models_refresh():
 def offered(harness):
     """[{id, label, efforts}] this harness offers here, or None when this
     machine cannot tell yet. Cheap: reads caches only."""
-    if harness == "claude": return claude_models()
+    if harness in MODEL_SOURCES: return cached_models(harness)
     if harness == "codex": return codex_models()
     if harness == "grok": return grok_models()
     return None
@@ -1090,6 +1294,8 @@ def choice(harness, settings, models=False):
     if effort:
         if effort not in entry["efforts"]:
             return {**out, "problem": f"{entry['label']} does not take the effort {effort}. Choose another effort for this agent."}
+    elif default_effort is None:  # a harness with no effort lever: nothing to say
+        out["effort"] = None
     elif default_effort in entry["efforts"]:
         out["effort"] = default_effort
     else:  # the highest one below the default, else none
@@ -1120,6 +1326,9 @@ def launch(harness, picked):
         extra = (["--model", model] if model else []) + (["--reasoning-effort", effort] if effort else [])
         parts = args.split(",")
         args = ",".join(parts[:1] + extra + parts[1:])  # grok agent <options> stdio
+    elif harness == "qwen":
+        # Always named: with --auth-type openai, Qwen Code has no model of its own.
+        env["OPENAI_MODEL"] = model or DEFAULTS["qwen"][0][0]
     return env, args
 
 
@@ -1133,11 +1342,11 @@ def models_reply():
     for hid in DEFAULTS:
         if not installed(hid): continue
         models = offered(hid)
-        if hid == "claude" and models is None and claude_token():
+        if hid in MODEL_SOURCES and models is None and MODEL_SOURCES[hid][0]():
             deadline = time.time() + MODELS_WAIT
             while models is None and time.time() < deadline:
                 time.sleep(0.25)
-                models = claude_models(spawn=False)
+                models = cached_models(hid, spawn=False)
         picked = choice(hid, {}, models)
         rows.append({"id": hid, "label": LABEL[hid], "models": models or [], "checked": models is not None,
                      "model": picked.get("model"), "effort": picked.get("effort"),
@@ -1185,10 +1394,17 @@ def _start(d):
         if known_bad(harness):
             fail(f"{LABEL[harness]} is not signed in on this machine. Sign in to {LABEL[harness]} from Buzz first.")
         env = device_env(harness)
-    # Right after a deploy or a new sign-in there is no Claude listing yet:
-    # make it now (a few seconds, once per sign-in) rather than start a model
-    # that may not be offered. One waiting out a failure is not retried here.
-    if harness == "claude" and claude_listing_due(): refresh_claude_models(wait=True)
+    elif harness in KEY:
+        key = stored_key(harness)
+        if not key or known_bad(harness):
+            fail(f"{LABEL[harness]} is not signed in on this machine. Sign in to {LABEL[harness]} from Buzz first.")
+        env = key_env(harness)
+        env["OPENAI_API_KEY"] = key  # the environment only: never an argument
+        env["OPENAI_BASE_URL"] = key_base(harness)
+    # Right after a deploy or a new sign-in there is no Claude or Qwen listing
+    # yet: make it now (a few seconds, once per sign-in) rather than start a
+    # model that may not be offered. One waiting out a failure is not retried here.
+    if harness in MODEL_SOURCES and listing_due(harness): refresh_models(harness, wait=True)
     picked = choice(harness, s)
     if picked.get("problem"): fail(picked["problem"])
     model_env, args = launch(harness, picked)
@@ -1453,7 +1669,8 @@ def cleanup_logins(now=None):
         if info.get("pid"):
             try: os.kill(info["pid"], 0); alive = True
             except OSError: pass
-        if now - started > LOGIN_TTL or (not alive and now - started > 120):
+        # A key sign-in has no helper: it stays open for its lifetime.
+        if now - started > LOGIN_TTL or (not alive and info.get("kind") != "key" and now - started > 120):
             kill_login(d)
 
 
@@ -1461,18 +1678,26 @@ def login_start(harness, flows=None):
     """Opens one sign-in. Claude: a link whose page shows a code to paste back
     (needsCode true). Codex and Grok: a link and a short userCode the person
     approves there (needsCode false); the plugin then calls login.finish with
-    no code, which waits for that approval. A plugin says it can show a device
-    sign-in by sending flows: ["device"]; an older one cannot show the code,
-    so it gets a sentence instead of a sign-in it could not finish."""
+    no code, which waits for that approval. Qwen Code: a link to the page where
+    a QwenCloud API key is made (needsCode true, flow "key"); the plugin then
+    calls login.finish with the key pasted as the code. A plugin says which
+    flows it can show by sending flows: ["code", "device", "key"]; an older
+    one cannot show a device code or a key field, so it gets a sentence
+    instead of a sign-in it could not finish."""
     if harness not in SIGN_IN:
         if harness in NO_SIGN_IN: fail(NO_SIGN_IN[harness])
         fail("Buzz cannot sign in that harness on this machine.")
     label = LABEL[harness]
+    flows = flows if isinstance(flows, list) else []
     if harness == "claude" and not claude_cli():
         fail("Claude Code is not installed on this machine.")
     if harness in DEVICE:
         if not device_cli(harness): fail(f"{label} is not installed on this machine.")
-        if "device" not in (flows if isinstance(flows, list) else []):
+        if "device" not in flows:
+            fail(f"Update the Black 4 plugin in Buzz to sign in to {label} from it.")
+    if harness in KEY:
+        if not key_cli(harness): fail(f"{label} is not installed on this machine.")
+        if "key" not in flows:
             fail(f"Update the Black 4 plugin in Buzz to sign in to {label} from it.")
     cleanup_logins()
     if LOGINS.exists():  # one sign-in at a time: a new one replaces the old
@@ -1480,6 +1705,12 @@ def login_start(harness, flows=None):
             if old.is_dir(): kill_login(old)
     login_id = secrets.token_hex(8)
     d = private_dir(private_dir(LOGINS) / login_id)
+    if harness in KEY:
+        # No helper: the key arrives in login.finish and is checked there.
+        started = time.time()
+        write_private(d / "helper.json", json.dumps({"startedAt": started, "harness": harness, "ttl": LOGIN_TTL, "kind": "key"}))
+        return {"ok": True, "loginId": login_id, "url": KEY[harness]["keyUrl"], "needsCode": True, "flow": "key",
+                "expiresAt": int(started + LOGIN_TTL)}
     write_private(d / "helper.json", json.dumps({"startedAt": time.time(), "harness": harness, "ttl": LOGIN_TTL}))
     env = {**base_env(), **root_env()}
     if os.environ.get("AGENTCTL_NO_CRON"): env["AGENTCTL_NO_CRON"] = "1"
@@ -1507,6 +1738,7 @@ def login_finish(login_id, code):
         fail("This sign-in has expired or was cancelled. Start the sign-in again.")
     harness = read_json(d / "helper.json", {}).get("harness") or "claude"
     if harness in DEVICE: return device_finish(d, harness)
+    if harness in KEY: return key_finish(d, harness, code)
     code = (code or "").strip() if isinstance(code, str) else ""
     if not CODE_RE.match(code):
         fail("That does not look like a sign-in code. Copy the whole code from the Anthropic page and paste it again.")
@@ -1540,6 +1772,40 @@ def helper_alive(info):
     try: os.kill(info["pid"], 0)
     except (KeyError, TypeError, OSError): return False
     return True
+
+
+def key_finish(d, harness, key):
+    """The pasted API key, checked against the service and then kept. A key
+    that is refused, or that could not be checked, leaves this sign-in open so
+    the person pastes again; only a kept key or an expired sign-in closes it."""
+    service = KEY[harness]["service"]
+    key = key.strip() if isinstance(key, str) else ""
+    if not KEY_RE.match(key):
+        fail(f"That does not look like an API key. Copy the whole key from the {service} page and paste it again.")
+    info = read_json(d / "helper.json", {}) or {}
+    if time.time() - (info.get("startedAt") or 0) > (info.get("ttl") or LOGIN_TTL):
+        kill_login(d)
+        fail("This sign-in expired. Start the sign-in again.")
+    ok, base, plan = verify_key(harness, key)
+    if ok is None: fail(f"{service} could not be reached to check the key. Try again in a moment.")
+    if not ok: fail(f"{service} did not accept that key. Check it and paste it again.")
+    save_key(harness, key, base, plan)
+    shutil.rmtree(d, ignore_errors=True)
+    refresh_models(harness, wait=True)  # one GET: what this key offers, before its agents start
+    spawn_restart(harness)  # after the reply is free to go
+    return {"ok": True, "signedIn": True, "account": None}
+
+
+def spawn_restart(harness):
+    """Starts `agentctl restart-agents <harness>` detached, so a sign-in's
+    reply does not wait for each agent to come up."""
+    env = {**base_env(), **root_env()}
+    if os.environ.get("AGENTCTL_NO_CRON"): env["AGENTCTL_NO_CRON"] = "1"
+    try:
+        subprocess.Popen([PYTHON, str(SELF), "restart-agents", harness], env=env, cwd=str(private_dir(RUN)),
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:
+        pass
 
 
 def device_finish(d, harness):
@@ -1772,6 +2038,7 @@ def claude_helper(login_id, d, info):
 def logout(harness):
     if harness == "claude": forget_claude_token()
     elif harness in DEVICE: forget_device(harness)
+    elif harness in KEY: forget_key(harness)
     else: fail("Buzz cannot sign that harness out on this machine.")
     stop_harness_agents(harness)
     return {"ok": True}
@@ -2030,7 +2297,8 @@ def main(argv=None):
     if argv[:1] == ["doctor"]: sys.exit(print_doctor())
     if argv[:1] == ["login-helper"] and len(argv) == 2: return login_helper(argv[1])
     if argv[:1] == ["check"] and len(argv) == 2 and argv[1] in SIGN_IN: return run_check(argv[1])
-    if argv == ["models", "claude"]: return refresh_claude_models()
+    if argv[:1] == ["models"] and len(argv) == 2 and argv[1] in MODEL_SOURCES: return refresh_models(argv[1])
+    if argv[:1] == ["restart-agents"] and len(argv) == 2 and argv[1] in HARNESS: return restart_harness_agents(argv[1])
     try:
         try: req = json.loads(sys.stdin.read() or "{}")
         except ValueError: fail("request is not JSON")

@@ -2423,8 +2423,20 @@ export function heartbeatRemote(ask, directory = agentDirectory(ask)) {
   };
 }
 
-/** How often a hardware agent with its heartbeat on wakes. */
+/** How often a hardware agent wakes when its heartbeat is turned on. */
 export const HEARTBEAT_MINUTES = 15;
+/** The intervals the heartbeat select offers, in minutes (agentctl takes 5 to 1440). */
+export const HEARTBEAT_CHOICES = [5, 10, 15, 30, 60, 120, 240, 480, 720, 1440];
+
+const beatLabel = (minutes) => minutes < 60 ? `${minutes} minutes`
+  : minutes === 60 ? "hour" : minutes % 60 === 0 ? `${minutes / 60} hours` : `${minutes} minutes`;
+
+/** The heartbeat select's options for an agent waking every `current` minutes:
+ * the standard intervals, plus `current` when it is set to another one. */
+export function heartbeatChoices(current) {
+  const minutes = Number(current) > 0 ? [...new Set([...HEARTBEAT_CHOICES, Number(current)])].sort((a, b) => a - b) : HEARTBEAT_CHOICES;
+  return minutes.map((value) => ({ value, label: `every ${beatLabel(value)}` }));
+}
 
 /** The agent form's heartbeat state from agentctl's heartbeat.get or .set reply. */
 export function beatFrom(reply) {
@@ -2819,11 +2831,17 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
         dirty && h("button", { type: "button", disabled: saving, onClick: () => setText({ ...text, draft: text.base, error: undefined }) }, "Discard"),
         text.error && h("span", { role: "alert" }, text.error)),
       h("div", { style: { display: "grid", gap: 8 } },
-        h("label", { style: row },
-          h("input", { type: "checkbox", checked: beat.minutes > 0, disabled: beat.loading || beatBusy,
-            onChange: (event) => void saveBeat({ minutes: event.target.checked ? HEARTBEAT_MINUTES : 0 }) }),
-          "Heartbeat",
-          h("span", { style: muted }, beat.loading ? "…" : beat.minutes > 0 ? `every ${beat.minutes} minutes` : "off"),
+        h("div", { style: row },
+          h("label", { style: row },
+            h("input", { type: "checkbox", checked: beat.minutes > 0, disabled: beat.loading || beatBusy,
+              onChange: (event) => void saveBeat({ minutes: event.target.checked ? HEARTBEAT_MINUTES : 0 }) }),
+            "Heartbeat"),
+          beat.loading ? h("span", { style: muted }, "…")
+            : beat.minutes > 0
+              ? h("select", { "aria-label": "Heartbeat interval", value: String(beat.minutes), disabled: beatBusy,
+                  onChange: (event) => void saveBeat({ minutes: Number(event.target.value) }) },
+                ...heartbeatChoices(beat.minutes).map((choice) => h("option", { key: choice.value, value: String(choice.value) }, choice.label)))
+              : h("span", { style: muted }, "off"),
           beatBusy && h(Spinner)),
         h("label", { style: { display: "grid", gap: 4 } },
           h("span", { style: row }, "On each heartbeat", h("span", { style: muted }, beat.loading ? "" : beat.custom ? "yours" : "Black 4's standard")),

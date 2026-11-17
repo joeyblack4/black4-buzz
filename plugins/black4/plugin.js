@@ -2467,9 +2467,9 @@ export function beatFrom(reply) {
 }
 
 /** Sets an agent's model and effort ("" for the machine's default), how it
- * pays, when it compacts, or a conversation lever (`controls`: { name: value
- * or null }); the machine refuses what it does not offer, and restarts a
- * running agent on it. */
+ * pays, when it compacts, whom it answers or a conversation lever
+ * (`controls`: { name: value or null }, sent as given); the machine refuses
+ * what it does not offer, and restarts a running agent on it. */
 export async function setModel(ask, directory, { pubkey, model, effort, pays, compactAt, controls, signal }) {
   return askMachine(ask, await directory.machine(pubkey), { op: "settings.set", pubkey, model, effort, ...(pays ? { pays } : {}),
     ...(compactAt !== undefined ? { compactAt: compactAt === "" ? null : compactAt } : {}), ...(controls ?? {}) }, { signal });
@@ -3156,7 +3156,10 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
           h(Row, { title: "Status", description: run.error ? Alert(run.error) : undefined, trailing: h(React.Fragment, null,
             run.loading ? Status("Checking…") : Value(run.running ? "Running" : run.activated === false ? "Not set up" : "Stopped"),
             h(Button, { size: "sm", shape, loading: restarting, disabled: run.loading, onClick: () => void restart() }, "Restart")) }),
-          h(Row, { title: "Answers", trailing: Value(ANSWERS.find((entry) => entry.id === respondTo)?.label ?? (run.loading ? "…" : "Unknown")) })),
+          // Whom it answers: a change restarts it (the machine applies it at the start).
+          h(Row, { title: "Answers", trailing: respondTo
+            ? h(Pill, { label: "Answers", shape, value: respondTo, options: ANSWERS, disabled: busy, onChange: (next) => void pick({ controls: { respondTo: next } }, "machine") })
+            : Value(run.loading ? "…" : "Unknown") })),
         picked("machine")),
       runtime && h("div", { className: "grid gap-4" },
         h("div", null,

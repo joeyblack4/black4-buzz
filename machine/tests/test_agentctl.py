@@ -1902,6 +1902,23 @@ class CompactAt(DeviceBase):
         self.assertIn("compact at 500,000 tokens", self.a.heartbeat_prompt(self.a.read_settings(qwen_agent)))
         self.assertIn("compaction at your harness's default", self.a.heartbeat_prompt({"name": "x"}))
 
+    def test_whom_it_answers_is_a_setting_too_applied_at_its_restart(self):
+        agent = self.make_agent("claude")
+        self.assertEqual(self.req(op="settings.set", pubkey=agent.name, respondTo="everyone")["error"], "respondTo is anyone or owner-only")
+        self.assertEqual(self.req(op="settings.set", pubkey=agent.name, allow=["nope"])["error"], "allow is a list of public keys (64 hex characters each)")
+        self.assertEqual(self.req(op="settings.set", pubkey=agent.name, allow="f" * 64)["error"], "allow is a list of public keys (64 hex characters each)")
+        done = self.req(op="settings.set", pubkey=agent.name, respondTo="anyone", allow=["f" * 64, "e" * 64, "f" * 64])
+        self.assertEqual((done["respondTo"], done["allow"]), ("anyone", ["f" * 64, "e" * 64]))
+        env = json.loads((agent / "work" / "env.json").read_text())
+        self.assertEqual((env["BUZZ_ACP_RESPOND_TO"], env["BUZZ_ACP_RESPOND_TO_ALLOWLIST"]), ("anyone", "f" * 64 + "," + "e" * 64), "applied at the restart")
+        status = self.req(op="status", pubkey=agent.name)
+        self.assertEqual((status["respondTo"], status["allow"]), ("anyone", ["f" * 64, "e" * 64]))
+        self.req(op="settings.set", pubkey=agent.name, respondTo="owner-only", allow=[])
+        env = json.loads((agent / "work" / "env.json").read_text())
+        self.assertEqual(env["BUZZ_ACP_RESPOND_TO"], "owner-only")
+        self.assertNotIn("BUZZ_ACP_RESPOND_TO_ALLOWLIST", env)
+        self.assertEqual(self.req(op="settings.set", pubkey=agent.name, model="")["respondTo"], "owner-only", "left out: unchanged")
+
     def test_levers_chosen_before_activation_only_write_and_apply_when_it_starts(self):
         # The Create form's picks follow provision as settings.set, before the owner attestation.
         agent = self.make_agent("claude", activate=False)

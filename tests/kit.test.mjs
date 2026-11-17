@@ -11,7 +11,7 @@ const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), "utf
 const uses = JSON.parse(read("kit/uses.json"));
 const ceilings = JSON.parse(read("kit/homemade.json"));
 /** A className or style, or a raw control or <style>, drawn outside the kit. */
-const HOMEMADE = /\bclassName\s*:|\bstyle\s*:|\bh\(\s*["'](?:button|input|select|textarea|style)["']/g;
+const HOMEMADE = /\bclassName\s*:|\bstyle\s*:|\b(?:h|createElement)\(\s*["'](?:button|input|select|textarea|style)["']/g;
 /** Plugins built from subscriptions/src: their sources are what people edit. */
 const BUILT = new Set(["claude-subscription", "grok-subscription"]);
 
@@ -45,8 +45,8 @@ test("kit: every stamped plugin holds the current kit", () => {
 });
 
 test("kit: kit/uses.json lists exactly what the kit draws with, so the canary checks all of it", () => {
-  const drawn = collect(uses.variants);
-  for (const key of ["classes", "utilities", "attributes", "customProperties"]) {
+  const drawn = collect();
+  for (const key of ["variants", "classes", "utilities", "attributes", "customProperties"]) {
     assert.deepEqual(uses[key], drawn[key], `kit/uses.json "${key}" is out of date. It should be:\n${JSON.stringify(drawn[key], null, 2)}`);
   }
 });
@@ -56,7 +56,12 @@ test("kit: each part draws with Buzz's classes, and Pill draws Buzz's popup or t
     useState: (v) => [v, () => {}], useRef: (current) => ({ current }), useId: () => "id", useEffect() {}, useLayoutEffect() {} };
   const ui = loadKit()(React);
   assert.deepEqual(Object.keys(ui).sort(), ["Actions", "Alert", "Button", "Code", "ErrorLine", "Group", "Input", "Native", "Note", "Pill", "Popup",
-    "Row", "SectionTitle", "Spinner", "Stack", "Status", "Switch", "SwitchRow", "TextField", "Value"]);
+    "Row", "SectionTitle", "Spinner", "Stack", "Status", "Switch", "SwitchRow", "TextField", "VARIANTS", "Value"]);
+  // A variant Buzz does not style draws the default, never an unstyled control.
+  assert.equal(ui.Button({ variant: "ghost", size: "xl", shape: "round", children: "B" }).props["data-variant"], "subtle");
+  assert.equal(ui.Button({ variant: "ghost", size: "xl", shape: "round", children: "B" }).props["data-size"], "md");
+  assert.equal(ui.Group({ layout: "grid" }).props["data-layout"], "rows");
+  assert.equal(ui.Stack({ gap: 9, children: ["a"] }).props.className, "grid gap-4");
   assert.equal(ui.Pill, ui.Popup);
   assert.equal(loadKit()(React, { nativeSelect: true }).Pill.name, "Native");
   assert.deepEqual(ui.Input({ width: "11rem" }).props.style, { width: "11rem" });

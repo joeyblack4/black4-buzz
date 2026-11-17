@@ -47,11 +47,13 @@ or `canary/`.
    components. It requires each utility to still be used in Buzz's own
    source, because Tailwind writes only those, so a utility Buzz stops using
    disappears even though nothing was renamed. `tests/kit.test.mjs` keeps
-   `uses.json` complete. On 2026-11-17 it passed against v1.0.4,
-   v1.0.5-preview.2 and `main`. Against a copy of v1.0.4 with four
-   deliberate changes (a renamed class, a renamed card layout, a utility
-   Buzz stopped using and a renamed popup property) it failed with one
-   sentence for each.
+   `uses.json` complete. An attribute counts only on its own component, and
+   one Buzz styles must stay styled; `setOnly` lists the few Buzz sets but
+   never styles. On 2026-11-17 it passed against v1.0.4, v1.0.5-preview.2
+   and `main`. Against a copy of v1.0.4 with five deliberate changes (a
+   renamed class, a renamed card layout, a renamed small-button size that
+   other components keep, a utility Buzz stopped using and a renamed popup
+   property) it failed with one sentence for each.
 4. **The machine pairing** (`scripts/check-machine-pins.mjs`, in `npm run check`).
    [`machine/pins.json`](../machine/pins.json) declares the buzz-acp harness
    release and the ACP adapter and SDK versions that must go together. The

@@ -7,8 +7,9 @@
 // kit/uses.json lists every Buzz class, data attribute, Tailwind utility and
 // custom property the kit draws with. Each must still be in that Buzz:
 // - a `buzz-*` class in Buzz's stylesheets or its design-system components;
-// - a data attribute (with its value) in a stylesheet rule or in Buzz's
-//   design-system components;
+// - a data attribute (with its value) on its own component: in a selector
+//   with the owner's class, or set by the design-system component that draws
+//   that class;
 // - a Tailwind utility in Buzz's own sources. Tailwind writes only the
 //   utilities Buzz's code uses, never a plugin's, so one Buzz stops using is
 //   gone from the app even though nothing was renamed;
@@ -59,19 +60,30 @@ for (const name of uses.classes) {
   const inComponents = new RegExp(`["'\` ]${escape(name)}(?![\\w-])`);
   if (!pattern.test(css) && !inComponents.test(components)) missing(`the class ${name}`, "no longer has it in its stylesheets or design-system components");
 }
+// An attribute counts only on its own component: in a selector compounded
+// with the owner's class, or set by a component that draws the owner.
+const compound = "(?:\\[[^\\]]*\\]|:{1,2}[\\w-]+(?:\\([^)]*\\))?|\\.[\\w-]+)*";
+const setOnly = new Set(uses.setOnly ?? []);
+for (const entry of setOnly) if (!uses.attributes.includes(entry)) problems.push(`kit/uses.json lists ${entry} under setOnly but not under attributes.`);
 for (const entry of uses.attributes) {
   checks++;
   const [, owner, key, value] = entry.match(/^([^[]+)\[([^=\]]+)(?:="([^"]*)")?\]$/);
   const where = owner === "*" ? "" : ` on ${owner}`;
-  const selector = value === undefined
-    ? new RegExp(`\\[${escape(key)}(?:[\\]=~|^$*])`)
-    : new RegExp(`\\[${escape(key)}=["']?${escape(value)}["']?\\]`);
-  // A component sets it: the attribute, and the value as one of its literals
-  // (Buzz sets most from a prop: data-variant={variant}, variant = "default").
-  const component = componentFiles.some((file) => new RegExp(`["']?${escape(key)}["']?\\s*[:=]`).test(file)
+  const attribute = value === undefined
+    ? `\\[${escape(key)}(?=[\\]=~|^$*])[^\\]]*\\]`
+    : `\\[${escape(key)}=["']?${escape(value)}["']?\\]`;
+  const styled = owner === "*"
+    ? new RegExp(attribute).test(css)
+    : new RegExp(`\\.${escape(owner)}${compound}(?:${attribute}|:(?:is|not|where)\\([^)]*?${attribute})|${attribute}${compound}\\.${escape(owner)}(?![\\w-])`).test(css);
+  const set = componentFiles.some((file) => (owner === "*" || new RegExp(`["'\`\\s]${escape(owner)}["'\`\\s]`).test(file))
+    && new RegExp(`["']?${escape(key)}["']?\\s*[:=]`).test(file)
     && (value === undefined || value === "" || new RegExp(`["'\`]${escape(value)}["'\`]`).test(file)));
-  if (!selector.test(css) && !component) {
-    missing(`${value === undefined ? key : `${key}="${value}"`}${where}`, "neither styles it nor sets it in its design-system components");
+  const name = `${value === undefined ? key : `${key}="${value}"`}${where}`;
+  // Most are styled; a few Buzz only sets (a default its stylesheet never
+  // names). A styled one must stay styled.
+  if (process.env.EXPLAIN) console.log(styled ? "styled" : set ? "set-only" : "missing", entry);
+  if (setOnly.has(entry) ? !styled && !set : !styled) {
+    missing(name, setOnly.has(entry) ? "neither styles it there nor sets it in that design-system component" : "no longer styles it there");
   }
 }
 for (const name of uses.utilities) {

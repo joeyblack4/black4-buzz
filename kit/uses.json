@@ -1,5 +1,5 @@
 {
-  "$comment": "Everything the Buzz UI kit (kit/buzz-ui.js) takes from Buzz. The Buzz canary checks each entry against Buzz every day; tests/kit.test.mjs requires this list to match what the kit draws. Variants: the values plugins may pass to each part.",
+  "$comment": "Everything the Buzz UI kit (kit/buzz-ui.js) takes from Buzz. The Buzz canary (canary/design.mjs) checks each entry against Buzz every day; tests/kit.test.mjs requires the lists to match what the kit draws. setOnly: attributes Buzz sets on its components but never styles (the rest must stay styled).",
   "builtOn": {
     "buzz": "v1.0.4",
     "commit": "a1c9c969"
@@ -12,14 +12,14 @@
     },
     "Button": {
       "variant": [
-        "prominent",
         "subtle",
+        "prominent",
         "outline",
         "destructive"
       ],
       "size": [
-        "sm",
-        "md"
+        "md",
+        "sm"
       ],
       "shape": [
         "capsule",
@@ -28,14 +28,14 @@
     },
     "Input": {
       "controlSize": [
-        "sm",
-        "md"
+        "md",
+        "sm"
       ]
     },
     "Stack": {
       "gap": [
-        2,
-        4
+        4,
+        2
       ]
     }
   },
@@ -113,7 +113,6 @@
     "buzz-content-header[data-buzz-ui]",
     "buzz-content-header[data-inline]",
     "buzz-field[data-buzz-ui]",
-    "buzz-field[data-invalid]",
     "buzz-input[data-buzz-ui]",
     "buzz-input[data-size=\"md\"]",
     "buzz-input[data-size=\"sm\"]",
@@ -135,7 +134,6 @@
     "buzz-switch-control[data-buzz-ui]",
     "buzz-switch-control[data-checked]",
     "buzz-switch-control[data-disabled]",
-    "buzz-switch-thumb[data-checked]",
     "buzz-textarea[data-appearance=\"outlined\"]",
     "buzz-textarea[data-buzz-ui]",
     "buzz-textarea[data-invalid]",
@@ -147,5 +145,23 @@
     "--available-height",
     "--available-width",
     "--transform-origin"
+  ],
+  "setOnly": [
+    "buzz-button[data-button-shape=\"capsule\"]",
+    "buzz-button[data-buzz-ui]",
+    "buzz-content-header[data-buzz-ui]",
+    "buzz-field[data-buzz-ui]",
+    "buzz-input[data-buzz-ui]",
+    "buzz-input[data-size=\"md\"]",
+    "buzz-preference-row[data-buzz-ui]",
+    "buzz-preference-row[data-variant=\"default\"]",
+    "buzz-select-popup[data-buzz-ui]",
+    "buzz-select[data-appearance=\"outlined\"]",
+    "buzz-select[data-buzz-ui]",
+    "buzz-settings-group[data-buzz-ui]",
+    "buzz-switch-control[data-buzz-ui]",
+    "buzz-textarea[data-buzz-ui]",
+    "buzz-textarea[data-surface=\"inset\"]",
+    "buzz-textarea[data-variant=\"text\"]"
   ]
 }

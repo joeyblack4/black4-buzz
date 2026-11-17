@@ -61,6 +61,9 @@ is.
 | `Stack`, `Actions` | Buzz's Settings layout | Space between sections (`gap` 4) or fields (`gap` 2), and a row of buttons. |
 | `Note`, `ErrorLine`, `Status`, `Spinner`, `Value`, `Alert`, `Code` | Buzz's own lines | A muted note, an error, progress, a read-only value, a broken state and a code. |
 
+A part takes only variants Buzz styles (`VARIANTS` in the kit). Anything else
+draws the default, never an unstyled control.
+
 Pass `{ nativeSelect: true }` to draw dropdowns as the same pill over the
 system's own menu, in case Buzz's popup ever misbehaves in a webview.
 

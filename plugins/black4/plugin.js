@@ -2502,6 +2502,15 @@ function buzzUi(React, { nativeSelect = false } = {}) {
   const ICON = { chevron: "M6 9l6 6l6 -6", check: "M5 12l5 5l10 -10", loader: "M12 3a9 9 0 1 0 9 9" };
   const h = React.createElement;
   const Fragment = React.Fragment;
+  /** The variants each part takes, all ones Buzz styles (kit/uses.json
+   * lists the same; the canary checks them). Anything else draws the first. */
+  const VARIANTS = {
+    Group: { layout: ["rows"] },
+    Button: { variant: ["subtle", "prominent", "outline", "destructive"], size: ["md", "sm"], shape: ["capsule", "control"] },
+    Input: { controlSize: ["md", "sm"] },
+    Stack: { gap: [4, 2] },
+  };
+  const one = (list, value) => (list.includes(value) ? value : list[0]);
   const icon = (path, size, props = {}) => h("svg", { xmlns: "http://www.w3.org/2000/svg", width: `${size / 16}rem`, height: `${size / 16}rem`,
     viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": true, ...props },
     h("path", { d: path }));
@@ -2514,8 +2523,8 @@ function buzzUi(React, { nativeSelect = false } = {}) {
         subtitle ? h("p", { className: "buzz-content-header-subtitle" }, subtitle) : null));
 
   /** SettingsGroup.tsx: the rounded card. Every direct child is a row. */
-  const Group = ({ layout = "rows", children }) =>
-    h("div", { "data-buzz-ui": "", className: "buzz-settings-group", "data-layout": layout }, children);
+  const Group = ({ layout, children }) =>
+    h("div", { "data-buzz-ui": "", className: "buzz-settings-group", "data-layout": one(VARIANTS.Group.layout, layout) }, children);
 
   /** PreferenceRow.tsx: title and muted description left, `trailing` right
    * (an element, or a function of the aria props that name the control).
@@ -2538,9 +2547,10 @@ function buzzUi(React, { nativeSelect = false } = {}) {
   /** Button.tsx: variant prominent | subtle | outline | destructive; size sm | md;
    * shape capsule | control. `loading` hides the label under Buzz's spinner.
    * With `href` it is a link that looks the same (Buzz renders links through Button too). */
-  const Button = ({ variant = "subtle", size = "md", shape = "capsule", type = "button", loading = false, disabled, onClick, href, children, ...props }) => {
+  const Button = ({ variant, size, shape, type = "button", loading = false, disabled, onClick, href, children, ...props }) => {
     const shared = { ...props, "aria-busy": loading || props["aria-busy"],
-      "data-buzz-ui": "", className: "buzz-button", "data-variant": variant, "data-size": size, "data-button-shape": shape,
+      "data-buzz-ui": "", className: "buzz-button", "data-variant": one(VARIANTS.Button.variant, variant),
+      "data-size": one(VARIANTS.Button.size, size), "data-button-shape": one(VARIANTS.Button.shape, shape),
       "data-disabled": disabled || loading ? "" : undefined, "data-loading": loading || undefined };
     const body = [
       h("span", { key: "label", className: "buzz-button-label" }, children),
@@ -2552,8 +2562,8 @@ function buzzUi(React, { nativeSelect = false } = {}) {
   };
 
   /** Input.tsx: one line of text. `width` fixes its width (a CSS length). */
-  const Input = ({ controlSize = "md", width, ...props }) =>
-    h("input", { type: "text", ...props, ...(width ? { style: { width } } : {}), "data-buzz-ui": "", "data-size": controlSize, className: "buzz-input" });
+  const Input = ({ controlSize, width, ...props }) =>
+    h("input", { type: "text", ...props, ...(width ? { style: { width } } : {}), "data-buzz-ui": "", "data-size": one(VARIANTS.Input.controlSize, controlSize), className: "buzz-input" });
 
   /** Switch.tsx without its own label: the row names it. */
   const Switch = ({ id, checked, disabled, onCheckedChange, ...aria }) =>
@@ -2561,7 +2571,7 @@ function buzzUi(React, { nativeSelect = false } = {}) {
         "data-buzz-ui": "", className: "buzz-switch-control",
         "data-checked": checked ? "" : undefined, "data-disabled": disabled ? "" : undefined,
         onClick: () => { if (!disabled) onCheckedChange(!checked); } },
-      h("span", { className: "buzz-switch-thumb", "data-checked": checked ? "" : undefined }));
+      h("span", { className: "buzz-switch-thumb" }));
 
   /** SwitchPreferenceRow.tsx. */
   const SwitchRow = ({ id, label, description, checked, disabled, onCheckedChange }) => {
@@ -2690,7 +2700,7 @@ function buzzUi(React, { nativeSelect = false } = {}) {
    * muted description or the error. */
   const TextField = ({ label, description, error, optional = false, value, onChange, rows = 8, maxLength, placeholder, disabled }) => {
     const id = React.useId();
-    return h("div", { "data-buzz-ui": "", className: "buzz-field", "data-invalid": error ? "" : undefined },
+    return h("div", { "data-buzz-ui": "", className: "buzz-field" },
       h("label", { className: "buzz-field-label", htmlFor: id }, label,
         optional ? h(Fragment, null, " ", h("span", { className: "buzz-field-optional" }, "Optional")) : null),
       h("textarea", { id, rows, maxLength, placeholder, value, disabled,
@@ -2707,8 +2717,8 @@ function buzzUi(React, { nativeSelect = false } = {}) {
   const each = (children) => (Array.isArray(children) ? children : [children]);
   /** A column of sections, cards or fields. `as: "form"` makes it the form
    * (with `onSubmit`); gap 4 between sections, 2 within a field. */
-  const Stack = ({ as = "div", gap = 4, onSubmit, children }) =>
-    h(as, { className: GAPS[gap] ?? GAPS[4], onSubmit }, ...each(children));
+  const Stack = ({ as = "div", gap, onSubmit, children }) =>
+    h(as, { className: GAPS[one(VARIANTS.Stack.gap, gap)], onSubmit }, ...each(children));
   /** A row of buttons that wraps. */
   const Actions = ({ children }) => h("div", { className: "flex flex-wrap items-center gap-3" }, ...each(children));
 
@@ -2724,7 +2734,7 @@ function buzzUi(React, { nativeSelect = false } = {}) {
   const Alert = (text) => h("span", { role: "alert", className: "text-danger" }, text);
   const Code = (text) => h("code", { className: "text-body tabular-nums", style: { letterSpacing: "0.08em" } }, text);
 
-  return { SectionTitle, Group, Row, Button, Input, Switch, SwitchRow, Pill, Popup, Native, TextField, Stack, Actions, Note, ErrorLine, Spinner, Status, Value, Alert, Code };
+  return { VARIANTS, SectionTitle, Group, Row, Button, Input, Switch, SwitchRow, Pill, Popup, Native, TextField, Stack, Actions, Note, ErrorLine, Spinner, Status, Value, Alert, Code };
 }
 // ---- end buzz-ui kit ----
 export { buzzUi };

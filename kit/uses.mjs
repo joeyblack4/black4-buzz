@@ -1,5 +1,5 @@
 // What the Buzz UI kit takes from Buzz, found by drawing every part in every
-// variant kit/uses.json allows. tests/kit.test.mjs requires the two to agree,
+// variant it takes (its VARIANTS). tests/kit.test.mjs requires the two to agree,
 // so the list the Buzz canary checks is complete.
 import { readFileSync } from "node:fs";
 
@@ -29,11 +29,11 @@ function walk(node, visit) {
   for (const child of node.props?.children ?? []) walk(child, visit);
 }
 
-/** { classes, utilities, attributes, customProperties } the kit draws with
- * the variants in `variants` (kit/uses.json's). */
-export function collect(variants) {
+/** { variants, classes, utilities, attributes, customProperties }: what the kit draws with. */
+export function collect() {
   const React = drawingReact();
   const h = React.createElement;
+  const variants = loadKit()(React).VARIANTS;
   const parts = [];
   for (const nativeSelect of [false, true]) {
     const ui = loadKit()(React, { nativeSelect });
@@ -68,5 +68,5 @@ export function collect(variants) {
   }
   const customProperties = [...new Set([...kitSource().matchAll(/setProperty\("(--[\w-]+)"/g)].map((match) => match[1]))];
   const sorted = (set) => [...set].sort();
-  return { classes: sorted(classes), utilities: sorted(utilities), attributes: sorted(attributes), customProperties: customProperties.sort() };
+  return { variants, classes: sorted(classes), utilities: sorted(utilities), attributes: sorted(attributes), customProperties: customProperties.sort() };
 }

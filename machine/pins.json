@@ -36,6 +36,13 @@
       "source": "https://x.ai/cli/grok-1.0.70-macos-aarch64.gz (xAI publishes no checksum; hash of the tested download)",
       "command": "grok agent --always-approve stdio (Buzz 0.5.30 Grok Build preset)",
       "handshake": "buzz-acp 0.5.30 initialize -> grok 1.0.70 protocolVersion 1; session/new answers Authentication required until signed in"
+    },
+    "@qwen-code/qwen-code": {
+      "version": "0.27.4",
+      "versionVar": "QWEN_CODE_VERSION",
+      "dependencyOf": "workforce-qwen (vendor/qwen-code, its own package.json)",
+      "command": "qwen --acp --approval-mode yolo, then --auth-type qwen-subscription -m <model> on the membership (bin/qwen-account.mjs signs it in through Qwen Code's own QwenSubscriptionSession) or --auth-type openai with OPENAI_API_KEY, OPENAI_BASE_URL and OPENAI_MODEL in the environment on a QwenCloud key",
+      "handshake": "buzz-acp 0.5.30 initialize -> qwen-code 0.27.4 protocolVersion 1; session/new answers -32000 Authentication required with no key in the environment, and opens a session with any key there (Qwen Code does not check it; agentctl does, with GET /models). Checked on the Commerce Mac, 2026-11-16"
     }
   }
 }

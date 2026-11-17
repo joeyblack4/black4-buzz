@@ -1879,14 +1879,16 @@ const MODELS_RECHECK_MS = 15 * 1000;
 const LOGIN_TIMEOUT_MS = 120 * 1000; // the machine waits up to 90 s for a code, 85 s per wait for a device approval
 /** Sign-in flows this plugin can show. "code": open a link, paste the code its
  * page shows. "device": open a link and approve the short code shown here;
- * the machine finishes by itself. A machine offers a device sign-in only to a
+ * the machine finishes by itself. "key": open a link to where an API key is
+ * made, paste the key. A machine offers a device or key sign-in only to a
  * plugin that says it can show one. */
-const SIGN_IN_FLOWS = ["code", "device"];
+const SIGN_IN_FLOWS = ["code", "device", "key"];
 
 export const HARNESSES = [
   { id: "claude", label: "Claude Code" },
   { id: "codex", label: "Codex" },
   { id: "grok", label: "Grok Build" },
+  { id: "qwen", label: "Qwen Code" },
   { id: "goose", label: "Goose" },
 ];
 const ANSWERS = [
@@ -1894,8 +1896,18 @@ const ANSWERS = [
   { id: "owner-only", label: "Only me" },
 ];
 
+/** How an agent pays: "subscription" (the harness's subscription sign-in on
+ * the machine) or "key" (an API key kept there). "" lets the machine settle it
+ * when the agent is made: the subscription when that is signed in, else the key. */
+export const PAYS = [
+  { id: "subscription", label: "Subscription" },
+  { id: "key", label: "API key" },
+];
+/** Where a device sign-in's link goes, when the harness's name would not say. */
+const SIGN_IN_SITE = { qwen: "chat.qwen.ai" };
+
 export const hardwareDefaults = () => ({
-  machine: DEFAULT_MACHINE, harness: "claude", model: "", effort: "", respondTo: "anyone", instructions: "",
+  machine: DEFAULT_MACHINE, harness: "claude", pays: "", model: "", effort: "", respondTo: "anyone", instructions: "",
 });
 
 /** The machine an id or a config names. Unknown or missing (an agent made
@@ -2018,9 +2030,9 @@ export function statusReader(ask, { op = "machine.status", ttlMs = STATUS_TTL_MS
   };
 }
 
-/** How Buzz signs this harness in on the machine: "code", "device", or null
- * with a one-sentence reason. A machine from before Codex and Grok sign-in
- * reports no `signIn`; there only Claude Code signs in from Buzz. */
+/** How Buzz signs this harness in on the machine: "code", "device", "key", or
+ * null with a one-sentence reason. A machine from before Codex and Grok
+ * sign-in reports no `signIn`; there only Claude Code signs in from Buzz. */
 export function signInOf(row) {
   if (!row) return { flow: null, reason: null };
   if ("signIn" in row) {
@@ -2055,14 +2067,21 @@ export function harnessOptions(status) {
 }
 
 /** The sign-in state of one harness on a machine, from its status (or
- * `undefined` while loading). */
-export function signInState(status, harness) {
+ * `undefined` while loading): its subscription, or with pays "key" its API key
+ * (a machine reports one under `key`; an older machine has none). */
+export function signInState(status, harness, pays = "subscription") {
   if (!status) return { kind: "loading" };
   if (status.kind === "unreachable") return { kind: "unreachable", error: status.error };
   if (status.kind === "unsupported") return { kind: "unsupported" };
   const row = status.harnesses.find((entry) => entry?.id === harness);
   if (!row || row.installed === false) return { kind: "not-installed" };
   if (problemOf(row)) return { kind: "unavailable", reason: problemOf(row) };
+  if (pays === "key") {
+    const key = row.key && typeof row.key === "object" ? row.key : null;
+    if (!key) return { kind: "unavailable", reason: `${harnessLabel(harness) ?? harness} takes no API key on this machine.` };
+    if (key.signedIn === true) return { kind: "signed-in", account: typeof key.account === "string" && key.account ? key.account : null };
+    return { kind: key.signedIn === false ? "signed-out" : "unknown" };
+  }
   if (row.signedIn === true) return { kind: "signed-in", account: typeof row.account === "string" && row.account ? row.account : null };
   const { flow, reason } = signInOf(row);
   if (!flow) return { kind: "unavailable", reason };
@@ -2072,6 +2091,17 @@ export function signInState(status, harness) {
 
 /** Whether the create dialog may go ahead with this sign-in state. */
 export const readyToCreate = (state) => ["signed-in", "unknown", "unsupported"].includes(state?.kind);
+
+/** Whether this machine takes an API key for the harness (its status row has `key`). */
+export const takesKey = (status, harness) => status?.kind === "ok" && !!status.harnesses.find((entry) => entry?.id === harness)?.key;
+
+/** How a new agent would pay when nobody chooses: the machine's own rule. */
+export function defaultPays(status, harness) {
+  if (status?.kind !== "ok") return "subscription";
+  const row = status.harnesses.find((entry) => entry?.id === harness);
+  if (row?.signedIn === true) return "subscription";
+  return row?.key?.signedIn === true ? "key" : "subscription";
+}
 
 /** Each machine's `models`: per harness, the models it offers ({ id, label,
  * efforts }, efforts least to most) and the default model and effort there. */
@@ -2102,7 +2132,9 @@ function defaultEffort(efforts, preferred) {
  * unavailable, so the agent's real setting is never hidden. */
 export function modelChoices(models, harness, value = {}) {
   if (models?.kind !== "ok") return null;
-  const row = models.harnesses.find((entry) => entry?.id === harness);
+  const entry = models.harnesses.find((candidate) => candidate?.id === harness);
+  // An agent paying by key runs on the key's listing (under `key`); the top level is the subscription's.
+  const row = value.pays === "key" && entry?.key && typeof entry.key === "object" ? entry.key : entry;
   const list = (Array.isArray(row?.models) ? row.models : []).filter((entry) => typeof entry?.id === "string" && entry.id);
   if (!list.length) return null;
   const options = list.map((entry) => ({ id: entry.id, label: typeof entry.label === "string" && entry.label ? entry.label : entry.id,
@@ -2142,8 +2174,11 @@ export function applyPick(models, harness, value, change) {
  * A device sign-in (needsCode false: Codex, Grok) shows the link and the
  * machine's short userCode, then waits by itself: login.finish with no code
  * waits on the machine for the approval and answers `pending` if it has not
- * come yet, and is asked again until it signs in, fails or is cancelled. */
-export function createLogin(ask, machine, harness, { onChange, onSignedIn, timeoutMs = LOGIN_TIMEOUT_MS } = {}) {
+ * come yet, and is asked again until it signs in, fails or is cancelled.
+ * A key sign-in (flow "key": Qwen Code) shows the link to where a key is made
+ * and takes the key in place of a code; a key the machine refuses leaves the
+ * same sign-in open to paste again (state `flow: "key"`, no new link). */
+export function createLogin(ask, machine, harness, { pays = "subscription", onChange, onSignedIn, timeoutMs = LOGIN_TIMEOUT_MS } = {}) {
   let state = Object.freeze({ step: "idle" });
   let loginId = null;
   let pending = null;
@@ -2165,7 +2200,7 @@ export function createLogin(ask, machine, harness, { onChange, onSignedIn, timeo
   };
   /** Asks for a new sign-in and shows its link; a reply for a cancelled or
    * replaced attempt is cancelled on the machine instead. */
-  const open = (mine, extra = {}) => askMachine(ask, machine, { op: "login.start", harness, flows: SIGN_IN_FLOWS }, { timeoutMs })
+  const open = (mine, extra = {}) => askMachine(ask, machine, { op: "login.start", harness, pays, flows: SIGN_IN_FLOWS }, { timeoutMs })
     .then((reply) => {
       const id = typeof reply.loginId === "string" ? reply.loginId : null;
       if (disposed || mine !== generation) return cancelRemote(id);
@@ -2177,7 +2212,8 @@ export function createLogin(ask, machine, harness, { onChange, onSignedIn, timeo
       loginId = id;
       const needsCode = reply.needsCode !== false;
       const userCode = !needsCode && typeof reply.userCode === "string" && /^[A-Za-z0-9-]{4,32}$/.test(reply.userCode) ? reply.userCode : null;
-      set({ step: "waiting", url, needsCode, ...(userCode ? { userCode } : {}), ...extra });
+      const key = needsCode && reply.flow === "key";
+      set({ step: "waiting", url, needsCode, ...(key ? { flow: "key" } : {}), ...(userCode ? { userCode } : {}), ...extra });
       if (!needsCode) approval(mine, id).catch((error) => {
         if (disposed || mine !== generation) return;
         loginId = null;
@@ -2225,10 +2261,12 @@ export function createLogin(ask, machine, harness, { onChange, onSignedIn, timeo
       if (pending) return pending;
       if (state.step !== "waiting" || !loginId) return Promise.resolve();
       if (!state.needsCode) return Promise.resolve(); // a device sign-in finishes by itself
-      if (state.needsCode && !pasted) { set({ ...state, error: "Paste the code first." }); return Promise.resolve(); }
+      const key = state.flow === "key";
+      if (state.needsCode && !pasted) { set({ ...state, error: key ? "Paste the API key first." : "Paste the code first." }); return Promise.resolve(); }
       const mine = ++generation;
       const used = loginId;
-      set({ step: "finishing", url: state.url, needsCode: state.needsCode, ...(state.renewed ? { renewed: true } : {}) });
+      const url = state.url;
+      set({ step: "finishing", url, needsCode: state.needsCode, ...(key ? { flow: "key" } : {}), ...(state.renewed ? { renewed: true } : {}) });
       return track(askMachine(ask, machine, { op: "login.finish", loginId: used, ...(pasted ? { code: pasted } : {}) }, { timeoutMs })
         .then(async (reply) => {
           if (reply.signedIn === false) throw new Error("Sign-in did not finish.");
@@ -2236,11 +2274,18 @@ export function createLogin(ask, machine, harness, { onChange, onSignedIn, timeo
           if (mine !== generation) return;
           await signedIn(mine, reply);
         }, async (error) => {
+          const reason = message(error, pasted);
+          if (key && !/expired|cancelled/i.test(reason)) {
+            // The machine keeps a key sign-in open after a refused or unchecked
+            // key: the same link and id take the next paste.
+            if (mine === generation) set({ step: "waiting", url, needsCode: true, flow: "key", error: reason });
+            return;
+          }
           // A failed finish closes that sign-in on the machine: its link and
           // id are dead. Start one fresh sign-in (once, no loop) for a new link.
           if (loginId === used) loginId = null;
           if (mine !== generation) return;
-          const reason = message(error, pasted);
+          if (key) { set({ step: "idle", error: reason }); return; }
           set({ step: "renewing", error: reason });
           try {
             await open(mine, { renewed: true, error: `${reason} Open the new link and paste its code.` });
@@ -2390,8 +2435,8 @@ export function beatFrom(reply) {
 
 /** Sets an agent's model and effort ("" for the machine's default); the
  * machine refuses one it does not offer, and restarts a running agent on it. */
-export async function setModel(ask, directory, { pubkey, model, effort, signal }) {
-  return askMachine(ask, await directory.machine(pubkey), { op: "settings.set", pubkey, model, effort }, { signal });
+export async function setModel(ask, directory, { pubkey, model, effort, pays, signal }) {
+  return askMachine(ask, await directory.machine(pubkey), { op: "settings.set", pubkey, model, effort, ...(pays ? { pays } : {}) }, { signal });
 }
 
 /** Registers the "Black 4 hardware" agent type on `ctx`. `report(error)` hears
@@ -2479,15 +2524,16 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
     style: { display: "inline-block", width: 12, height: 12, borderRadius: "50%", border: "2px solid currentColor", borderRightColor: "transparent" } });
 
   /** Sign-in for one harness on one machine: the state, and the flow. */
-  const SignIn = ({ machineId, harness, status, disabled }) => {
+  const SignIn = ({ machineId, harness, status, disabled, pays = "subscription" }) => {
     const machine = machineOf(machineId);
-    const state = signInState(status, harness);
+    const state = signInState(status, harness, pays);
     const [login, setLogin] = React.useState({ step: "idle" });
     const [code, setCode] = React.useState("");
     const [copied, setCopied] = React.useState(false);
     const flow = React.useRef(null);
     React.useEffect(() => {
       const current = createLogin(ask, machine.id, harness, {
+        pays,
         onChange: setLogin,
         // A harness signed out lists no models; signed in, it does.
         onSignedIn: () => Promise.all([statuses.read(machine.id, { force: true }), modelLists.read(machine.id, { force: true })]),
@@ -2496,9 +2542,10 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
       setLogin(current.state);
       setCode("");
       return () => { if (flow.current === current) flow.current = null; void current.dispose(); };
-    }, [machine.id, harness]);
+    }, [machine.id, harness, pays]);
 
     const label = harnessLabel(harness) ?? harness;
+    const key = pays === "key";
     if (state.kind === "loading") return h("div", { role: "status", style: { ...row, ...muted } }, h(Spinner), `Checking ${machine.label}…`);
     if (state.kind === "unreachable") return h("div", { role: "alert", style: { display: "grid", gap: 6 } },
       h("span", null, state.error || `Could not reach the ${machine.label}.`),
@@ -2507,11 +2554,11 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
     if (state.kind === "not-installed") return h("div", { role: "alert" }, `${label} is not installed on the ${machine.label}.`);
     if (state.kind === "unavailable") return h("div", { role: "alert" }, `${label} is unavailable: ${state.reason}`);
     if (state.kind === "signed-in" && !["waiting", "finishing", "renewing"].includes(login.step)) return h("div", { style: row },
-      h("span", null, state.account ? `Signed in as ${state.account}` : `${label} is signed in`));
+      h("span", null, state.account ? `Signed in as ${state.account}` : key ? `${label} has an API key` : `${label} is signed in`));
     if (state.kind === "unknown" && login.step === "idle") return h("div", { style: { display: "grid", gap: 6 } },
       h("div", { style: { ...row, ...muted } },
-        h("span", null, "Sign-in status unknown"),
-        h("button", { type: "button", disabled, onClick: () => void flow.current?.start() }, "Sign in")),
+        h("span", null, key ? "API key status unknown" : "Sign-in status unknown"),
+        h("button", { type: "button", disabled, onClick: () => void flow.current?.start() }, key ? "Add key" : "Sign in")),
       login.error && h("span", { role: "alert" }, login.error));
 
     // Not signed in, or a sign-in under way.
@@ -2521,9 +2568,9 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
       h("div", { role: "status", style: { ...row, ...muted } }, h(Spinner), "Getting a new link…"));
     if (login.step === "idle" || login.step === "starting" || login.step === "done") return h("div", { style: { display: "grid", gap: 6 } },
       h("div", { style: row },
-        h("span", null, login.step === "done" ? "Signed in. Checking…" : `${label} is not signed in`),
+        h("span", null, login.step === "done" ? (key ? "Key saved. Checking…" : "Signed in. Checking…") : key ? `${label} has no API key` : `${label} is not signed in`),
         login.step !== "done" && h("button", { type: "button", disabled: disabled || busy, "aria-busy": busy, onClick: () => void flow.current?.start() },
-          busy ? h(Spinner) : "Sign in"),
+          busy ? h(Spinner) : key ? "Add key" : "Sign in"),
         login.step === "starting" && h("button", { type: "button", onClick: () => void flow.current?.cancel() }, "Cancel")),
       login.error && h("span", { role: "alert" }, login.error));
 
@@ -2534,7 +2581,7 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
     };
     if (!login.needsCode) return h("div", { style: { display: "grid", gap: 8 } },
       h("div", { style: row },
-        h("a", { href: login.url, target: "_blank", rel: "noopener noreferrer" }, `Open ${label} sign-in`),
+        h("a", { href: login.url, target: "_blank", rel: "noopener noreferrer" }, SIGN_IN_SITE[harness] ? `Open ${SIGN_IN_SITE[harness]}` : `Open ${label} sign-in`),
         h("button", { type: "button", onClick: () => {
           Promise.resolve(globalThis.navigator?.clipboard?.writeText?.(login.url))
             .then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }, () => {});
@@ -2546,9 +2593,14 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
         login.step === "finishing" ? "Signing in…" : `Waiting for you to approve it. The ${machine.label} finishes by itself.`,
         h("button", { type: "button", onClick: () => void flow.current?.cancel() }, "Cancel")),
       login.error && h("span", { role: "alert" }, login.error));
+    // A key (flow "key"): the link opens the page where an API key is made,
+    // and the key is pasted in place of a code. It goes to the machine once
+    // and is kept there; it is never shown or kept here.
+    const pasteKey = login.flow === "key";
     return h("div", { style: { display: "grid", gap: 8 } },
       h("div", { style: row },
-        h("a", { href: login.url, target: "_blank", rel: "noopener noreferrer" }, login.renewed ? `Open new ${label} sign-in` : `Open ${label} sign-in`),
+        h("a", { href: login.url, target: "_blank", rel: "noopener noreferrer" },
+          pasteKey ? "Open the API keys page" : login.renewed ? `Open new ${label} sign-in` : `Open ${label} sign-in`),
         h("button", { type: "button", onClick: () => {
           Promise.resolve(globalThis.navigator?.clipboard?.writeText?.(login.url))
             .then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }, () => {});
@@ -2556,10 +2608,11 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
       // Not a <form>: this sits inside Buzz's own Create agent form, and a
       // nested form's submit goes to the outer one, which abandons the dialog.
       h("div", { style: row },
-          h("input", { type: "password", autoComplete: "off", spellCheck: false, placeholder: "Paste code", "aria-label": "Sign-in code",
+          h("input", { type: "password", autoComplete: "off", spellCheck: false,
+            placeholder: pasteKey ? "Paste API key" : "Paste code", "aria-label": pasteKey ? "API key" : "Sign-in code",
             value: code, disabled: busy, onChange: (event) => setCode(event.target.value), style: { flex: 1, minWidth: 160 },
             onKeyDown: (event) => { if (event.key === "Enter") { event.preventDefault(); event.stopPropagation(); if (!busy && code.trim()) submit(); } } }),
-          h("button", { type: "button", disabled: busy || !code.trim(), "aria-busy": busy, onClick: submit }, busy ? h(Spinner) : "Finish"),
+          h("button", { type: "button", disabled: busy || !code.trim(), "aria-busy": busy, onClick: submit }, busy ? h(Spinner) : pasteKey ? "Save key" : "Finish"),
           h("button", { type: "button", onClick: () => { setCode(""); void flow.current?.cancel(); } }, "Cancel")),
       login.error && h("span", { role: "alert" }, login.error));
   };
@@ -2582,7 +2635,8 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
     const models = useModels(machine.id);
     const options = harnessOptions(status);
     const offered = options.length ? options : HARNESSES;
-    const state = ask ? signInState(status, value.harness) : { kind: "unreachable" };
+    const pays = value.pays || defaultPays(status, value.harness);
+    const state = ask ? signInState(status, value.harness, pays) : { kind: "unreachable" };
 
     // A harness the machine does not have, or cannot sign in: suggest the
     // first one it can run.
@@ -2604,12 +2658,14 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
       access && h(LinkPrompt),
       h(Select, { label: "Runs on", value: machine.id, options: MACHINES, disabled, onChange: (id) => onChange({ ...value, machine: id }) }),
       h(Select, { label: "Runs", value: value.harness, options: status?.kind === "ok" && !options.length ? [] : offered, disabled: disabled || (status?.kind === "ok" && !options.length),
-        onChange: (harness) => onChange({ ...value, harness, model: "", effort: "" }) }),
+        onChange: (harness) => onChange({ ...value, harness, pays: "", model: "", effort: "" }) }),
       status?.kind === "ok" && !options.length && h("span", { role: "alert" }, `No harness is installed on the ${machine.label}.`),
-      h(ModelPicker, { models, harness: value.harness, value, disabled, onPick: (pick) => onChange({ ...value, ...pick }) }),
+      takesKey(status, value.harness) && h(Select, { label: "Pays with", value: pays, options: PAYS, disabled,
+        onChange: (next) => onChange({ ...value, pays: next, model: "", effort: "" }) }),
+      h(ModelPicker, { models, harness: value.harness, value: { ...value, pays }, disabled, onPick: (pick) => onChange({ ...value, ...pick }) }),
       h(Select, { label: "Answers", value: value.respondTo, options: ANSWERS, disabled, onChange: (respondTo) => onChange({ ...value, respondTo }) }),
       ask
-        ? h(SignIn, { machineId: machine.id, harness: value.harness, status, disabled })
+        ? h(SignIn, { machineId: machine.id, harness: value.harness, status, disabled, pays })
         : SignInPrompt ? h(SignInPrompt, null) : h("p", { role: "alert" }, "Sign in to Black 4 in Settings → Black 4 to reach Black 4 hardware."));
   };
 
@@ -2657,8 +2713,9 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
         if (status.status === "fulfilled") {
           const reply = status.value;
           directory.remember(pubkey, { machine: machine.id, harness: reply.harness, respondTo: reply.respondTo });
-          setRun({ loading: false, running: !!reply.running, activated: !!reply.activated, harness: reply.harness, respondTo: reply.respondTo,
-            ...("model" in reply ? { model: { model: reply.modelChosen ? reply.model : "", effort: reply.effortChosen ? reply.effort : "",
+          const pays = reply.pays === "key" ? "key" : "subscription";
+          setRun({ loading: false, running: !!reply.running, activated: !!reply.activated, harness: reply.harness, respondTo: reply.respondTo, pays,
+            ...("model" in reply ? { model: { pays, model: reply.modelChosen ? reply.model : "", effort: reply.effortChosen ? reply.effort : "",
               shown: reply.model, shownEffort: reply.effort, note: reply.modelNote, problem: reply.modelProblem } } : {}) });
         } else setRun({ loading: false, error: String(status.reason?.message ?? status.reason) });
         if (instructions.status === "fulfilled") setText({ loading: false, base: instructions.value, draft: instructions.value });
@@ -2741,6 +2798,9 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
         h(Line, { title: "Runs on" }, machine.label),
         h(Line, { title: "Runs" }, harnessLabel(harness) ?? (run.loading ? "…" : "Unknown")),
         h(Line, { title: "Answers" }, ANSWERS.find((entry) => entry.id === respondTo)?.label ?? (run.loading ? "…" : "Unknown")),
+        // How it pays: a change restarts it on the other sign-in, with that one's default model.
+        run.pays && takesKey(status, harness) && h(Select, { label: "Pays with", value: run.pays, options: PAYS, disabled: picking.saving || run.loading,
+          onChange: (pays) => void pick({ pays, model: "", effort: "" }) }),
         run.model && (modelChoices(models, harness, run.model)
           ? h("div", { style: { display: "grid", gap: 10 } },
             h(ModelPicker, { models, harness, value: run.model, disabled: picking.saving || run.loading, note: run.model.note, onPick: (choice) => void pick(choice) }),
@@ -2750,7 +2810,7 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
         picking.error && h("span", { role: "alert" }, picking.error),
         h(Line, { title: "Status" }, h("div", { style: row }, running,
           h("button", { type: "button", disabled: restarting || run.loading, "aria-busy": restarting, onClick: () => void restart() }, restarting ? h(Spinner) : "Restart"))),
-        harness && h(Line, { title: "Sign-in" }, h(SignIn, { machineId: machine.id, harness, status, disabled: false }))),
+        harness && h(Line, { title: run.pays === "key" ? "API key" : "Sign-in" }, h(SignIn, { machineId: machine.id, harness, status, disabled: false, pays: run.pays ?? "subscription" }))),
       h("label", { style: { display: "grid", gap: 4 } }, "Instructions",
         h("textarea", { rows: 8, maxLength: 20000, value: text.draft, disabled: text.loading || saving,
           placeholder: text.loading ? "Loading…" : "", onChange: (event) => setText({ ...text, draft: event.target.value, error: undefined }) })),

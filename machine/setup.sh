@@ -31,6 +31,10 @@ CODEX_CLI_VERSION=0.160.1   # @openai/codex
 # checked against buzz-acp (Apple-signed, team 5Y6N3AJ54S).
 GROK_VERSION=1.0.70
 GROK_SHA256=9c83a2b8b28064574b65e1fa50e8342dd5d797d81c5c724c1d60bb0ad35e3199  # grok-1.0.70-macos-aarch64.gz
+# Qwen Code is Alibaba's CLI and ACP agent (qwen --acp), run on QwenCloud's API
+# with a key agentctl keeps in secrets/qwen. It is installed in its own folder
+# (vendor/qwen-code) so moving this pin never reinstalls the adapters above.
+QWEN_CODE_VERSION=0.27.4   # @qwen-code/qwen-code
 
 # BLACK4_WORKFORCE_ROOT puts a second runner beside the real one (for example
 # $HOME/workforce-dev), with its own agents, sign-ins and cron lines.
@@ -115,6 +119,34 @@ if [ ! -x "$GROK_DIR/grok" ]; then
 fi
 ln -sfn "$GROK_DIR/grok" "$BIN/grok"
 
+# Qwen Code, from npm at its pinned version, in a folder of its own.
+QWEN_DIR="$VENDOR/qwen-code"
+want_qwen="@qwen-code/qwen-code@$QWEN_CODE_VERSION"
+if [ "$(cat "$QWEN_DIR/.installed" 2>/dev/null || true)" != "$want_qwen" ]; then
+  echo "installing $want_qwen"
+  rm -rf "$QWEN_DIR"
+  mkdir -p "$QWEN_DIR"
+  cat > "$QWEN_DIR/package.json" <<JSON
+{
+  "name": "workforce-qwen",
+  "private": true,
+  "dependencies": {
+    "@qwen-code/qwen-code": "$QWEN_CODE_VERSION"
+  }
+}
+JSON
+  npm install --prefix "$QWEN_DIR" --no-fund --no-audit --loglevel=error
+  echo "$want_qwen" > "$QWEN_DIR/.installed"
+fi
+ln -sfn "$QWEN_DIR/node_modules/.bin/qwen" "$BIN/qwen"
+# The Qwen membership sign-in, check and model list, through Qwen Code's own
+# QwenSubscriptionSession (machine/qwen-account.mjs); agentctl runs it with node.
+if [ -f "$SRC/machine/qwen-account.mjs" ]; then
+  cp "$SRC/machine/qwen-account.mjs" "$BIN/qwen-account.mjs.tmp"
+  chmod 644 "$BIN/qwen-account.mjs.tmp"
+  mv "$BIN/qwen-account.mjs.tmp" "$BIN/qwen-account.mjs"
+fi
+
 # The Black 4 connector: every agent's MCP server (agentctl passes mcp/black4 to
 # buzz-acp). Its one dependency, @noble/curves, is pinned with integrity hashes
 # in package-lock.json and installed with npm ci; reinstalled only when the
@@ -193,7 +225,7 @@ if [ -f "$SRC/machine/door.mjs" ]; then
   fi
 fi
 
-echo "node $("$BIN/node" --version), $want, grok $GROK_VERSION"
+echo "node $("$BIN/node" --version), $want, grok $GROK_VERSION, $want_qwen"
 # The self-test: pinned versions, buzz-acp's ACP handshake with each adapter,
 # the connector, cron and disk. An install that cannot run an agent fails here.
 if [ -x "$BIN/agentctl" ]; then

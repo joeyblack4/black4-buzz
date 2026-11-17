@@ -2,7 +2,7 @@
 
 Status: current  
 Owner: Black 4 platform  
-Updated: 2026-11-15
+Updated: 2026-11-16
 
 Black 4 runs its AI workforce in [Buzz](https://github.com/block/buzz-app).
 Buzz stays stock, so it can be updated at any time; everything Black 4 adds is
@@ -128,6 +128,23 @@ sign-in:
 - **Codex** (ChatGPT subscription) and **Grok Build** (SuperGrok or grok.com):
   open the link and approve the short code the form shows. There is nothing to
   paste: the machine notices the approval. The code lasts 15 minutes.
+- **Qwen Code** has two ways to pay, and each agent chooses one (**Pays
+  with** in the form and in its Settings):
+  - **Subscription**: a Qwen membership (Plus or Pro on chat.qwen.ai). Open
+    the link and approve the short code, as for Codex and Grok Build; the
+    machine keeps Qwen Code's own sign-in file and Qwen Code refreshes it.
+  - **API key**: a QwenCloud key (pay-as-you-go or Token Plan). Open the link
+    to QwenCloud's API keys page, make a key there and paste it into the
+    form. The machine checks it against QwenCloud and keeps it to itself; it
+    never comes back to Buzz.
+
+  A new agent pays by subscription when the machine's membership is signed
+  in, else by key, and keeps that until you change it. Each agent sees only
+  the sign-in it pays with. Qwen Code runs in a private home per sign-in with
+  its self-update, usage statistics and managed memory off. New agents run
+  `qwen4-max` (or the next model that sign-in lists), with no effort
+  setting: Qwen Code has no effort lever for a model it is given this way,
+  so the service's default thinking for the model applies.
 
 A harness that the machine has installed but Buzz can't sign in (Goose) is
 listed as unavailable, with the reason.

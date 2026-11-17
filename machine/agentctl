@@ -3157,6 +3157,11 @@ def handle(req):
         s["community"] = community_url(req.get("community") or s["community"])
         for key in ("harness", "model", "effort", "instructions", "respondTo", "heartbeat", "pays", "compactAt"):
             if (req.get("config") or {}).get(key) is not None: s[key] = req["config"][key]
+        # What each heartbeat does, chosen with the agent ("" keeps Black 4's standard).
+        prompt = (req.get("config") or {}).get("heartbeatPrompt")
+        if prompt is not None:
+            if not isinstance(prompt, str): fail("heartbeatPrompt is text")
+            s["heartbeatPrompt"] = prompt.strip()[:HEARTBEAT_PROMPT_MAX]
         harness = s.get("harness") or "claude"
         if harness not in HARNESS: fail(f"unknown harness {str(harness)[:40]!r}")
         s["pays"] = checked_pays(harness, s.get("pays"))

@@ -1934,6 +1934,22 @@ class CompactAt(DeviceBase):
         self.assertEqual((env["BUZZ_ACP_AGENTS"], env["BUZZ_ACP_SESSION_POLICY"]), ("3", "thread"))
         self.assertEqual(self.a.heartbeat_minutes(self.a.read_settings(agent)), 15, "activate takes the heartbeat from the form")
 
+    def test_activate_takes_what_each_heartbeat_does_from_the_create_form(self):
+        agent = self.make_agent("claude", activate=False)
+        auth = ["auth", "a" * 64, "", "b" * 128]
+        refused = self.req(op="activate", pubkey=agent.name, auth=auth, community="wss://relay.example.com", config={"heartbeat": 15, "heartbeatPrompt": 5})
+        self.assertEqual(refused["error"], "heartbeatPrompt is text")
+        activated = self.req(op="activate", pubkey=agent.name, auth=auth, community="wss://relay.example.com",
+                             config={"heartbeat": 30, "heartbeatPrompt": "  Check the Paid media board for every business.  "})
+        self.assertTrue(activated["ok"], activated)
+        view = self.req(op="heartbeat.get", pubkey=agent.name)
+        self.assertEqual((view["heartbeat"], view["custom"], view["prompt"]), (30, True, "Check the Paid media board for every business."))
+        env = json.loads((agent / "work" / "env.json").read_text())
+        self.assertEqual(Path(env["BUZZ_ACP_HEARTBEAT_PROMPT_FILE"]).read_text().strip(), "Check the Paid media board for every business.")
+        other = self.make_agent("claude", activate=False)
+        self.assertTrue(self.req(op="activate", pubkey=other.name, auth=auth, community="wss://relay.example.com", config={"heartbeat": 30, "heartbeatPrompt": ""})["ok"])
+        self.assertFalse(self.req(op="heartbeat.get", pubkey=other.name)["custom"], "empty keeps Black 4's standard")
+
     def test_buzz_acps_own_levers_are_per_agent_and_a_heartbeat_keeps_two_in_parallel(self):
         agent = self.make_agent("claude")
         self.assertEqual(self.req(op="settings.set", pubkey=agent.name, agents=9)["error"], "agents is a whole number from 1 to 8, or null for buzz-acp's default")

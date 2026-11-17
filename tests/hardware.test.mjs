@@ -469,7 +469,7 @@ test("readiness for each sign-in state", () => {
 const noKey = { signIn: "key", signedIn: false, account: null, plan: null };
 const deviceRows = ({ codex = false, grok = false, qwen = false, qwenKey = false } = {}) => [
   { id: "claude", label: "Claude Code", installed: true, signedIn: true, account: null, signIn: "code", key: noKey },
-  { id: "codex", label: "Codex", installed: true, signedIn: codex, account: codex ? "owner@example.com" : null, signIn: "device" },
+  { id: "codex", label: "Codex", installed: true, signedIn: codex, account: codex ? "owner@example.com" : null, signIn: "device", key: noKey },
   { id: "grok", label: "Grok Build", installed: true, signedIn: grok, account: null, signIn: "device" },
   { id: "qwen", label: "Qwen Code", installed: true, signedIn: qwen, account: qwen ? "owner@example.com" : null, signIn: "device",
     key: { signIn: "key", signedIn: qwenKey, account: null, plan: qwenKey ? "pay-as-you-go" : null } },
@@ -697,7 +697,7 @@ test("sign-in: an empty code is not sent", async () => {
 test("a harness pays by subscription or by API key: each has its own sign-in state, and the machine's rule picks the default", () => {
   const none = { kind: "ok", harnesses: deviceRows() };
   assert.equal(takesKey(none, "qwen"), true);
-  assert.equal(takesKey(none, "codex"), false, "no Codex key yet");
+  assert.equal(takesKey(none, "codex"), true);
   const older = { kind: "ok", harnesses: harnesses() };
   assert.equal(takesKey(older, "codex"), false, "a machine from before keys");
   assert.equal(takesKey(undefined, "qwen"), false);

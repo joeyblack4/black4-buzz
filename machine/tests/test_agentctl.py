@@ -428,7 +428,7 @@ class MachineStatus(Base):
         self.assertEqual(rows["qwen"]["label"], "Qwen Code")
         self.assertFalse(rows["qwen"]["installed"])
         self.assertEqual(rows["qwen"]["key"], {"signIn": "key", "signedIn": None, "account": None, "plan": None}, "and takes an API key beside it")
-        for hid in ('claude',): self.assertEqual(rows[hid]["key"]["signIn"], "key", hid)
+        for hid in ('claude', 'codex'): self.assertEqual(rows[hid]["key"]["signIn"], "key", hid)
         self.assertEqual(rows["claude"]["key"]["signedIn"], False, "installed, no key yet")
         self.assertNotIn("key", rows["goose"])
         self.assertEqual(rows["claude"], {"id": "claude", "label": "Claude Code", "installed": True,
@@ -1517,6 +1517,39 @@ class HarnessKeys(DeviceBase):
         self.assertIn("does not take the effort turbo", self.req(op="provision", name="C", community="wss://r.example.com",
                                                                  config={"harness": "claude", "pays": "key", "effort": "turbo"})["error"])
 
+    def test_codex_puts_the_key_in_its_own_file_in_its_own_home(self):
+        self.sign_in_device("codex")
+        done = self.sign_in_key(FAKE_OPENAI_KEY, "codex")
+        self.assertEqual(done["plan"], "api")
+        key_home = self.a.HOMES / "codex-key"
+        self.assertEqual(json.loads((key_home / "auth.json").read_text()), {"OPENAI_API_KEY": FAKE_OPENAI_KEY, "auth_mode": "apikey"}, "codex login --with-api-key wrote it")
+        self.assertEqual(stat.S_IMODE((key_home / "auth.json").stat().st_mode), 0o600)
+        self.assertEqual((self.home / "codex-logins.txt").read_text().strip(), str(key_home), "on stdin, into the key home only")
+        self.assertIn(FAKE_CRED, (self.a.HOMES / "codex" / "auth.json").read_text(), "the ChatGPT sign-in is untouched")
+        by_key = self.env_after_start(self.make_agent("codex", pays="key"))
+        self.assertEqual(by_key["CODEX_HOME"], str(key_home))
+        self.assertNotIn("OPENAI_API_KEY", by_key, "Codex reads its file, not the environment")
+        self.assertIn('cli_auth_credentials_store = "file"', (key_home / "config.toml").read_text())
+        self.assertEqual(by_key["INITIAL_AGENT_MODE"], "agent-full-access")
+        by_sub = self.env_after_start(self.make_agent("codex", pays="subscription"))
+        self.assertEqual(by_sub["CODEX_HOME"], str(self.a.HOMES / "codex"))
+        self.assertNotIn("OPENAI_API_KEY", json.dumps(by_sub))
+        (key_home / "auth.json").unlink()
+        self.env_after_start(self.make_agent("codex", pays="key"))
+        self.assertTrue((key_home / "auth.json").exists(), "start puts the file back when it is gone")
+        self.assertEqual(self.req(op="logout", harness="codex", pays="key"), {"ok": True})
+        self.assertFalse((key_home / "auth.json").exists(), "the key and Codex's copy go together")
+        self.assertTrue((self.a.HOMES / "codex" / "auth.json").exists())
+
+    def test_codex_key_models_take_the_efforts_codex_cached_for_them(self):
+        (self.a.private_dir(self.a.HOMES / "codex") / "models_cache.json").write_text(json.dumps(CODEX_MODELS))
+        self.assertTrue(self.sign_in_key(FAKE_OPENAI_KEY, "codex")["signedIn"])
+        row = next(h for h in self.req(op="models")["harnesses"] if h["id"] == "codex")
+        self.assertEqual([m["id"] for m in row["key"]["models"]], ["gpt-6-astra", "gpt-6.1-sol", "o3"], "the defaults first; no embeddings, realtime or whisper")
+        self.assertEqual(row["key"]["models"][0]["efforts"], ["low", "medium", "high", "xhigh", "max", "ultra"])
+        self.assertEqual(row["key"]["models"][2]["efforts"], [], "nothing cached for it")
+        self.assertEqual((row["key"]["model"], row["key"]["effort"]), ("gpt-6-astra", "high"))
+
     def pays_of(self, d):
         return self.req(op="status", pubkey=d.name)["pays"]
 
@@ -1624,7 +1657,7 @@ class Health(DeviceBase):
             self.assertTrue(rows[harness]["access"].startswith("full access"), rows[harness])
         out = io.StringIO()
         with contextlib.redirect_stdout(out): self.a.print_doctor()
-        self.assertIn("Codex: signed out" + ("" if "codex" in ['codex', 'grok'] else " (subscription signed out, API key signed out)") + "; full access (agent-full-access", out.getvalue())
+        self.assertIn("Codex: signed out" + ("" if "codex" in ['grok'] else " (subscription signed out, API key signed out)") + "; full access (agent-full-access", out.getvalue())
 
     def test_a_codex_adapter_without_the_full_access_mode_is_a_problem(self):
         (self.a.VENDOR / "acp/node_modules/@agentclientprotocol/codex-acp/dist/index.js").write_text('static Agent = new _AgentMode("agent",')

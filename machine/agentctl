@@ -699,6 +699,13 @@ KEYS = {
                "chat": lambda i: i.startswith("claude-") and not NOT_CHAT.search(i),
                "label": lambda row: row.get("display_name") or claude_label(row["id"]),
                "efforts": lambda i: claude_efforts(claude_cli()) if claude_cli() else []},
+    "codex": {"service": "OpenAI", "keyUrl": "https://platform.openai.com/api-keys",
+              "bases": (("api", "https://api.openai.com/v1"),),
+              "headers": BEARER, "rejected": UNAUTHORIZED,
+              "home_env": "CODEX_HOME", "env": lambda key, base: {},
+              "install": lambda key: install_codex_key(key), "installed": lambda key: codex_key_installed(key),
+              "chat": lambda i: (i.startswith("gpt-") or re.match(r"^o\d", i) is not None) and not NOT_CHAT.search(i) and "instruct" not in i,
+              "efforts": lambda i: cached_efforts("codex", i)},
     "qwen": {"service": "QwenCloud", "keyUrl": "https://docs.qwencloud.com/developer-guides/administration/api-keys",
              # Qwen Code's own page for keys; the two QwenCloud plans take different keys.
              "bases": (("pay-as-you-go", "https://maas.qwencloudapi.com/compatible-mode/v1"),

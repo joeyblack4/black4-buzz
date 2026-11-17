@@ -77,9 +77,11 @@ const calls = (mcp, method) => mcp.calls.filter((call) => call.method === method
 const h_queue = (app) => app.mcp.calls.filter((call) => call.params?.name === "review_queue");
 
 const queueText = (queue) => ({ content: [{ type: "text", text: JSON.stringify({ kind: "black4_review_queue", reviews: [], ...queue }) }] });
+/** All the text inside a node (a Buzz button keeps its label in a span). */
+const textOf = (node) => typeof node === "string" ? node : !node || typeof node !== "object" ? "" : (node.children ?? node.props?.children ?? []).map(textOf).join("");
 function button(node, text) {
   if (!node || typeof node !== "object") return;
-  if (node.type === "button" && (text === undefined || node.children.includes(text))) return node;
+  if (node.type === "button" && (text === undefined || textOf(node) === text)) return node;
   for (const child of node.children ?? []) { const found = button(child, text); if (found) return found; }
 }
 // Mount an element whose type is a component, the way a React host would, one level deep.
@@ -315,7 +317,7 @@ test("the Reviews badge shows the connected account's waiting count and clears o
   await settle();
   assert.deepEqual(app.page.badge().children, ["3"]);
   assert.match(app.page.badge().props["aria-label"], /3 decisions waiting for the connected Black 4 account/);
-  assert.match(app.page.badge().props.style.background, /CanvasText\)$/, "the badge fallback contrasts with its Canvas text");
+  assert.equal(app.page.badge().props.className, "buzz-count-badge", "Buzz's count badge");
   assert.equal(h_queue(app).length, 1, "one queue read per refresh");
   app.reconnect();
   assert.equal(app.page.badge(), null, "a reconnect clears the count before the new account answers");
@@ -345,37 +347,33 @@ test("a native review offers Connect in place only when nothing is already in pr
   const offline = new Set([MCP]);
   const app = await harness(t, { offline });
   await settle();
-  const failed = render(render(app.panel.component({ target: "https://app.black4.ai/reviews" })));
+  const failed = expandAll(app.panel.component({ target: "https://app.black4.ai/reviews" }));
   const connect = button(failed, "Connect Black 4");
   assert.ok(connect, "a failed connection shows Connect where the person is");
   assert.match(JSON.stringify(failed), /connection refused/, "the failure detail is shown");
   offline.clear();
   connect.props.onClick();
-  const starting = render(render(app.panel.component({ target: "https://app.black4.ai/reviews" })));
+  const starting = expandAll(app.panel.component({ target: "https://app.black4.ai/reviews" }));
   assert.equal(button(starting, "Connect Black 4"), undefined, "no second Connect while a connection is in progress");
   await settle();
   assert.equal(app.registered.size, tools.length);
-  const React = { createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }), useState: (v) => [v, () => {}], useEffect: () => {} };
+  const React = { createElement: (type, props, ...children) => ({ type, props: { ...(props ?? {}), children }, children }), useState: (v) => [v, () => {}], useEffect: () => {}, useId: () => "id" };
   let connects = 0;
-  const signingIn = reviewSurface(React, async () => ({}), null, () => ({ status: "signing-in", detail: "Finish signing in to Black 4 in your browser.", connect: () => connects++ }))({ target: "https://app.black4.ai/reviews" });
+  const signingIn = expandAll(reviewSurface(React, async () => ({}), null, () => ({ status: "signing-in", detail: "Finish signing in to Black 4 in your browser.", connect: () => connects++ }))({ target: "https://app.black4.ai/reviews" }));
   assert.equal(button(signingIn, "Connect Black 4"), undefined, "an active browser sign-in is never restarted from the brief");
   assert.match(JSON.stringify(signingIn), /Finish signing in/);
-  const stopped = reviewSurface(React, async () => ({}), null, () => "stopped")({ target: "https://app.black4.ai/reviews" });
+  const stopped = expandAll(reviewSurface(React, async () => ({}), null, () => "stopped")({ target: "https://app.black4.ai/reviews" }));
   assert.equal(button(stopped, "Connect Black 4"), undefined, "a plain status string still renders without a connect action");
   assert.equal(connects, 0);
 });
 
-test("the native composition uses host tokens, not hard-coded colors", () => {
-  const React = { createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }), useState: (v) => [v, () => {}], useEffect: () => {} };
-  const view = reviewSurface(React, async () => ({}), null)({ target: "https://app.black4.ai/reviews" });
-  const css = view.children[0].children[0];
-  assert.equal(view.children[0].type, "style");
-  assert.equal(typeof css, "string");
-  assert.doesNotMatch(css, /#[0-9a-f]{3,8}\b|\bwhite(?!-space)\b|\bblack\b|\brgba?\(/i, "no hard-coded colors");
-  assert.doesNotMatch(css, /font-size:\s*\d+px/, "type scales with the host's interface size");
-  assert.match(css, /var\(--affordance-prominent/);
-  assert.match(css, /var\(--border-focus/);
-  assert.doesNotMatch(css, /background:var\([^)]*,currentColor\)|color-mix\(in srgb,currentColor [0-9]+%,transparent\)\)}[^}]*color:var\([^)]*,Canvas\)/, "a prominent fill never falls back to currentColor beside Canvas text");
-  assert.match(css, /\.b4-primary\{background:var\(--affordance-prominent,CanvasText\);color:var\(--text-on-prominent,Canvas\)/, "the primary fallback is a contrasting system-color pair");
-  assert.match(css, /\.b4-primary:hover\{background:var\(--affordance-prominent-hover,color-mix\(in srgb,CanvasText 85%,Canvas\)\)/);
+test("the native composition draws in Buzz's own parts, with no stylesheet or colors of its own", () => {
+  const React = { createElement: (type, props, ...children) => ({ type, props: { ...(props ?? {}), children }, children }), useState: (v) => [v, () => {}], useEffect: () => {}, useId: () => "id" };
+  const view = expandAll(reviewSurface(React, async () => ({}), null)({ target: "https://app.black4.ai/reviews" }));
+  const text = JSON.stringify(view);
+  assert.doesNotMatch(text, /"type":"style"/, "no <style> of its own");
+  assert.doesNotMatch(text, /#[0-9a-f]{3,8}\b|\brgba?\(|CanvasText/i, "no colors of its own");
+  assert.match(text, /Loading your review/);
+  assert.match(text, /motion-safe:animate-spin/, "Buzz's spinner while it loads");
 });
+

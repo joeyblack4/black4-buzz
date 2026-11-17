@@ -4,6 +4,7 @@ import React from 'react';
 import {create,act} from 'react-test-renderer';
 import {apply} from '../../plugins/claude-subscription/plugin.js';
 globalThis.IS_REACT_ACT_ENVIRONMENT=true;
+const text=node=>typeof node==='string'?node:(node.children||[]).map(text).join('');
 test('creation blocks signed-out users, signs in locally, becomes ready and saves choices',async()=>{
  let type,cleanup,signedIn=false,ready=false,config={model:'opus'},launches=[];
  apply({react:React,effect:f=>cleanup=f(),agents:{harness:{},register:t=>type=t},host:{serveMcp(){},spawn:async(id,o)=>{
@@ -14,11 +15,14 @@ test('creation blocks signed-out users, signs in locally, becomes ready and save
  let ui;const onReadyChange=v=>ready=v;const onChange=v=>config=v;
  await act(async()=>{ui=create(React.createElement(type.CreateConfiguration,{config,onChange,onReadyChange}));});
  assert.equal(ready,false);
- const button=ui.root.findAllByType('button').find(x=>x.children.join('')==='Sign in with Claude');
+ const button=ui.root.findAllByType('button').find(x=>text(x)==='Sign in with Claude');
+ assert.equal(button.props.className,'buzz-button','a Buzz button');
  await act(async()=>{button.props.onClick();});
  assert.equal(ready,true);assert(launches.find(x=>x.args.includes('--claudeai')));
  assert(launches.every(x=>x.env.ANTHROPIC_API_KEY===null));
- await act(async()=>{ui.root.findAllByType('select')[0].props.onChange({target:{value:'sonnet'}});});
+ const model=ui.root.findAll(x=>x.props.role==='listbox')[0];
+ assert.deepEqual(model.findAll(x=>x.props.role==='option').map(x=>x.props['data-value']),['opus','sonnet','fable']);
+ await act(async()=>{model.findAll(x=>x.props['data-value']==='sonnet')[0].props.onClick();});
  assert.equal(config.model,'sonnet');assert.equal(config.effort,'');
  await act(async()=>ui.unmount());assert.equal(ready,false);cleanup();
 });

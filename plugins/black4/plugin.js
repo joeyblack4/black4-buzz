@@ -2113,6 +2113,9 @@ export const modelsReader = (ask, options = {}) => statusReader(ask, {
 });
 
 const EFFORT_LABELS = { none: "None", minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max", ultra: "Ultra" };
+/** When an agent compacts its context, in tokens; "" is the harness's own default. */
+export const COMPACT_OPTIONS = [50000, 100000, 150000, 250000, 500000];
+const compactLabel = (tokens) => `${Math.round(tokens / 1000)}k`;
 
 /** The effort a model runs at when none is chosen: the machine's default
  * effort if the model takes it, else the highest it takes below that. */
@@ -2148,7 +2151,18 @@ export function modelChoices(models, harness, value = {}) {
   let effort = value.effort || (!value.effort && value.shownEffort && efforts.includes(value.shownEffort) && model === (value.model || value.shown) ? value.shownEffort : null) || fallback;
   const effortOptions = efforts.map((id) => ({ id, label: EFFORT_LABELS[id] ?? id }));
   if (effort && !efforts.includes(effort)) effortOptions.push({ id: effort, label: `${EFFORT_LABELS[effort] ?? effort} (unavailable)`, unavailable: true });
-  return { model, effort, models: options.map(({ efforts: _, ...rest }) => rest), efforts: effortOptions, defaultModel, defaultEffort: fallback };
+  // Compact at: the machine says whether the harness takes it here (an older
+  // machine says nothing: no choice). null is the harness's default; a new
+  // agent (compactAt undefined) shows the machine's default for one.
+  let compact = null;
+  if (row.compact && typeof row.compact === "object") {
+    const { supported, note, min = 0, max = Infinity, default: standard } = row.compact;
+    const chosen = value.compactAt === null ? "" : typeof value.compactAt === "number" ? String(value.compactAt) : standard ? String(standard) : "";
+    const compactOptions = [{ id: "", label: "Harness default" }, ...COMPACT_OPTIONS.filter((tokens) => tokens >= min && tokens <= max).map((tokens) => ({ id: String(tokens), label: compactLabel(tokens) }))];
+    if (chosen && !compactOptions.some((entry) => entry.id === chosen)) compactOptions.push({ id: chosen, label: `${compactLabel(Number(chosen))} (unavailable)`, unavailable: true });
+    compact = { value: chosen, options: compactOptions, supported: supported !== false, note: typeof note === "string" ? note : null };
+  }
+  return { model, effort, models: options.map(({ efforts: _, ...rest }) => rest), efforts: effortOptions, defaultModel, defaultEffort: fallback, compact };
 }
 
 /** The model and effort to store after the person picks one (`change` is
@@ -2447,8 +2461,9 @@ export function beatFrom(reply) {
 
 /** Sets an agent's model and effort ("" for the machine's default); the
  * machine refuses one it does not offer, and restarts a running agent on it. */
-export async function setModel(ask, directory, { pubkey, model, effort, pays, signal }) {
-  return askMachine(ask, await directory.machine(pubkey), { op: "settings.set", pubkey, model, effort, ...(pays ? { pays } : {}) }, { signal });
+export async function setModel(ask, directory, { pubkey, model, effort, pays, compactAt, signal }) {
+  return askMachine(ask, await directory.machine(pubkey), { op: "settings.set", pubkey, model, effort, ...(pays ? { pays } : {}),
+    ...(compactAt !== undefined ? { compactAt: compactAt === "" ? null : compactAt } : {}) }, { signal });
 }
 
 /** Registers the "Black 4 hardware" agent type on `ctx`. `report(error)` hears
@@ -2528,7 +2543,11 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
       h(Select, { label: "Model", value: choices.model, options: choices.models, disabled, title: note || undefined,
         onChange: (model) => onPick(applyPick(models, harness, value, { model })) }),
       choices.efforts.length > 0 && h(Select, { label: "Effort", value: choices.effort ?? "", options: choices.efforts, disabled,
-        onChange: (effort) => onPick(applyPick(models, harness, value, { effort })) }));
+        onChange: (effort) => onPick(applyPick(models, harness, value, { effort })) }),
+      // Greyed, with the machine's one-line reason, where the harness has no lever here.
+      choices.compact && h(Select, { label: "Compact at", value: choices.compact.value, options: choices.compact.options,
+        disabled: disabled || !choices.compact.supported, title: choices.compact.supported ? undefined : choices.compact.note ?? undefined,
+        onChange: (id) => onPick({ compactAt: id ? Number(id) : null }) }));
   };
 
   // Buzz's own spinner class (the app ships Tailwind's `animate-spin`).
@@ -2728,6 +2747,7 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
           const pays = reply.pays === "key" ? "key" : "subscription";
           setRun({ loading: false, running: !!reply.running, activated: !!reply.activated, harness: reply.harness, respondTo: reply.respondTo, pays,
             ...("model" in reply ? { model: { pays, model: reply.modelChosen ? reply.model : "", effort: reply.effortChosen ? reply.effort : "",
+              compactAt: typeof reply.compactAt === "number" ? reply.compactAt : null,
               shown: reply.model, shownEffort: reply.effort, note: reply.modelNote, problem: reply.modelProblem } } : {}) });
         } else setRun({ loading: false, error: String(status.reason?.message ?? status.reason) });
         if (instructions.status === "fulfilled") setText({ loading: false, base: instructions.value, draft: instructions.value });

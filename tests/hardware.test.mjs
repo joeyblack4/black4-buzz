@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import {
   askMachine, hardwareProvider, hardwareDefaults, HEARTBEAT_MINUTES, HEARTBEAT_CHOICES, heartbeatChoices, beatFrom, heartbeatRemote, MACHINES, machineOf, statusReader, harnessOptions, signInState, readyToCreate, takesKey, defaultPays, PAYS,
   createLogin, agentDirectory, summaryOf, signInOf, doorTransport, bodySha256, createSession, createMcp, readAnswer, memoryStore,
-  modelsReader, modelChoices, applyPick, setModel, applyHardware,
+  modelsReader, modelChoices, applyPick, setModel, applyHardware, COMPACT_OPTIONS,
 } from "../plugins/black4/plugin.js";
 import { fakeAuthKit, fakeMcp, fakeDoor, https, sha256url, DOOR } from "./fakes.mjs";
 
@@ -375,11 +375,13 @@ const qwenFleet = (request) => {
   if (request.op === "machine.status") return { ok: true, machine: "commerce", harnesses: deviceRows({ qwen: true, qwenKey: true }) };
   if (request.op === "models") return { ok: true, harnesses: [
     { id: "qwen", label: "Qwen Code", checked: true, model: "qwen4-max", effort: null, models: [{ id: "qwen4-max", label: "qwen4-max", efforts: [] }, { id: "qwen3.8-max", label: "qwen3.8-max", efforts: [] }],
-      key: { checked: true, model: "qwen4-max", effort: null, models: [{ id: "qwen4-max", label: "qwen4-max", efforts: [] }, { id: "qwen3.7-plus", label: "qwen3.7-plus", efforts: [] }] } },
+      compact: { supported: true, min: 20000, max: 2000000, default: 150000 },
+      key: { checked: true, model: "qwen4-max", effort: null, models: [{ id: "qwen4-max", label: "qwen4-max", efforts: [] }, { id: "qwen3.7-plus", label: "qwen3.7-plus", efforts: [] }],
+        compact: { supported: true, min: 20000, max: 2000000, default: 150000 } } },
   ] };
   if (request.op === "list") return { ok: true, agents: [] };
   if (request.op === "status") return { ok: true, running: true, activated: true, harness: "qwen", pays: "key", respondTo: "anyone",
-    model: "qwen3.7-plus", effort: null, modelChosen: true, effortChosen: false };
+    model: "qwen3.7-plus", effort: null, modelChosen: true, effortChosen: false, compactAt: 250000 };
   if (request.op === "instructions.get") return { ok: true, instructions: "" };
   return { ok: true };
 };
@@ -390,9 +392,20 @@ test("render: a harness that takes an API key gets Pays with, and the model list
   const tree = await settle(React.createElement(type.CreateConfiguration, {
     config: { ...hardwareDefaults(), harness: "qwen" }, onChange: (next) => changes.push(next), disabled: false }));
   const selects = selectsIn(tree);
-  assert.deepEqual(selects.map((entry) => entry.label), ["Runs on", "Runs", "Pays with", "Model", "Answers"]);
+  assert.deepEqual(selects.map((entry) => entry.label), ["Runs on", "Runs", "Pays with", "Model", "Compact at", "Answers"]);
   assert.deepEqual(selects[2], { label: "Pays with", value: "subscription", options: ["subscription", "key"] });
   assert.deepEqual(selects[3].options, ["qwen4-max", "qwen3.8-max"]);
+  assert.deepEqual(selects[4], { label: "Compact at", value: "150000", options: ["", "50000", "100000", "150000", "250000", "500000"] });
+  const compactSelect = (function find(node) {
+    if (!node || typeof node !== "object") return null;
+    if (node.type === "select" && node.props.value === "150000") return node;
+    for (const child of node.props?.children ?? []) { const hit = find(child); if (hit) return hit; }
+    return null;
+  })(tree);
+  compactSelect.props.onChange({ target: { value: "" } });
+  assert.equal(changes.at(-1).compactAt, null, "Harness default is sent as null");
+  compactSelect.props.onChange({ target: { value: "500000" } });
+  assert.equal(changes.at(-1).compactAt, 500000);
   const byKey = await settle(React.createElement(type.CreateConfiguration, {
     config: { ...hardwareDefaults(), harness: "qwen", pays: "key" }, onChange: () => {}, disabled: false }));
   assert.deepEqual(selectsIn(byKey)[3].options, ["qwen4-max", "qwen3.7-plus"], "the key's listing");
@@ -410,8 +423,18 @@ test("render: Settings shows how the agent pays, and a change goes to its machin
   const { type, React, settle, asked } = hardwareOn(qwenFleet);
   const tree = await settle(React.createElement(type.tabs[0].component, { agent: { pubkey: PUBKEY } }));
   const selects = selectsIn(tree);
-  assert.deepEqual(selects.map((entry) => [entry.label, entry.value]), [["Pays with", "key"], ["Model", "qwen3.7-plus"]]);
+  assert.deepEqual(selects.map((entry) => [entry.label, entry.value]), [["Pays with", "key"], ["Model", "qwen3.7-plus"], ["Compact at", "250000"]]);
   assert.deepEqual(selects[1].options, ["qwen4-max", "qwen3.7-plus"], "the key's listing");
+  const compactSelect = (function find(node) {
+    if (!node || typeof node !== "object") return null;
+    if (node.type === "select" && node.props.value === "250000") return node;
+    for (const child of node.props?.children ?? []) { const hit = find(child); if (hit) return hit; }
+    return null;
+  })(tree);
+  compactSelect.props.onChange({ target: { value: "100000" } });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(asked.find((request) => request.op === "settings.set"), { op: "settings.set", pubkey: PUBKEY, compactAt: 100000 }, "the model and effort stay as they are");
+  asked.length = 0;
   const select = (function find(node) {
     if (!node || typeof node !== "object") return null;
     if (node.type === "select" && node.props.value === "key") return node;
@@ -748,6 +771,32 @@ test("a harness pays by subscription or by API key: each has its own sign-in sta
   assert.deepEqual(signInState(both, "qwen"), { kind: "signed-in", account: "owner@example.com" });
   assert.deepEqual(PAYS.map((entry) => entry.id), ["subscription", "key"]);
   assert.equal(hardwareDefaults().pays, "", "the machine settles it unless one is picked");
+});
+
+test("compact at: a choice where the machine takes it, greyed with its reason where not, nothing on an older machine", async () => {
+  const taking = { kind: "ok", harnesses: [{ id: "qwen", label: "Qwen Code", checked: true, model: "qwen4-max", effort: null,
+    models: [{ id: "qwen4-max", label: "qwen4-max", efforts: [] }], compact: { supported: true, min: 20000, max: 2000000, default: 150000 } }] };
+  const fresh = modelChoices(taking, "qwen", { model: "", effort: "" });
+  assert.equal(fresh.compact.value, "150000", "a new agent shows the machine's default for one");
+  assert.deepEqual(fresh.compact.options.map((entry) => entry.id), ["", ...COMPACT_OPTIONS.map(String)]);
+  assert.equal(fresh.compact.options[0].label, "Harness default");
+  assert.equal(modelChoices(taking, "qwen", { model: "", effort: "", compactAt: null }).compact.value, "", "the harness's default, chosen");
+  assert.equal(modelChoices(taking, "qwen", { model: "", effort: "", compactAt: 50000 }).compact.value, "50000");
+  const claude = { kind: "ok", harnesses: [{ id: "claude", label: "Claude Code", checked: true, model: "opus", effort: "high",
+    models: [{ id: "opus", label: "Opus", efforts: ["high"] }], compact: { supported: true, min: 100000, max: 1000000, default: 150000 } }] };
+  assert.deepEqual(modelChoices(claude, "claude", { model: "", effort: "" }).compact.options.map((entry) => entry.id), ["", "100000", "150000", "250000", "500000"], "below Claude Code's floor is not offered");
+  const grok = { kind: "ok", harnesses: [{ id: "grok", label: "Grok Build", checked: true, model: "grok-4.7", effort: "high",
+    models: [{ id: "grok-4.7", label: "Grok 4.7", efforts: ["high"] }], compact: { supported: false, note: "The machine does not know grok-4.7's context window yet; Grok Build lists it after its first run." } }] };
+  const greyed = modelChoices(grok, "grok", { model: "", effort: "" }).compact;
+  assert.equal(greyed.supported, false);
+  assert.match(greyed.note, /context window/);
+  assert.equal(modelChoices({ kind: "ok", harnesses: MODELS.harnesses }, "claude", { model: "", effort: "" }).compact, null, "an older machine: no choice");
+  const box = machine(() => ({ ok: true }));
+  const directory = agentDirectory(box.ask);
+  await setModel(box.ask, directory, { pubkey: PUBKEY, model: "", effort: "", compactAt: 250000 });
+  await setModel(box.ask, directory, { pubkey: PUBKEY, model: "", effort: "", compactAt: "" });
+  await setModel(box.ask, directory, { pubkey: PUBKEY, model: "opus", effort: "" });
+  assert.deepEqual(box.seen.map((entry) => entry.request.compactAt), [250000, null, undefined]);
 });
 
 test("an agent paying by key picks from the key's model listing", () => {

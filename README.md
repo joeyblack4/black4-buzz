@@ -145,10 +145,13 @@ sees only the sign-in it pays with.
   Qwen Code (pay-as-you-go or Token Plan).
 
 Qwen Code runs in a private home per sign-in with its self-update, usage
-statistics and managed memory off, and compacts its context early
-(`context.autoCompactThreshold` 0.08: about 80k tokens of qwen4-max's 1M
-window, since Black 4 tool results are large and would otherwise be re-read
-on every request; `tools.toolOutputBatchBudget` 100k characters). New agents run `qwen4-max` (or the next
+statistics and managed memory off (`tools.toolOutputBatchBudget` 100k
+characters). When an agent compacts its context is its own setting, **Compact
+at** next to Model and Effort (a new agent: 150k tokens; *Harness default*
+leaves it to the harness), through the lever each harness has per process;
+where a harness has none, or the machine does not know the model's window yet,
+the choice is greyed with the reason. Black 4 tool results are large, so this
+is what keeps a long session from re-reading them on every request. New agents run `qwen4-max` (or the next
 model that sign-in lists), with no effort setting: Qwen Code has no effort
 lever for a model it is given this way, so the service's default thinking for
 the model applies.

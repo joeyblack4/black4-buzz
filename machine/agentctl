@@ -8,7 +8,9 @@ agent.log.1 past 5 MB), and one buzz-acp process.
 
 Requests: {"op": ...} with op one of
   provision, activate, profile, instructions.get, instructions.set,
-  settings.set (model, effort, pays), remove, start, status, list   (one agent)
+  settings.set (model, effort, pays, compactAt, and buzz-acp's own levers:
+               agents, sessionPolicy, multipleEventHandling, maxTurnsPerSession,
+               maxTurnDuration, contextMessageLimit), remove, start, status, list   (one agent)
   identity                                (each agent's key and the owner it attests)
   machine.status                          (what this machine can run, and each
                                            harness's subscription and key sign-in)
@@ -843,18 +845,14 @@ def write_note(home, harness, first=""):
 # Qwen Code's private home settings: no update of itself, no usage statistics
 # or telemetry, and no managed memory (one folder shared by every Qwen agent
 # on the machine, written by a second, paid model call after every turn).
-# Context: Black 4 tool results are large (a job list or a business's skills
-# run to ~64k characters, the review queue past 90k) and sit in context, so
-# with a 1M window Qwen Code's own compaction (85% of the window) never came
-# and every request re-read them all. autoCompactThreshold is a fraction of
-# the window: 0.08 compacts at about 80k tokens on qwen4-max (a warning at
-# 60k). toolOutputBatchBudget caps one message's combined tool output in
-# characters (the rest is kept in a file the agent can read); Qwen Code's
-# default is 200k, 100k still lets one of those results through whole.
+# toolOutputBatchBudget caps one message's combined tool output in characters
+# (the rest is kept in a file the agent can read); Qwen Code's default is
+# 200k, 100k still lets a large Black 4 result (~64k) through whole. When
+# Qwen Code compacts its context is each agent's own setting (compactAt).
 QWEN_SETTINGS = {"general": {"enableAutoUpdate": False}, "privacy": {"usageStatisticsEnabled": False},
                  "telemetry": {"enabled": False},
                  "memory": {"enableManagedAutoMemory": False, "enableManagedAutoDream": False},
-                 "context": {"autoCompactThreshold": 0.08}, "tools": {"toolOutputBatchBudget": 100000}}
+                 "tools": {"toolOutputBatchBudget": 100000}}
 
 
 def qwen_home(base=None):
@@ -1362,7 +1360,7 @@ DEFAULT_HEARTBEAT_PROMPT = """Black 4 heartbeat: run whatever standing job is du
 
 1. Call the Black 4 tool start_next_standing_run with agent "{name}" and model {model}. If your tool list does not show it, find it with your tool search (for example tool_search "select:mcp__black4__start_next_standing_run") and run it through your tool caller, or call it through the Black 4 call_tool (name and arguments). If due is false, end your turn and post nothing.
 2. Otherwise do the run completely, exactly as its instructions say, for every business marked run: read its skills and goals, do the work, and publish what it asks for. Post in Buzz only where the instructions say (buzz messages send).
-3. Finish with finish_standing_run (the same way): runId, agent "{name}", model {model}, and businesses: one entry per business marked run, each with businessId, outcome (done, no_action or failed), a one-line summary and its reviewIds. Use failed only when you truly cannot do the work, and say why.
+3. Finish with finish_standing_run (the same way): runId, agent "{name}", model {model}, and businesses: one entry per business marked run, each with businessId, outcome (done, no_action or failed), a one-line summary and its reviewIds. Use failed only when you truly cannot do the work, and say why. End the run's summary with your context setting ({compact}) and, if your harness shows them, the tokens this run used.
 4. Call start_next_standing_run again and repeat. Do not start another run after 30 minutes of work, but never close a run undone to move on.
 """
 
@@ -1372,7 +1370,9 @@ def heartbeat_prompt(s):
     if custom: return custom + "\n"
     name = (s.get("name") or "a Black 4 agent").replace('"', "'")
     model = (s.get("model") or "").replace('"', "'")
-    return DEFAULT_HEARTBEAT_PROMPT.format(name=name, model=f'"{model}"' if model else "(your exact model id)")
+    compact_at = s.get("compactAt") if isinstance(s.get("compactAt"), int) and not isinstance(s.get("compactAt"), bool) else None
+    compact = f"compact at {compact_at:,} tokens" if compact_at else "compaction at your harness's default"
+    return DEFAULT_HEARTBEAT_PROMPT.format(name=name, model=f'"{model}"' if model else "(your exact model id)", compact=compact)
 
 
 def exact_model(picked):
@@ -1388,6 +1388,159 @@ def heartbeat_view(s):
     return {"heartbeat": heartbeat_minutes(s), "prompt": heartbeat_prompt(s).strip(),
             "custom": bool((s.get("heartbeatPrompt") or "").strip()),
             "defaultPrompt": heartbeat_prompt({**s, "heartbeatPrompt": ""}).strip()}
+
+
+# ---------------------------------------------------------------- buzz-acp's own levers, per agent
+# What buzz-acp 0.5.30 takes from the environment, as each agent's setting
+# (None: buzz-acp's own default): how many model processes run in parallel,
+# one session per channel or per thread, what a new @mention does to a turn
+# in flight, a fresh session after so many turns, the longest a turn may run
+# (seconds), and how many earlier messages come along as context. A heartbeat
+# agent keeps at least two parallel processes, so a person can still talk to
+# it while a scheduled run is going.
+
+CONTROLS = {  # setting -> (buzz-acp's environment variable, int bounds or the allowed values, buzz-acp's default)
+    "agents": ("BUZZ_ACP_AGENTS", (1, 8), 1),
+    "sessionPolicy": ("BUZZ_ACP_SESSION_POLICY", ("channel", "thread"), "channel"),
+    "multipleEventHandling": ("BUZZ_ACP_MULTIPLE_EVENT_HANDLING", ("steer", "queue", "interrupt", "owner-interrupt"), "steer"),
+    "maxTurnsPerSession": ("BUZZ_ACP_MAX_TURNS_PER_SESSION", (0, 10000), 0),
+    "maxTurnDuration": ("BUZZ_ACP_MAX_TURN_DURATION", (60, 86400), 7200),
+    "contextMessageLimit": ("BUZZ_ACP_CONTEXT_MESSAGE_LIMIT", (0, 100), 12),
+}
+
+
+def checked_control(name, value):
+    """A control from a request: None or "" for buzz-acp's default, else a
+    value within its bounds or among its values."""
+    if value in (None, ""): return None
+    _, allowed, _ = CONTROLS[name]
+    if isinstance(allowed[0], int):
+        if isinstance(value, bool) or not isinstance(value, int) or not allowed[0] <= value <= allowed[1]:
+            fail(f"{name} is a whole number from {allowed[0]} to {allowed[1]}, or null for buzz-acp's default")
+        return value
+    if value not in allowed: fail(f"{name} is one of {', '.join(allowed)}, or null for buzz-acp's default")
+    return value
+
+
+def controls_of(s):
+    """{setting: value or None} as saved for this agent."""
+    return {name: (s.get(name) if s.get(name) not in (None, "") else None) for name in CONTROLS}
+
+
+def control_env(s):
+    """The environment the saved controls set; a heartbeat agent runs at
+    least two parallel processes."""
+    env = {}
+    for name, (var, _, _) in CONTROLS.items():
+        value = s.get(name)
+        if value not in (None, ""): env[var] = str(value)
+    if heartbeat_minutes(s): env["BUZZ_ACP_AGENTS"] = str(max(2, int(env.get("BUZZ_ACP_AGENTS") or 1)))
+    return env
+
+
+def controls_schema():
+    return {name: {**({"min": allowed[0], "max": allowed[1]} if isinstance(allowed[0], int) else {"values": list(allowed)}), "default": default}
+            for name, (_, allowed, default) in CONTROLS.items()}
+
+
+# ---------------------------------------------------------------- when an agent compacts its context
+# Black 4 tool results are large (a job list or a business's skills ~64k
+# characters, the review queue 93k) and sit in context, so on a 1M window a
+# harness's own compaction (Qwen Code: 85% of the window) never came and every
+# request re-read them all. Each agent has its own compactAt (tokens; None is
+# the harness's default), so Joey can experiment, through the lever each
+# pinned CLI has per process (checked on the Commerce Mac, 2026-11-17):
+#   Claude Code  CLAUDE_CODE_AUTO_COMPACT_WINDOW=<tokens>, 100k to 1M: the
+#                window it compacts against (it compacts a little before it).
+#   Codex        CODEX_CONFIG model_auto_compact_token_limit (tokens).
+#   Grok Build   GROK_AUTO_COMPACT_THRESHOLD_PERCENT, 0 to 100 of the model's
+#                context window (from its own cached listing).
+#   Qwen Code    context.autoCompactThreshold, a fraction of the model's
+#                window (1M for the models it lists), in the workspace
+#                settings file of the agent's own working folder
+#                (work/.qwen/settings.json; the home's settings.json is shared
+#                by every agent on that slot).
+# A harness without the lever, or whose window the machine cannot tell yet,
+# says so (`compact.note`), and the plugin greys the choice out.
+
+COMPACT_MIN, COMPACT_MAX, COMPACT_DEFAULT = 20_000, 2_000_000, 150_000  # tokens
+COMPACT = {
+    "claude": {"min": 100_000, "max": 1_000_000},
+    "codex": {},
+    "grok": {},
+    "qwen": {},
+}
+QWEN_WINDOW = 1_000_000  # every model Qwen Code 0.27.4 lists for QwenCloud and the membership
+
+
+def context_window(harness, model):
+    """The model's context window in tokens, as far as this machine knows."""
+    if harness == "qwen":
+        for slot in ("qwen", "qwen-key"):
+            for row in (read_json(HOMES / slot / MEMBER["qwen"]["cred"], {}) or {}).get("modelMetadata") or []:
+                if isinstance(row, dict) and row.get("id") == model and isinstance(row.get("contextWindowSize"), int): return row["contextWindowSize"]
+        return QWEN_WINDOW
+    if harness == "grok":
+        for slot in ("grok", "grok-key"):
+            cache = read_json(HOMES / slot / "models_cache.json")
+            info = ((cache or {}).get("models") or {}).get(model, {}).get("info") if isinstance(cache, dict) else None
+            if isinstance(info, dict) and isinstance(info.get("context_window"), int): return info["context_window"]
+    return None
+
+
+def compact_support(harness, model=None):
+    """{supported, min, max, default, note}: whether this harness, on this
+    model, takes a per-agent compaction setting here."""
+    spec = COMPACT.get(harness)
+    if spec is None:
+        return {"supported": False, "note": f"{LABEL.get(harness, harness)} has no setting for when it compacts its context."}
+    out = {"supported": True, "min": spec.get("min", COMPACT_MIN), "max": spec.get("max", COMPACT_MAX), "default": COMPACT_DEFAULT}
+    if harness == "grok" and model and context_window(harness, model) is None:
+        return {**out, "supported": False, "note": f"The machine does not know {model}'s context window yet; Grok Build lists it after its first run."}
+    return out
+
+
+def checked_compact(harness, value, model=None):
+    """A compactAt from a request: None, "" or 0 for the harness's default,
+    else tokens within the harness's range. Refused where it cannot apply."""
+    if value in (None, "", 0): return None
+    if isinstance(value, bool) or not isinstance(value, int): fail("compactAt is a number of tokens, or null for the harness's default")
+    support = compact_support(harness, model)
+    if not support["supported"]: fail(support["note"])
+    if not support["min"] <= value <= support["max"]:
+        fail(f"{LABEL[harness]} compacts at {support['min']:,} to {support['max']:,} tokens here.")
+    return value
+
+
+def default_compact(harness, model=None):
+    """What a new agent gets: COMPACT_DEFAULT where the harness takes it."""
+    return COMPACT_DEFAULT if compact_support(harness, model)["supported"] else None
+
+
+def compact_levers(harness, model, compact_at, work):
+    """What makes the harness compact at `compact_at` tokens: environment
+    variables, and for Qwen Code its workspace settings file in `work`
+    (written, or our key taken out again for the harness's default)."""
+    env = {}
+    if harness == "qwen":
+        path = work / ".qwen" / "settings.json"
+        old = read_json(path, {})
+        new = json.loads(json.dumps(old)) if isinstance(old, dict) else {}
+        context = new.get("context") if isinstance(new.get("context"), dict) else {}
+        if compact_at: context["autoCompactThreshold"] = round(min(1.0, max(0.01, compact_at / context_window("qwen", model))), 4)
+        else: context.pop("autoCompactThreshold", None)
+        if context: new["context"] = context
+        else: new.pop("context", None)
+        if new != old:
+            if new: private_dir(work / ".qwen"); write_private(path, json.dumps(new, indent=2) + "\n")
+            elif path.exists(): path.unlink()
+        return env
+    if not compact_at: return env
+    if harness == "claude": env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(compact_at)
+    elif harness == "grok":
+        window = context_window("grok", model)
+        if window: env["GROK_AUTO_COMPACT_THRESHOLD_PERCENT"] = str(min(100, max(1, round(100 * compact_at / window))))
+    return env
 
 
 # ---------------------------------------------------------------- model and effort
@@ -1710,9 +1863,10 @@ def choice(harness, settings, models=False):
     return out
 
 
-def launch(harness, picked, pays="subscription"):
+def launch(harness, picked, pays="subscription", compact_at=None):
     """(env, agent args) that make this harness run the picked model and effort
-    on the way it pays (the sign-in itself is added by start)."""
+    on the way it pays (the sign-in itself is added by start), and compact at
+    `compact_at` tokens where that is an environment matter."""
     model, effort = picked.get("model"), picked.get("effort")
     # From a saved setting or a harness's own listing: checked again here,
     # since Grok's go into comma-separated arguments.
@@ -1724,7 +1878,8 @@ def launch(harness, picked, pays="subscription"):
         if model: env["ANTHROPIC_MODEL"] = model
         if effort: env["CLAUDE_CODE_EFFORT_LEVEL"] = effort
     elif harness == "codex":
-        config = {**({"model": model} if model else {}), **({"model_reasoning_effort": effort} if effort else {})}
+        config = {**({"model": model} if model else {}), **({"model_reasoning_effort": effort} if effort else {}),
+                  **({"model_auto_compact_token_limit": compact_at} if compact_at else {})}
         if config: env["CODEX_CONFIG"] = json.dumps(config)
     elif harness == "grok":
         extra = (["--model", model] if model else []) + (["--reasoning-effort", effort] if effort else [])
@@ -1758,6 +1913,7 @@ def models_reply():
         picked = choice(hid, {"pays": pays}, models)
         return {"models": models or [], "checked": models is not None,
                 "model": picked.get("model"), "effort": picked.get("effort"),
+                "compact": compact_support(hid, picked.get("model")),
                 **({"note": picked["note"]} if picked.get("note") else {})}
     rows = []
     for hid in DEFAULTS:
@@ -1766,7 +1922,7 @@ def models_reply():
         # reads), the key's under `key`.
         rows.append({"id": hid, "label": LABEL[hid], **listing(hid, "subscription"),
                      **({"key": listing(hid, "key")} if hid in KEYS else {})})
-    return {"ok": True, "harnesses": rows}
+    return {"ok": True, "harnesses": rows, "controls": controls_schema()}
 
 
 def checked_choice(harness, model, effort, pays="subscription"):
@@ -1834,9 +1990,12 @@ def _start(d):
     if model_source(slot) and listing_due(slot): refresh_models(slot, wait=True)
     picked = choice(harness, s)
     if picked.get("problem"): fail(picked["problem"])
-    model_env, args = launch(harness, picked, pays)
+    compact_at = s.get("compactAt") if isinstance(s.get("compactAt"), int) and not isinstance(s.get("compactAt"), bool) else None
+    model_env, args = launch(harness, picked, pays, compact_at)
     stop(d)
     (d / "launch.json").unlink(missing_ok=True)
+    (d / "work").mkdir(exist_ok=True)
+    model_env.update(compact_levers(harness, picked.get("model"), compact_at, d / "work"))
     command = HARNESS[harness][0]
     env.update(root_env())  # so the agent's own agentctl calls reach this root
     env.update(TURN_LOG)    # buzz-acp's turn lines, which a self-change waits for
@@ -1866,6 +2025,7 @@ def _start(d):
             "BUZZ_ACP_HEARTBEAT_PROMPT_FILE": str(d / "heartbeat.md"),
             "BUZZ_ACP_AGENTS": "2",
         })
+    env.update(control_env(s))  # buzz-acp's own levers, as this agent set them
     if args: env["BUZZ_ACP_AGENT_ARGS"] = args
     env.update(FULL_ACCESS[harness])
     # buzz-acp declares one MCP server per session and hands it the agent's key
@@ -1878,8 +2038,7 @@ def _start(d):
         env["BUZZ_ACP_SYSTEM_PROMPT_FILE"] = str(d / "instructions.md")
     # Never BUZZ_ACP_MODEL: see "model and effort" above.
     env.update(model_env)
-    write_private(d / "launch.json", json.dumps({k: picked.get(k) for k in ("model", "effort", "note", "checked")}))
-    (d / "work").mkdir(exist_ok=True)
+    write_private(d / "launch.json", json.dumps({**{k: picked.get(k) for k in ("model", "effort", "note", "checked")}, "compactAt": compact_at}))
     cap_log(d / "agent.log", AGENT_LOG_CAP)
     log = open(d / "agent.log", "ab")
     proc = subprocess.Popen(
@@ -1940,8 +2099,10 @@ def stop_harness_agents(harness, pays=None):
 APPLY_WAIT = 10 * 60   # a self-change waits this long for the agent's turn to end
 TURN_SETTLE = 5        # then this long of a quiet log, for the reply to go out
 TURN_LOG = {"RUST_LOG": "info,acp::wire=debug"}  # buzz-acp's ACP traffic, in agent.log
-TURN_OPEN = re.compile(rb'acp::wire: \xe2\x86\x92 .*"method": "session/prompt"')  # → a prompt sent
-TURN_CLOSE = re.compile(rb'acp::wire: \xe2\x86\x90 .*"result": \{"stopReason"')  # ← its result
+# buzz-acp writes what it sends compactly and what it receives as the agent
+# wrote it (Qwen Code without spaces, Python agents with), so spaces are optional.
+TURN_OPEN = re.compile(rb'acp::wire: \xe2\x86\x92 .*"method":\s*"session/prompt"')  # → a prompt sent
+TURN_CLOSE = re.compile(rb'acp::wire: \xe2\x86\x90 .*"result":\s*\{\s*"stopReason"')  # ← its result
 APPLY_MARK = "applying.json"
 
 
@@ -2755,7 +2916,8 @@ def model_fields(s, cache=None, d=None):
     keeps one offered() per harness across a list."""
     harness = s.get("harness") or "claude"
     if harness not in DEFAULTS: return {"model": None, "effort": None}
-    chosen = {"modelChosen": bool(s.get("model")), "effortChosen": bool(s.get("effort"))}
+    compact_at = s.get("compactAt") if isinstance(s.get("compactAt"), int) and not isinstance(s.get("compactAt"), bool) else None
+    chosen = {"modelChosen": bool(s.get("model")), "effortChosen": bool(s.get("effort")), "compactAt": compact_at, "controls": controls_of(s)}
     slot = slot_of(harness, pays_of(s))
     if cache is None: cache = {}
     if slot not in cache: cache[slot] = offered(slot)
@@ -2828,6 +2990,10 @@ def handle(req):
         # machine's sign-ins would move the agent's bill without a word.
         pays = checked_pays(harness, config.get("pays"))
         model, effort = checked_choice(harness, config.get("model"), config.get("effort"), pays)
+        # When it compacts its context: 150k tokens for a new agent, where the
+        # harness takes it on the model the agent will run.
+        runs = model or choice(harness, {"pays": pays}).get("model")
+        compact_at = checked_compact(harness, config["compactAt"], runs) if config.get("compactAt") not in (None, "") else default_compact(harness, runs)
         secret = secrets.token_hex(32)
         while not 0 < int(secret, 16) < N: secret = secrets.token_hex(32)
         pubkey = pubkey_of(secret)
@@ -2838,7 +3004,7 @@ def handle(req):
         write_settings(d, {
             "name": name, "picture": req.get("picture"), "requestId": req.get("requestId"),
             "community": community,
-            "harness": harness, "pays": pays, "model": model, "effort": effort,
+            "harness": harness, "pays": pays, "model": model, "effort": effort, "compactAt": compact_at,
             "instructions": config.get("instructions") or "",
             "respondTo": config.get("respondTo") or "owner-only",
             "allow": [k for k in (config.get("allow") or []) if HEX64.match(str(k))],
@@ -2886,12 +3052,13 @@ def handle(req):
             fail("auth must be a NIP-OA tag: [auth, owner, conditions, signature]")
         s["auth"] = auth
         s["community"] = community_url(req.get("community") or s["community"])
-        for key in ("harness", "model", "effort", "instructions", "respondTo", "heartbeat", "pays"):
+        for key in ("harness", "model", "effort", "instructions", "respondTo", "heartbeat", "pays", "compactAt"):
             if (req.get("config") or {}).get(key) is not None: s[key] = req["config"][key]
         harness = s.get("harness") or "claude"
         if harness not in HARNESS: fail(f"unknown harness {str(harness)[:40]!r}")
         s["pays"] = checked_pays(harness, s.get("pays"))
         s["model"], s["effort"] = checked_choice(harness, s.get("model"), s.get("effort"), s["pays"])
+        if "compactAt" in s: s["compactAt"] = checked_compact(harness, s.get("compactAt"), s.get("model") or None)
         write_settings(d, s)
         pid = start(d)
         ok, detail = publish_profile(d)
@@ -2937,9 +3104,10 @@ def handle(req):
         return {"ok": True, **later}
 
     if op == "settings.set":
-        # The agent's model and effort ("" is the harness's default here) and
-        # how it pays ("subscription" or "key"; "" settles the machine's default
-        # now). A field left out stays as it was; a new way of paying drops a
+        # The agent's model and effort ("" is the harness's default here), how
+        # it pays ("subscription" or "key"; "" settles the machine's default
+        # now) and compactAt (tokens; null for the harness's default). A field
+        # left out stays as it was; a new way of paying drops a
         # model and effort not sent with it, since the other sign-in offers its
         # own. An activated agent restarts on them.
         with agent_lock(d):
@@ -2951,6 +3119,9 @@ def handle(req):
             effort = req["effort"] if "effort" in req else ("" if changed else s.get("effort"))
             s["model"], s["effort"] = checked_choice(harness, model, effort, pays)
             s["pays"] = pays
+            if "compactAt" in req: s["compactAt"] = checked_compact(harness, req["compactAt"], s["model"] or choice(harness, s).get("model"))
+            for name in CONTROLS:
+                if name in req: s[name] = checked_control(name, req[name])
             write_settings(d, s)
             if s.get("auth"): defer_apply(d) if me else _start(d)
         return {"ok": True, "pays": pays, **model_fields(s, d=d), **later}

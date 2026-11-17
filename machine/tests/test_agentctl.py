@@ -723,7 +723,9 @@ class SelfChange(Base):
         r = self.req(op="start", pubkey=agent.name)
         self.assertEqual((r["pid"], r["applies"]), (pid, "after this turn"))
         self.assertEqual(self.a.running(agent), pid)
-        self.assertEqual(spawned, [agent.name] * 4)
+        self.assertEqual(self.req(op="settings.set", pubkey=agent.name, compactAt=250000)["applies"], "after this turn", "its context setting too")
+        self.assertEqual(self.a.read_settings(agent)["compactAt"], 250000)
+        self.assertEqual(spawned, [agent.name] * 5)
         self.a.supervise_pass()
         self.assertEqual(self.a.running(agent), pid, "the supervisor leaves it to the waiter")
 
@@ -1345,7 +1347,7 @@ class KeyLogin(DeviceBase):
         self.assertFalse(settings["telemetry"]["enabled"])
         self.assertEqual(settings["memory"], {"enableManagedAutoMemory": False, "enableManagedAutoDream": False},
                          "no shared memory folder, no second model call per turn")
-        self.assertEqual(settings["context"], {"autoCompactThreshold": 0.08}, "compaction at about 80k tokens of a 1M window")
+        self.assertNotIn("context", settings, "when it compacts is each agent's own setting, not the shared home's")
         self.assertEqual(settings["tools"], {"toolOutputBatchBudget": 100000})
         self.assertTrue((self.a.HOMES / "qwen-key" / "QWEN.md").read_text().startswith(self.a.DEFERRED_MCP_NOTE["qwen"]))
         self.assertFalse((self.home / ".qwen").exists(), "never the machine user's own ~/.qwen")
@@ -1775,6 +1777,99 @@ class HarnessKeys(DeviceBase):
             self.assertIn(f"{label}: signed out (subscription signed out, API key signed out)", out.getvalue())
 
 
+class CompactAt(DeviceBase):
+    """When each agent compacts its context: its own setting, through the lever
+    each harness has per process, and buzz-acp's own levers per agent."""
+    def setUp(self):
+        super().setUp()
+        self.sign_in(); self.sign_in_device("codex"); self.sign_in_device("grok"); self.sign_in_member()
+        for harness, cache in (("codex", CODEX_MODELS), ("grok", GROK_MODELS)):
+            (self.a.private_dir(self.a.HOMES / harness) / "models_cache.json").write_text(json.dumps(cache))
+
+    def test_a_new_agent_compacts_at_150k_where_its_harness_takes_it(self):
+        for harness in ("claude", "codex", "grok", "qwen"):
+            with self.subTest(harness=harness):
+                agent = self.make_agent(harness, activate=False)
+                self.assertEqual(self.req(op="status", pubkey=agent.name)["compactAt"], 150000)
+        rows = {h["id"]: h for h in self.req(op="models")["harnesses"]}
+        self.assertEqual(rows["claude"]["compact"], {"supported": True, "min": 100000, "max": 1000000, "default": 150000})
+        self.assertEqual(rows["qwen"]["compact"]["supported"], True)
+        self.assertEqual(rows["grok"]["compact"]["supported"], True, "grok-4.7's window is in its cached listing")
+        (self.a.HOMES / "grok" / "models_cache.json").unlink()
+        grok = next(h for h in self.req(op="models")["harnesses"] if h["id"] == "grok")["compact"]
+        self.assertEqual(grok["supported"], False)
+        self.assertEqual(grok["note"], "The machine does not know grok-4.7's context window yet; Grok Build lists it after its first run.")
+        later = self.req(op="provision", name="Grok, later", community="wss://relay.example.com", config={"harness": "grok"})
+        self.assertIsNone(self.req(op="status", pubkey=later["pubkey"])["compactAt"], "then a new Grok agent keeps the harness default")
+        self.assertIn("does not know grok-4.7's context window", self.req(op="provision", name="Grok, chosen", community="wss://relay.example.com", config={"harness": "grok", "compactAt": 100000})["error"])
+        existing = self.make_agent("claude", activate=False)
+        st = self.a.read_settings(existing); del st["compactAt"]; self.a.write_settings(existing, st)
+        self.assertIsNone(self.req(op="status", pubkey=existing.name)["compactAt"], "an agent from before keeps the harness default")
+
+    def test_each_harness_gets_its_own_lever(self):
+        claude = self.env_after_start(self.make_agent("claude"))
+        self.assertEqual(claude["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], "150000")
+        codex = self.env_after_start(self.make_agent("codex"))
+        self.assertEqual(json.loads(codex["CODEX_CONFIG"])["model_auto_compact_token_limit"], 150000)
+        grok = self.env_after_start(self.make_agent("grok"))
+        self.assertEqual(grok["GROK_AUTO_COMPACT_THRESHOLD_PERCENT"], "59", "150k of grok-4.7's 256k window")
+        qwen_agent = self.make_agent("qwen")
+        qwen = self.env_after_start(qwen_agent)
+        self.assertNotIn("CLAUDE_CODE_AUTO_COMPACT_WINDOW", qwen)
+        workspace = json.loads((qwen_agent / "work" / ".qwen" / "settings.json").read_text())
+        self.assertEqual(workspace, {"context": {"autoCompactThreshold": 0.15}}, "150k of qwen4-max's 1M window, in the agent's own folder")
+        self.assertNotIn("context", json.loads((self.a.HOMES / "qwen" / "settings.json").read_text()), "the shared home carries no threshold")
+        self.assertEqual(json.loads((qwen_agent / "launch.json").read_text())["compactAt"], 150000)
+
+    def test_settings_set_changes_it_within_each_harness_s_range(self):
+        agent = self.make_agent("claude")
+        self.assertEqual(self.req(op="settings.set", pubkey=agent.name, compactAt=50000)["error"], "Claude Code compacts at 100,000 to 1,000,000 tokens here.")
+        self.assertEqual(self.req(op="settings.set", pubkey=agent.name, compactAt="lots")["error"], "compactAt is a number of tokens, or null for the harness's default")
+        done = self.req(op="settings.set", pubkey=agent.name, compactAt=250000)
+        self.assertEqual((done["compactAt"], done["model"]), (250000, "claude-fable-5-2"))
+        self.assertEqual(json.loads((agent / "work" / "env.json").read_text())["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], "250000")
+        done = self.req(op="settings.set", pubkey=agent.name, compactAt=None)
+        self.assertIsNone(done["compactAt"])
+        self.assertNotIn("CLAUDE_CODE_AUTO_COMPACT_WINDOW", json.loads((agent / "work" / "env.json").read_text()), "the harness's own default again")
+        qwen_agent = self.make_agent("qwen")
+        self.env_after_start(qwen_agent)
+        (qwen_agent / "work" / ".qwen" / "settings.json").write_text(json.dumps({"context": {"autoCompactThreshold": 0.15}, "ui": {"theme": "dark"}}))
+        self.req(op="settings.set", pubkey=qwen_agent.name, compactAt=None)
+        self.assertEqual(json.loads((qwen_agent / "work" / ".qwen" / "settings.json").read_text()), {"ui": {"theme": "dark"}}, "our key goes, the agent's own stay")
+        self.req(op="settings.set", pubkey=qwen_agent.name, compactAt=500000)
+        self.assertEqual(json.loads((qwen_agent / "work" / ".qwen" / "settings.json").read_text())["context"], {"autoCompactThreshold": 0.5})
+        rows = {a["pubkey"]: a for a in self.req(op="list")["agents"]}
+        self.assertEqual(rows[qwen_agent.name]["compactAt"], 500000)
+        self.assertIn("compact at 500,000 tokens", self.a.heartbeat_prompt(self.a.read_settings(qwen_agent)))
+        self.assertIn("compaction at your harness's default", self.a.heartbeat_prompt({"name": "x"}))
+
+    def test_buzz_acps_own_levers_are_per_agent_and_a_heartbeat_keeps_two_in_parallel(self):
+        agent = self.make_agent("claude")
+        self.assertEqual(self.req(op="settings.set", pubkey=agent.name, agents=9)["error"], "agents is a whole number from 1 to 8, or null for buzz-acp's default")
+        self.assertEqual(self.req(op="settings.set", pubkey=agent.name, sessionPolicy="room")["error"], "sessionPolicy is one of channel, thread, or null for buzz-acp's default")
+        done = self.req(op="settings.set", pubkey=agent.name, agents=3, sessionPolicy="thread", multipleEventHandling="queue",
+                        maxTurnsPerSession=40, maxTurnDuration=900, contextMessageLimit=0)
+        self.assertEqual(done["controls"], {"agents": 3, "sessionPolicy": "thread", "multipleEventHandling": "queue",
+                                            "maxTurnsPerSession": 40, "maxTurnDuration": 900, "contextMessageLimit": 0})
+        env = json.loads((agent / "work" / "env.json").read_text())
+        self.assertEqual([env[k] for k in ("BUZZ_ACP_AGENTS", "BUZZ_ACP_SESSION_POLICY", "BUZZ_ACP_MULTIPLE_EVENT_HANDLING", "BUZZ_ACP_MAX_TURNS_PER_SESSION", "BUZZ_ACP_MAX_TURN_DURATION", "BUZZ_ACP_CONTEXT_MESSAGE_LIMIT")],
+                         ["3", "thread", "queue", "40", "900", "0"])
+        self.req(op="settings.set", pubkey=agent.name, agents=None, maxTurnDuration="")
+        env = json.loads((agent / "work" / "env.json").read_text())
+        self.assertNotIn("BUZZ_ACP_AGENTS", env, "buzz-acp's default again")
+        self.assertNotIn("BUZZ_ACP_MAX_TURN_DURATION", env)
+        self.assertEqual(self.req(op="status", pubkey=agent.name)["controls"]["agents"], None)
+        self.req(op="heartbeat.set", pubkey=agent.name, minutes=15)
+        self.assertEqual(json.loads((agent / "work" / "env.json").read_text())["BUZZ_ACP_AGENTS"], "2", "a heartbeat agent keeps two")
+        self.req(op="settings.set", pubkey=agent.name, agents=4)
+        self.assertEqual(json.loads((agent / "work" / "env.json").read_text())["BUZZ_ACP_AGENTS"], "4")
+        self.req(op="settings.set", pubkey=agent.name, agents=1)
+        self.assertEqual(json.loads((agent / "work" / "env.json").read_text())["BUZZ_ACP_AGENTS"], "2", "never below two while it has a heartbeat")
+        schema = self.req(op="models")["controls"]
+        self.assertEqual(schema["multipleEventHandling"], {"values": ["steer", "queue", "interrupt", "owner-interrupt"], "default": "steer"})
+        self.assertEqual(schema["maxTurnDuration"], {"min": 60, "max": 86400, "default": 7200})
+
+
 def install_pinned(a, home):
     """Lays out what setup.sh installs, at the versions in machine/pins.json."""
     pins = json.loads((AGENTCTL.parent / "pins.json").read_text())
@@ -2123,7 +2218,7 @@ CODEX_MODELS = {"client_version": "0.160.1", "models": [
      "supported_reasoning_levels": [{"effort": "medium"}]},
 ]}
 GROK_MODELS = {"grok_version": "1.0.70", "models": {
-    "grok-4.7": {"info": {"id": "grok-4.7", "name": "Grok 4.7", "hidden": False, "supports_reasoning_effort": True,
+    "grok-4.7": {"info": {"id": "grok-4.7", "name": "Grok 4.7", "hidden": False, "supports_reasoning_effort": True, "context_window": 256000,
                           "reasoning_efforts": [{"value": e} for e in ("xhigh", "high", "medium", "low")]}},
     "grok-4.5": {"info": {"id": "grok-4.5", "name": "Grok 4.5", "hidden": False, "supports_reasoning_effort": True,
                           "reasoning_efforts": [{"value": e} for e in ("medium", "low")]}},
@@ -2227,7 +2322,7 @@ class ModelAndEffort(DeviceBase):
         self.assertNotIn("BUZZ_ACP_MODEL", env, "buzz-acp keeps the default model when the adapter refuses it, silently")
         self.assertNotIn("BUZZ_ACP_EFFORT_LEVEL", env)
         env = self.env_of(self.make_agent("codex"))
-        self.assertEqual(json.loads(env["CODEX_CONFIG"]), {"model": "gpt-6-astra", "model_reasoning_effort": "high"})
+        self.assertEqual(json.loads(env["CODEX_CONFIG"]), {"model": "gpt-6-astra", "model_reasoning_effort": "high", "model_auto_compact_token_limit": 150000})
         self.assertEqual(env["INITIAL_AGENT_MODE"], "agent-full-access")
         env = self.env_of(self.make_agent("grok"))
         self.assertEqual(env["BUZZ_ACP_AGENT_ARGS"], "agent,--model,grok-4.7,--reasoning-effort,high,--always-approve,stdio")
@@ -2286,7 +2381,7 @@ class ModelAndEffort(DeviceBase):
         (self.a.HOMES / "codex" / "models_cache.json").unlink()
         agent = self.make_agent("codex")
         env = self.env_of(agent)
-        self.assertEqual(json.loads(env["CODEX_CONFIG"]), {"model": "gpt-6-astra", "model_reasoning_effort": "high"})
+        self.assertEqual(json.loads(env["CODEX_CONFIG"]), {"model": "gpt-6-astra", "model_reasoning_effort": "high", "model_auto_compact_token_limit": 150000})
         self.assertFalse(json.loads((agent / "launch.json").read_text())["checked"])
         row = next(h for h in self.req(op="models")["harnesses"] if h["id"] == "codex")
         self.assertEqual((row["models"], row["checked"]), ([], False))

@@ -423,7 +423,7 @@ test("buzzUi draws Buzz's primitives: its classes, data attributes and structure
     [["buzz-select-option", false, undefined], ["buzz-select-option", true, undefined], ["buzz-select-option", false, ""]]);
   assert.equal(find(options[1], (node) => has(node, "buzz-select-indicator")).props["data-selected"], "", "the check shows on the chosen one only");
   const loading = (function render(node) { return typeof node.type === "function" ? render(node.type(node.props)) : node; })(h(ui.Button, { loading: true }, "Save"));
-  assert.deepEqual([loading.props["data-loading"], loading.props.disabled, loading.props.children[1].props.className], [true, true, "buzz-button-spinner tabler-icon tabler-icon-loader-2"]);
+  assert.deepEqual([loading.props["data-loading"], loading.props.disabled, loading.props.children[1].props.className], [true, true, "buzz-button-spinner"]);
   const native = (function render(node) { return typeof node.type === "function" ? render(node.type(node.props)) : node; })(
     h(buzzUi(React, { nativeSelect: true }).Pill, { label: "Model", value: "a", options: [{ id: "a", label: "A" }], onChange: () => {} }));
   assert.ok(find(native, (node) => node.type === "select"), "the fallback keeps a native select under the same pill");

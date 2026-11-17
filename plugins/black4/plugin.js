@@ -2479,14 +2479,27 @@ export async function setModel(ask, directory, { pubkey, model, effort, pays, co
  * OS menu opens) instead of Buzz's own popup. Off: the popup is Buzz's. */
 export const NATIVE_SELECT = false;
 
-// Tabler icons 3.46 (chevron-down, check, loader-2): Buzz's CaretDownIcon, CheckIcon and CircleNotchIcon.
-const ICON = { chevron: "M6 9l6 6l6 -6", check: "M5 12l5 5l10 -10", loader: "M12 3a9 9 0 1 0 9 9" };
+// ---- buzz-ui kit: stamped from kit/buzz-ui.js by `npm run kit`; edit it there ----
+// Black 4's Buzz UI kit: Buzz's own design-system primitives (Buzz 1.0.4,
+// block/buzz-app `src/shared/design-system/ui`) drawn as plain elements with
+// Buzz's classes, data attributes and structure, so Buzz's stylesheet paints
+// them and a plugin screen looks like Buzz's own.
+//
+// The one place a Black 4 plugin draws a control. `npm run kit` stamps this
+// file, unchanged, into every plugin that carries the kit markers (Buzz runs
+// no build, so each plugin.js holds its own copy); `npm run check` refuses a
+// stale copy. What it uses of Buzz is listed in kit/uses.json, which the Buzz
+// canary checks every day. Rules: kit/README.md.
+//
+// It must run at a module's top level and inside a plugin's apply(), so it
+// declares one function and nothing else.
 
-/** Buzz's design-system primitives (Buzz 1.0.4, `src/shared/design-system/ui`)
- * as plain elements with the same classes, data attributes and structure, so
- * Buzz's own stylesheet paints them. Nothing else in the hardware part draws a
- * control. Each takes what Buzz's component takes, in Buzz's names. */
-export function buzzUi(React, { nativeSelect = NATIVE_SELECT } = {}) {
+/** Each part takes what Buzz's component takes, in Buzz's names.
+ * `nativeSelect`: draw dropdowns as the pill over a native <select> (the OS
+ * menu opens) instead of Buzz's popup. */
+function buzzUi(React, { nativeSelect = false } = {}) {
+  // Tabler icons 3.46 (chevron-down, check, loader-2): Buzz's CaretDownIcon, CheckIcon and CircleNotchIcon.
+  const ICON = { chevron: "M6 9l6 6l6 -6", check: "M5 12l5 5l10 -10", loader: "M12 3a9 9 0 1 0 9 9" };
   const h = React.createElement;
   const Fragment = React.Fragment;
   const icon = (path, size, props = {}) => h("svg", { xmlns: "http://www.w3.org/2000/svg", width: `${size / 16}rem`, height: `${size / 16}rem`,
@@ -2522,7 +2535,7 @@ export function buzzUi(React, { nativeSelect = NATIVE_SELECT } = {}) {
         typeof trailing === "function" ? trailing({ "aria-labelledby": titleId, "aria-describedby": descriptionId }) : trailing));
   };
 
-  /** Button.tsx: variant prominent | subtle | outline | ghost | destructive; size sm | md;
+  /** Button.tsx: variant prominent | subtle | outline | destructive; size sm | md;
    * shape capsule | control. `loading` hides the label under Buzz's spinner.
    * With `href` it is a link that looks the same (Buzz renders links through Button too). */
   const Button = ({ variant = "subtle", size = "md", shape = "capsule", type = "button", loading = false, disabled, onClick, href, children, ...props }) => {
@@ -2531,24 +2544,24 @@ export function buzzUi(React, { nativeSelect = NATIVE_SELECT } = {}) {
       "data-disabled": disabled || loading ? "" : undefined, "data-loading": loading || undefined };
     const body = [
       h("span", { key: "label", className: "buzz-button-label" }, children),
-      loading ? icon(ICON.loader, 18, { key: "spinner", className: "buzz-button-spinner tabler-icon tabler-icon-loader-2" }) : null,
+      loading ? icon(ICON.loader, 18, { key: "spinner", className: "buzz-button-spinner" }) : null,
     ];
     if (href) return h("a", { ...shared, href, target: "_blank", rel: "noopener noreferrer", onClick }, ...body);
     return h("button", { ...shared, type, disabled: disabled || loading,
       onClick: (event) => { if (loading || disabled) { event.preventDefault(); return; } onClick?.(event); } }, ...body);
   };
 
-  /** Input.tsx: one line of text. */
-  const Input = ({ controlSize = "md", ...props }) =>
-    h("input", { type: "text", ...props, "data-buzz-ui": "", "data-size": controlSize, className: "buzz-input" });
+  /** Input.tsx: one line of text. `width` fixes its width (a CSS length). */
+  const Input = ({ controlSize = "md", width, ...props }) =>
+    h("input", { type: "text", ...props, ...(width ? { style: { width } } : {}), "data-buzz-ui": "", "data-size": controlSize, className: "buzz-input" });
 
   /** Switch.tsx without its own label: the row names it. */
   const Switch = ({ id, checked, disabled, onCheckedChange, ...aria }) =>
     h("button", { type: "button", role: "switch", id, "aria-checked": checked, ...aria, disabled,
         "data-buzz-ui": "", className: "buzz-switch-control",
-        "data-checked": checked ? "" : undefined, "data-unchecked": checked ? undefined : "", "data-disabled": disabled ? "" : undefined,
+        "data-checked": checked ? "" : undefined, "data-disabled": disabled ? "" : undefined,
         onClick: () => { if (!disabled) onCheckedChange(!checked); } },
-      h("span", { className: "buzz-switch-thumb", "data-checked": checked ? "" : undefined, "data-unchecked": checked ? undefined : "" }));
+      h("span", { className: "buzz-switch-thumb", "data-checked": checked ? "" : undefined }));
 
   /** SwitchPreferenceRow.tsx. */
   const SwitchRow = ({ id, label, description, checked, disabled, onCheckedChange }) => {
@@ -2558,7 +2571,7 @@ export function buzzUi(React, { nativeSelect = NATIVE_SELECT } = {}) {
       trailing: (aria) => h(Switch, { ...aria, id: controlId, "aria-label": label, checked, disabled, onCheckedChange }) });
   };
 
-  const chevron = () => h("span", { "aria-hidden": true }, icon(ICON.chevron, 14, { className: "buzz-dropdown-chevron tabler-icon tabler-icon-chevron-down" }));
+  const chevron = () => h("span", { "aria-hidden": true }, icon(ICON.chevron, 14, { className: "buzz-dropdown-chevron" }));
   const shown = (current, placeholder) => h("span", { className: "buzz-select-value-content" },
     h("span", { className: "buzz-select-value-text" },
       h("span", { className: "buzz-select-value", title: current?.label, "data-placeholder": current ? undefined : "" }, current?.label ?? placeholder)));
@@ -2657,7 +2670,7 @@ export function buzzUi(React, { nativeSelect = NATIVE_SELECT } = {}) {
               h("span", { className: "buzz-select-option-content" }, option.label,
                 option.detail ? h("span", { className: "buzz-select-option-description text-body-sm text-subtle" }, option.detail) : null)),
             h("span", { className: "buzz-select-indicator", "data-selected": selected ? "" : undefined },
-              icon(ICON.check, 14, { className: "tabler-icon tabler-icon-check" })));
+              icon(ICON.check, 14)));
         })));
   };
 
@@ -2688,10 +2701,21 @@ export function buzzUi(React, { nativeSelect = NATIVE_SELECT } = {}) {
       error ? h("div", { className: "buzz-field-error-track" }, h("div", { role: "alert", className: "buzz-field-error" }, error)) : null);
   };
 
+  // Layout, in the spacing Buzz's Settings screens use (Tailwind utilities
+  // Buzz itself uses, so its stylesheet has them).
+  const GAPS = { 2: "grid gap-2", 4: "grid gap-4" };
+  const each = (children) => (Array.isArray(children) ? children : [children]);
+  /** A column of sections, cards or fields. `as: "form"` makes it the form
+   * (with `onSubmit`); gap 4 between sections, 2 within a field. */
+  const Stack = ({ as = "div", gap = 4, onSubmit, children }) =>
+    h(as, { className: GAPS[gap] ?? GAPS[4], onSubmit }, ...each(children));
+  /** A row of buttons that wraps. */
+  const Actions = ({ children }) => h("div", { className: "flex flex-wrap items-center gap-3" }, ...each(children));
+
   // Lines Buzz writes around its cards.
   const Note = (text) => h("p", { className: "m-0 text-body-sm text-secondary" }, text);
   const ErrorLine = (text) => h("p", { role: "alert", className: "buzz-field-error" }, text);
-  const Spinner = () => icon(ICON.loader, 16, { className: "motion-safe:animate-spin tabler-icon tabler-icon-loader-2" });
+  const Spinner = () => icon(ICON.loader, 16, { className: "motion-safe:animate-spin" });
   /** A line of progress: Buzz's spinner beside a few words. */
   const Status = (text) => h("span", { role: "status", className: "flex items-center gap-2 text-body-sm text-secondary" }, h(Spinner), text);
   /** A value a row shows but does not change. */
@@ -2700,8 +2724,10 @@ export function buzzUi(React, { nativeSelect = NATIVE_SELECT } = {}) {
   const Alert = (text) => h("span", { role: "alert", className: "text-danger" }, text);
   const Code = (text) => h("code", { className: "text-body tabular-nums", style: { letterSpacing: "0.08em" } }, text);
 
-  return { SectionTitle, Group, Row, Button, Input, Switch, SwitchRow, Pill, Popup, Native, TextField, Note, ErrorLine, Spinner, Status, Value, Alert, Code };
+  return { SectionTitle, Group, Row, Button, Input, Switch, SwitchRow, Pill, Popup, Native, TextField, Stack, Actions, Note, ErrorLine, Spinner, Status, Value, Alert, Code };
 }
+// ---- end buzz-ui kit ----
+export { buzzUi };
 
 /** buzz-acp's own conversation levers, by the names the machine lists them
  * under (`controls` in its models reply: the bounds or values of each, and
@@ -2766,7 +2792,7 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
   // The screens are drawn in Buzz's own primitives (buzzUi), laid out as
   // Buzz's Settings: a title, a rounded card of rows, each row a label and a
   // muted line on the left and its control on the right.
-  const { SectionTitle, Group, Row, Button, Input, SwitchRow, Pill, TextField, ErrorLine, Spinner, Status, Value, Alert, Code } = buzzUi(React);
+  const { SectionTitle, Group, Row, Button, Input, SwitchRow, Pill, TextField, Stack, Actions, ErrorLine, Spinner, Status, Value, Alert, Code } = buzzUi(React, { nativeSelect: NATIVE_SELECT });
   // An unsaved edit per agent, kept across Buzz mounting the Identity and
   // Settings tabs apart (each tab mounts the component anew).
   const drafts = new Map();
@@ -2915,7 +2941,7 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
       // Not a <form>: this sits inside Buzz's own Create agent form, and a
       // nested form's submit goes to the outer one, which abandons the dialog.
       h(Row, { title: pasteKey ? "Paste the key" : "Paste the code", controlId: inputId, trailing: h(React.Fragment, null,
-        h(Input, { id: inputId, type: "password", autoComplete: "off", spellCheck: false, controlSize: "sm", style: { width: "11rem" },
+        h(Input, { id: inputId, type: "password", autoComplete: "off", spellCheck: false, controlSize: "sm", width: "11rem",
           placeholder: pasteKey ? "API key" : "Code", value: code, disabled: busy, onChange: (event) => setCode(event.target.value),
           onKeyDown: (event) => { if (event.key === "Enter") { event.preventDefault(); event.stopPropagation(); if (!busy && code.trim()) submit(); } } }),
         button({ variant: "prominent", disabled: !code.trim(), loading: busy, onClick: submit }, pasteKey ? "Save key" : "Finish")) }));
@@ -2954,14 +2980,14 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
     React.useEffect(() => () => onReadyChange?.(false), [onReadyChange]);
 
     // The host's Harness row is the first row of this card, as in Buzz's own dialog.
-    if (signedOut && SignInPrompt) return h("div", { className: "grid gap-4" }, h(Group, null, harnessControl), h(SignInPrompt, null));
-    if (needsApproval && ApprovalPrompt) return h("div", { className: "grid gap-4" }, h(Group, null, harnessControl), h(ApprovalPrompt, null));
+    if (signedOut && SignInPrompt) return h(Stack, null, h(Group, null, harnessControl), h(SignInPrompt, null));
+    if (needsApproval && ApprovalPrompt) return h(Stack, null, h(Group, null, harnessControl), h(ApprovalPrompt, null));
 
     const noHarness = status?.kind === "ok" && !options.length;
     const schema = controlSchema(models);
     const controls = value.controls && typeof value.controls === "object" ? value.controls : {};
     const minutes = Number(value.heartbeat) > 0 ? Number(value.heartbeat) : 0;
-    return h("div", { className: "grid gap-4" },
+    return h(Stack, null,
       h(Group, null,
         harnessControl,
         access && h(LinkRow),
@@ -3123,11 +3149,11 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
     const harnessRow = settingsHost?.typeControl?.(false);
     const busy = picking.saving || run.loading;
 
-    if (signedOut && SignInPrompt) return h("div", { className: "grid gap-4" },
+    if (signedOut && SignInPrompt) return h(Stack, null,
       identity && harnessRow && h(Group, null, harnessRow), h(SignInPrompt, null), runtime && settingsContent);
     const schema = controlSchema(models);
-    const actions = (...buttons) => h("div", { className: "flex flex-wrap items-center gap-3" }, ...buttons);
-    return h("div", { className: "grid gap-4 [container-type:inline-size]" },
+    const actions = (...buttons) => h(Actions, null, ...buttons);
+    return h(Stack, null,
       needsApproval && ApprovalPrompt && h(ApprovalPrompt, null),
       identity && (harnessRow || run.model) && h(Group, null,
         harnessRow,
@@ -3138,7 +3164,7 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
       identity && picked("model"),
       identity && run.model?.problem && ErrorLine(run.model.problem),
       identity && !runtime && run.error && ErrorLine(run.error),
-      identity && h("form", { className: "grid gap-2", onSubmit: (event) => { event.preventDefault(); void save(); } },
+      identity && h(Stack, { as: "form", gap: 2, onSubmit: (event) => { event.preventDefault(); void save(); } },
         h(TextField, { label: "Instructions", rows: 8, maxLength: 20000, value: text.draft, disabled: text.loading || saving, error: text.error,
           placeholder: text.loading ? "Loading…" : "Help me plan my week and prioritize tasks.", onChange: (draft) => setText({ ...text, draft, error: undefined }) }),
         dirty && actions(
@@ -3161,7 +3187,7 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
             ? h(Pill, { label: "Answers", shape, value: respondTo, options: ANSWERS, disabled: busy, onChange: (next) => void pick({ controls: { respondTo: next } }, "machine") })
             : Value(run.loading ? "…" : "Unknown") })),
         picked("machine")),
-      runtime && h("div", { className: "grid gap-4" },
+      runtime && h(Stack, null,
         h("div", null,
           h(SectionTitle, { title: "Heartbeat" }),
           h(Group, null,
@@ -3170,7 +3196,7 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
             beat.minutes > 0 && h(Row, { title: "Wakes", trailing: h(Pill, { label: "Heartbeat interval", shape, value: String(beat.minutes), disabled: beatBusy,
               options: heartbeatChoices(beat.minutes).map((choice) => ({ id: String(choice.value), label: choice.label })),
               onChange: (id) => void saveBeat({ minutes: Number(id) }) }) }))),
-        h("form", { className: "grid gap-2", onSubmit: (event) => { event.preventDefault(); void saveBeat({ prompt: beat.draft.trim() === beat.defaultPrompt.trim() ? "" : beat.draft }); } },
+        h(Stack, { as: "form", gap: 2, onSubmit: (event) => { event.preventDefault(); void saveBeat({ prompt: beat.draft.trim() === beat.defaultPrompt.trim() ? "" : beat.draft }); } },
           h(TextField, { label: "On each heartbeat", description: beat.loading ? undefined : beat.custom ? "Yours." : "Black 4’s standard.",
             rows: 8, maxLength: 8000, value: beat.draft, disabled: beat.loading || beatBusy, placeholder: beat.loading ? "Loading…" : undefined,
             onChange: (draft) => setBeat({ ...beat, draft, error: undefined }) }),

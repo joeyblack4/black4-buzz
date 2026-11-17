@@ -38,8 +38,8 @@ authorized_keys entry forces `agentctl --caller <label>` (machine/teammates.sh
 writes it), or through the hardware door (machine/door.mjs), which runs
 `agentctl --caller <staff email>` for a request carrying a valid Platform
 Control pass. The label or email is stored as each agent's creator (`createdBy`, shown in
-`list`). A caller can read every agent, but changes, starts and removes only
-agents it created, and signs in and out only its own accounts. No label (the machine
+`list`). A caller reads and changes every agent (they are the whole staff's), removes
+only agents it created, and signs in and out only its own accounts. No label (the machine
 owner's own unrestricted key, or cron) may do everything, and only it changes
 the agents it made or ones made before creators were recorded.
 
@@ -3089,13 +3089,14 @@ def model_fields(s, cache=None, d=None):
             **({"modelProblem": picked["problem"]} if picked.get("problem") else {})}
 
 
-def may_change(settings):
-    """A caller changes only agents it created. The admin (the machine owner's
-    own key, which has no label) changes any, and only the admin changes the
-    agents it made, or ones made before creators were recorded."""
+def may_change(settings, op):
+    """Every caller sees and changes every agent: Black 4's agents are the
+    whole staff's. Only removing one is its creator's (or the admin's, the
+    machine owner's own key, which has no label). A change never moves whose
+    sign-ins the agent runs on: always its creator's."""
     creator = settings.get("createdBy")
-    if CALLER and creator != CALLER:
-        fail(f"This agent belongs to {creator or 'the machine owner'}. Only they or a Black 4 admin can change it.")
+    if op == "remove" and CALLER and creator != CALLER:
+        fail(f"This agent belongs to {creator or 'the machine owner'}. Only they or a Black 4 admin can remove it.")
 
 def handle(req):
     if not isinstance(req, dict): fail("request must be a JSON object")
@@ -3179,7 +3180,7 @@ def handle(req):
         return {"ok": True, "agents": rows}
 
     d = folder(req.get("pubkey"))
-    if op in CHANGES and d.exists(): may_change(read_settings(d))
+    if op in CHANGES and d.exists(): may_change(read_settings(d), op)
     # The agent itself asking (from its shell): its restart waits for its turn.
     me = CALLER is None and op in SELF_APPLY and d.exists() and inside_agent(d)
     later = {"applies": "after this turn"} if me else {}
@@ -3301,6 +3302,7 @@ def handle(req):
         return {"ok": True, "running": bool(running(d)), "activated": bool(s.get("auth")),
                 "name": s.get("name"), "harness": s.get("harness"), "pays": pays_of(s), "respondTo": s.get("respondTo"), "allow": s.get("allow") or [],
                 "keepsStopping": keeps_stopping(d), "restarts": r.get("count", 0), **model_fields(s, d=d),
+                "createdBy": s.get("createdBy"), "yours": bool(CALLER) and s.get("createdBy") == CALLER,
                 **({"nextRestart": int(r["next"])} if r.get("next") and not running(d) else {}),
                 "log": log_tail(d, 1500)}
 

@@ -3204,6 +3204,7 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
           directory.remember(pubkey, { machine: machine.id, harness: reply.harness, respondTo: reply.respondTo });
           const pays = reply.pays === "key" ? "key" : "subscription";
           setRun({ loading: false, running: !!reply.running, activated: !!reply.activated, harness: reply.harness, respondTo: reply.respondTo, pays,
+            createdBy: typeof reply.createdBy === "string" ? reply.createdBy : null, yours: reply.yours !== false,
             controls: reply.controls && typeof reply.controls === "object" ? reply.controls : null,
             ...("model" in reply ? { model: { pays, model: reply.modelChosen ? reply.model : "", effort: reply.effortChosen ? reply.effort : "",
               compactAt: typeof reply.compactAt === "number" ? reply.compactAt : null,
@@ -3322,7 +3323,11 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
           // How it pays: a change restarts it on the other sign-in, with that one's default model.
           run.pays && takesKey(status, harness) && h(Row, { title: "Pays with", trailing: h(Pill, { label: "Pays with", shape, value: run.pays, options: PAYS, disabled: busy,
             onChange: (pays) => void pick({ pays, model: "", effort: "" }, "machine") }) }),
-          harness && h(SignInRows, { machineId: machine.id, harness, status, disabled: false, pays: run.pays ?? "subscription", shape }),
+          // It runs on its creator's own sign-in: yours shows here to manage;
+          // someone else's agent names whose it runs on.
+          harness && (run.yours === false
+            ? h(Row, { title: run.pays === "key" ? "API key" : "Sign-in", trailing: Value(run.createdBy ? `${run.createdBy}’s` : "No one’s") })
+            : h(SignInRows, { machineId: machine.id, harness, status, disabled: false, pays: run.pays ?? "subscription", shape })),
           h(Row, { title: "Status", description: run.error ? Alert(run.error) : undefined, trailing: h(React.Fragment, null,
             run.loading ? Status("Checking…") : Value(run.running ? "Running" : run.activated === false ? "Not set up" : "Stopped"),
             h(Button, { size: "sm", shape, loading: restarting, disabled: run.loading, onClick: () => void restart() }, "Restart")) }),
@@ -3356,6 +3361,47 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
       runtime && settingsContent);
   };
 
+  /** Every Black 4 hardware agent on every machine, for every staff member:
+   * Buzz lists only the agents this Buzz made, so this page shows the rest
+   * and opens the same Settings for any of them. */
+  const AllAgents = () => {
+    const { signedOut, reachable, epoch } = useBlack4();
+    const [rows, setRows] = React.useState({ loading: true, machines: [] });
+    const [open, setOpen] = React.useState(null);
+    const [revision, setRevision] = React.useState(0);
+    React.useEffect(() => {
+      if (!reachable || !ask) return undefined;
+      let live = true;
+      setRows((prior) => ({ ...prior, loading: true }));
+      void Promise.all(MACHINES.map((machine) =>
+        askMachine(ask, machine, { op: "list" }, { timeoutMs: STATUS_TIMEOUT_MS })
+          .then((reply) => {
+            const agents = (reply.agents ?? []).filter((row) => row?.pubkey);
+            for (const row of agents) directory.remember(row.pubkey, { machine: machine.id, harness: row.harness, respondTo: row.respondTo });
+            return { machine, agents };
+          }, (error) => ({ machine, agents: [], error: String(error?.message ?? error) }))))
+        .then((machines) => { if (live) setRows({ loading: false, machines }); });
+      return () => { live = false; };
+    }, [reachable, epoch, revision]);
+
+    if (signedOut && SignInPrompt) return h(SignInPrompt, null);
+    if (open) return h(Stack, null,
+      h(Actions, null, h(Button, { onClick: () => { setOpen(null); setRevision((value) => value + 1); } }, "All agents")),
+      h(SectionTitle, { title: open.name || "Agent" }),
+      h(GuardedSettings, { key: open.pubkey, agent: { pubkey: open.pubkey } }));
+    if (rows.loading && !rows.machines.length) return Status("Loading agents…");
+    return h(Stack, null, ...rows.machines.map(({ machine, agents, error }) => h("div", { key: machine.id },
+      h(SectionTitle, { title: machine.label }),
+      error ? ErrorLine(error)
+        : h(Group, null, ...(agents.length ? agents : [null]).map((row) => row
+          ? h(Row, { key: row.pubkey, title: row.name || row.pubkey.slice(0, 8),
+              description: [harnessLabel(row.harness) ?? row.harness, row.createdBy ? `Made by ${row.createdBy}` : null].filter(Boolean).join(" · "),
+              trailing: h(React.Fragment, null,
+                Value(row.running ? "Running" : row.activated ? "Stopped" : "Not set up"),
+                h(Button, { size: "sm", onClick: () => setOpen(row) }, "Open")) })
+          : h(Row, { key: "none", title: "No agents yet" }))))));
+  };
+
   // A component that throws shows one sentence in its place and is reported,
   // so the rest of Black 4 (and Buzz's own dialog around it) keeps working.
   const guarded = (Component, where) => class Guarded extends React.Component {
@@ -3369,6 +3415,8 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
     }
   };
 
+  const GuardedSettings = guarded(Settings, "settings");
+
   ctx.agents.register({
     id: "hardware",
     title: "Black 4 hardware",
@@ -3380,9 +3428,11 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
     },
     Create: guarded(Create, "instructions"),
     CreateConfiguration: guarded(Configuration, "form"),
-    tabs: [{ id: "settings", title: "Settings", role: "settings", splitSettings: true, component: guarded(Settings, "settings") }],
+    tabs: [{ id: "settings", title: "Settings", role: "settings", splitSettings: true, component: GuardedSettings }],
     remote,
   });
+
+  ctx.pages?.register?.({ id: "black4-agents", title: "Black 4 agents", component: guarded(AllAgents, "agents") });
 }
 
 /** Offers the hardware type and takes it back. Buzz has no call to remove a
@@ -3407,7 +3457,7 @@ export function hardwareSlot(ctx, { report, access, sign, register = applyHardwa
         }
         scope = ctx.plugin({
           name: "black4-hardware",
-          inject: ["react", "host", "agents"],
+          inject: ["react", "host", "agents", "pages"],
           apply: (child) => {
             try { register(child, { report, access, sign }); } catch (error) { fail(error); }
           },

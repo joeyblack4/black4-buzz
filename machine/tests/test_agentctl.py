@@ -609,22 +609,25 @@ class Callers(Base):
         d = self.make_agent(activate=False)
         self.assertIsNone(self.req(op="list")["agents"][0]["createdBy"])
         self.as_caller("lee")
-        for op, extra in [("remove", {}), ("instructions.set", {"instructions": "x"}), ("profile", {"name": "Taken"}), ("start", {})]:
-            self.assertEqual(self.req(op=op, pubkey=d.name, **extra),
-                             {"ok": False, "error": "This agent belongs to the machine owner. Only they or a Black 4 admin can change it."}, op)
+        self.assertEqual(self.req(op="remove", pubkey=d.name),
+                         {"ok": False, "error": "This agent belongs to the machine owner. Only they or a Black 4 admin can remove it."})
+        self.assertTrue(self.req(op="instructions.set", pubkey=d.name, instructions="x")["ok"], "any staff member edits it")
         self.assertTrue(d.exists())
         self.assertTrue(self.req(op="status", pubkey=d.name)["ok"])
         self.assertTrue(self.req(op="instructions.get", pubkey=d.name)["ok"])
         self.assertEqual(len(self.req(op="list")["agents"]), 1)
 
-    def test_a_caller_changes_only_its_own_agents(self):
+    def test_every_caller_edits_any_agent_but_removes_only_its_own(self):
         self.as_caller("sam")
         mine = self.make_agent(activate=False)
         self.a.CALLER = "lee"
-        for op, extra in [("remove", {}), ("instructions.set", {"instructions": "x"}), ("profile", {"name": "Taken"}),
-                          ("start", {}), ("activate", {"auth": ["auth", "c" * 64, "", "d" * 128]})]:
-            r = self.req(op=op, pubkey=mine.name, **extra)
-            self.assertEqual(r, {"ok": False, "error": "This agent belongs to sam. Only they or a Black 4 admin can change it."}, op)
+        self.assertEqual(self.req(op="remove", pubkey=mine.name),
+                         {"ok": False, "error": "This agent belongs to sam. Only they or a Black 4 admin can remove it."})
+        self.assertTrue(self.req(op="instructions.set", pubkey=mine.name, instructions="from lee")["ok"], "lee edits sam's agent")
+        self.assertEqual(self.req(op="instructions.get", pubkey=mine.name)["instructions"], "from lee")
+        status = self.req(op="status", pubkey=mine.name)
+        self.assertEqual((status["createdBy"], status["yours"]), ("sam", False))
+        self.assertEqual(self.a.read_settings(mine)["createdBy"], "sam", "an edit never changes whose sign-in it runs on")
         self.assertTrue(mine.exists())
         self.assertTrue(self.req(op="status", pubkey=mine.name)["ok"], "reading is allowed")
         self.assertTrue(self.req(op="instructions.get", pubkey=mine.name)["ok"])
@@ -710,7 +713,7 @@ class Callers(Base):
         # Only she (or the admin) changes it; an SSH label with her name does not.
         for other in ("annabelle", "sam@black4.ai"):
             r = self.run_main("--caller", other, request=json.dumps({"op": "remove", "pubkey": made["pubkey"]}))
-            self.assertEqual(r, {"ok": False, "error": "This agent belongs to annabelle@black4.ai. Only they or a Black 4 admin can change it."}, other)
+            self.assertEqual(r, {"ok": False, "error": "This agent belongs to annabelle@black4.ai. Only they or a Black 4 admin can remove it."}, other)
         self.assertTrue(self.run_main("--caller", "annabelle@black4.ai", request=json.dumps({"op": "remove", "pubkey": made["pubkey"]}))["ok"])
         # Not an email agentctl accepts: upper case, no domain dot, spaces, a newline, too long.
         for bad in ("Annabelle@black4.ai", "a@b", "a b@black4.ai", "sam@black4.ai\n", "sam\n", "@black4.ai", "a" * 65 + "@black4.ai"):
@@ -892,7 +895,9 @@ class SelfChange(Base):
         self.a.CALLER = "sam"  # a teammate's shell could never be inside the agent's tree either
         self.as_agent(self.a.running(agent))
         self.a.spawn_apply = lambda d: self.fail("deferred for a caller")
-        self.assertIn("belongs to", self.req(op="heartbeat.set", pubkey=agent.name, minutes=35)["error"])
+        r = self.req(op="heartbeat.set", pubkey=agent.name, minutes=35)
+        self.assertTrue(r["ok"], "a teammate may change it")
+        self.assertNotIn("applies", r, "and it restarts now, never deferred for a caller")
 
     def test_every_harness_home_tells_the_agent_what_it_is_and_how_to_change_itself(self):
         self.a.ROOT.mkdir(parents=True, exist_ok=True)
@@ -2629,12 +2634,13 @@ class ModelAndEffort(DeviceBase):
         with self.assertRaises(self.a.Fail): self.a.launch("grok", {"model": "grok,--x", "effort": "high"})
         self.assertIn("grok,--x", self.req(op="start", pubkey=agent.name)["error"])
 
-    def test_only_its_creator_changes_an_agents_model(self):
+    def test_any_staff_member_changes_an_agents_settings(self):
         agent = self.make_agent("grok")
         self.a.CALLER = "teammate"
         self.addCleanup(setattr, self.a, "CALLER", None)
-        self.assertIn("Only they or a Black 4 admin can change it", self.req(op="settings.set", pubkey=agent.name, model="grok-4.5")["error"])
-        self.assertEqual(self.a.read_settings(agent)["model"], "")
+        self.assertTrue(self.req(op="settings.set", pubkey=agent.name, respondTo="anyone")["ok"])
+        self.assertEqual(self.a.read_settings(agent)["respondTo"], "anyone")
+        self.assertEqual(self.a.read_settings(agent)["createdBy"], OWNER, "it still runs on its creator's sign-in")
 
     def test_doctor_says_what_new_agents_run(self):
         self.listed()

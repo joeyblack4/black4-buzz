@@ -119,9 +119,11 @@ Terminal, Node, Tailscale or an SSH key.
   hardware agent type mints passes. Buzz's agents never can, not even through
   `call_tool`.
 
-Each harness on a machine is signed in once, to the subscription of whoever
-signs it in. Every agent on that machine that runs the harness uses that
-sign-in:
+Each person signs each harness in to their own subscription (or adds their
+own API key). Your agents on the machine run only on your sign-ins, never on
+anyone else's: an agent whose creator has not signed its harness in does not
+start, and the Create agent form shows your own sign-in, with **Sign in** when
+you have none. Signing out removes only yours:
 
 Each harness has two ways to pay, a **subscription** and an **API key**, and
 each agent chooses one (**Pays with** in the form and in its Settings). A new

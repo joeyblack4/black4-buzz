@@ -141,8 +141,8 @@ sees only the sign-in it pays with.
   service's model list, keeps it to itself in its own home for that harness,
   and it never comes back to Buzz: an Anthropic key for Claude Code, an
   OpenAI key for Codex (Codex keeps its own copy in that home, the way its
-  `login --with-api-key` does), a QwenCloud key for Qwen Code (pay-as-you-go
-  or Token Plan). A Grok Build key follows.
+  `login --with-api-key` does), an xAI key for Grok Build, a QwenCloud key for
+  Qwen Code (pay-as-you-go or Token Plan).
 
 Qwen Code runs in a private home per sign-in with its self-update, usage
 statistics and managed memory off. New agents run `qwen4-max` (or the next

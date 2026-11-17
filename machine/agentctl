@@ -570,6 +570,10 @@ DEVICE_CHECK = {"codex": run_codex_check, "grok": run_grok_check}
 PAYS = ("subscription", "key")
 
 
+def article(word):
+    return "an" if word[:1].lower() in "aeiou" else "a"
+
+
 def slot_of(harness, pays):
     return f"{harness}-key" if pays == "key" else harness
 
@@ -706,6 +710,18 @@ KEYS = {
               "install": lambda key: install_codex_key(key), "installed": lambda key: codex_key_installed(key),
               "chat": lambda i: (i.startswith("gpt-") or re.match(r"^o\d", i) is not None) and not NOT_CHAT.search(i) and "instruct" not in i,
               "efforts": lambda i: cached_efforts("codex", i)},
+    "grok": {"service": "xAI", "keyUrl": "https://console.x.ai",
+             "bases": (("api", "https://api.x.ai/v1"),),
+             "headers": BEARER,
+             # xAI answers 400 "Incorrect API key provided" to a bad key, not 401.
+             "rejected": lambda status, body: status in (401, 403) or (status == 400 and re.search(r"api[ _-]?key", json.dumps(body or ""), re.I) is not None),
+             # grok reads XAI_API_KEY, but its agent mode (what buzz-acp runs) signs
+             # in with grok.com unless its config pins auth to the key: with this in
+             # the key home's config.toml it advertises xai.api_key and opens a session.
+             "home_env": "GROK_HOME", "env": lambda key, base: {"XAI_API_KEY": key},
+             "settings": (("auth", "preferred_method", '"api_key"'),),
+             "chat": lambda i: i.startswith("grok-") and not NOT_CHAT.search(i),
+             "efforts": lambda i: cached_efforts("grok", i)},
     "qwen": {"service": "QwenCloud", "keyUrl": "https://docs.qwencloud.com/developer-guides/administration/api-keys",
              # Qwen Code's own page for keys; the two QwenCloud plans take different keys.
              "bases": (("pay-as-you-go", "https://maas.qwencloudapi.com/compatible-mode/v1"),
@@ -1717,7 +1733,8 @@ def _start(d):
     if pays == "key":
         key = stored_key(harness) if harness in KEYS else None
         if not key or known_bad(slot):
-            fail(f"{label} has no working API key on this machine. Add a {KEYS[harness]['service'] if harness in KEYS else label} API key from Buzz first, or set this agent to pay by subscription.")
+            service = KEYS[harness]["service"] if harness in KEYS else label
+            fail(f"{label} has no working API key on this machine. Add {article(service)} {service} API key from Buzz first, or set this agent to pay by subscription.")
         env = slot_env(slot)
         env.update(KEYS[harness]["env"](key, key_base(harness)))  # the environment only: never an argument
         spec = KEYS[harness]
@@ -2034,7 +2051,7 @@ def login_start(harness, flows=None, pays="subscription"):
         if harness not in KEYS: fail(f"{label} cannot run on an API key on this machine.")
         if not installed(harness): fail(f"{label} is not installed on this machine.")
         if "key" not in flows:
-            fail(f"Update the Black 4 plugin in Buzz to add a {KEYS[harness]['service']} API key from it.")
+            fail(f"Update the Black 4 plugin in Buzz to add {article(KEYS[harness]['service'])} {KEYS[harness]['service']} API key from it.")
     else:
         if harness not in SIGN_IN:
             if harness in NO_SIGN_IN: fail(NO_SIGN_IN[harness])

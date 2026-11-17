@@ -470,7 +470,7 @@ const noKey = { signIn: "key", signedIn: false, account: null, plan: null };
 const deviceRows = ({ codex = false, grok = false, qwen = false, qwenKey = false } = {}) => [
   { id: "claude", label: "Claude Code", installed: true, signedIn: true, account: null, signIn: "code", key: noKey },
   { id: "codex", label: "Codex", installed: true, signedIn: codex, account: codex ? "owner@example.com" : null, signIn: "device", key: noKey },
-  { id: "grok", label: "Grok Build", installed: true, signedIn: grok, account: null, signIn: "device" },
+  { id: "grok", label: "Grok Build", installed: true, signedIn: grok, account: null, signIn: "device", key: noKey },
   { id: "qwen", label: "Qwen Code", installed: true, signedIn: qwen, account: qwen ? "owner@example.com" : null, signIn: "device",
     key: { signIn: "key", signedIn: qwenKey, account: null, plan: qwenKey ? "pay-as-you-go" : null } },
   { id: "goose", label: "Goose", installed: true, signedIn: null, account: null, signIn: null,

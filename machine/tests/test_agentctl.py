@@ -428,7 +428,7 @@ class MachineStatus(Base):
         self.assertEqual(rows["qwen"]["label"], "Qwen Code")
         self.assertFalse(rows["qwen"]["installed"])
         self.assertEqual(rows["qwen"]["key"], {"signIn": "key", "signedIn": None, "account": None, "plan": None}, "and takes an API key beside it")
-        for hid in ('claude', 'codex'): self.assertEqual(rows[hid]["key"]["signIn"], "key", hid)
+        for hid in ('claude', 'codex', 'grok'): self.assertEqual(rows[hid]["key"]["signIn"], "key", hid)
         self.assertEqual(rows["claude"]["key"]["signedIn"], False, "installed, no key yet")
         self.assertNotIn("key", rows["goose"])
         self.assertEqual(rows["claude"], {"id": "claude", "label": "Claude Code", "installed": True,
@@ -1550,8 +1550,61 @@ class HarnessKeys(DeviceBase):
         self.assertEqual(row["key"]["models"][2]["efforts"], [], "nothing cached for it")
         self.assertEqual((row["key"]["model"], row["key"]["effort"]), ("gpt-6-astra", "high"))
 
+    def test_grok_key_agents_get_xai_api_key_in_their_own_home(self):
+        self.sign_in_device("grok")
+        done = self.sign_in_key(FAKE_XAI_KEY, "grok")
+        self.assertEqual(done["plan"], "api")
+        by_key = self.env_after_start(self.make_agent("grok", pays="key"))
+        self.assertEqual(by_key["XAI_API_KEY"], FAKE_XAI_KEY)
+        self.assertEqual(by_key["GROK_HOME"], str(self.a.HOMES / "grok-key"))
+        self.assertFalse((self.a.HOMES / "grok-key" / "auth.json").exists(), "no subscription in the key home")
+        toml = (self.a.HOMES / "grok-key" / "config.toml").read_text()
+        self.assertIn("auto_update = false", toml)
+        self.assertIn('[auth]\npreferred_method = "api_key"', toml, "grok's agent mode takes the key only when its config pins auth to it")
+        self.assertNotIn("preferred_method", (self.a.HOMES / "grok" / "config.toml").read_text(), "the subscription home keeps grok.com")
+        self.assertEqual(by_key["GROK_SANDBOX"], "off")
+        self.assertIn("--model,grok-4.7", by_key["BUZZ_ACP_AGENT_ARGS"])
+        by_sub = self.env_after_start(self.make_agent("grok", pays="subscription"))
+        self.assertEqual(by_sub["GROK_HOME"], str(self.a.HOMES / "grok"))
+        self.assertNotIn("XAI_API_KEY", by_sub)
+        row = next(h for h in self.req(op="models")["harnesses"] if h["id"] == "grok")
+        self.assertEqual([m["id"] for m in row["key"]["models"]], ["grok-4.7", "grok-4.5"], "no image model")
+
+    def test_xais_400_for_a_bad_key_is_a_refusal_and_another_400_proves_nothing(self):
+        r, d = self.start_key("grok")
+        self.assertEqual(r["url"], "https://console.x.ai")
+        bad = self.req(op="login.finish", loginId=r["loginId"], code="xai-not-the-right-key-0000000000")
+        self.assertEqual(bad["error"], "xAI did not accept that key. Check it and paste it again.")
+        odd = self.req(op="login.finish", loginId=r["loginId"], code="xai-odd-answer-0000000000000000")
+        self.assertEqual(odd["error"], "xAI could not be reached to check the key. Try again in a moment.")
+        self.assertTrue(d.exists())
+        for harness, service, url in (("claude", "Anthropic", "https://console.anthropic.com/settings/keys"), ("codex", "OpenAI", "https://platform.openai.com/api-keys")):
+            with self.subTest(harness=harness):
+                r, _ = self.start_key(harness)
+                self.assertEqual(r["url"], url)
+                self.assertEqual(self.req(op="login.finish", loginId=r["loginId"], code="sk-not-the-right-key-000000000000")["error"],
+                                 f"{service} did not accept that key. Check it and paste it again.")
+
+    def test_a_key_agent_waits_for_its_key_whatever_the_subscription_says(self):
+        self.sign_in()
+        self.sign_in_device("codex")
+        self.sign_in_device("grok")
+        for harness, label, service in (("claude", "Claude Code", "an Anthropic"), ("codex", "Codex", "an OpenAI"), ("grok", "Grok Build", "a xAI")):
+            with self.subTest(harness=harness):
+                agent = self.make_agent(harness, pays="key")
+                self.assertEqual(self.req(op="start", pubkey=agent.name)["error"],
+                                 f"{label} has no working API key on this machine. Add {service} API key from Buzz first, or set this agent to pay by subscription.")
+                self.assertEqual(self.pays_of(agent), "key")
+                self.assertEqual(self.pays_of(self.make_agent(harness)), "subscription", "the default follows the signed-in subscription")
+
     def pays_of(self, d):
         return self.req(op="status", pubkey=d.name)["pays"]
+
+    def test_doctor_names_both_ways_for_every_harness(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out): self.a.print_doctor()
+        for label in ("Claude Code", "Codex", "Grok Build", "Qwen Code"):
+            self.assertIn(f"{label}: signed out (subscription signed out, API key signed out)", out.getvalue())
 
 
 def install_pinned(a, home):
@@ -1657,7 +1710,7 @@ class Health(DeviceBase):
             self.assertTrue(rows[harness]["access"].startswith("full access"), rows[harness])
         out = io.StringIO()
         with contextlib.redirect_stdout(out): self.a.print_doctor()
-        self.assertIn("Codex: signed out" + ("" if "codex" in ['grok'] else " (subscription signed out, API key signed out)") + "; full access (agent-full-access", out.getvalue())
+        self.assertIn("Codex: signed out (subscription signed out, API key signed out); full access (agent-full-access", out.getvalue())
 
     def test_a_codex_adapter_without_the_full_access_mode_is_a_problem(self):
         (self.a.VENDOR / "acp/node_modules/@agentclientprotocol/codex-acp/dist/index.js").write_text('static Agent = new _AgentMode("agent",')

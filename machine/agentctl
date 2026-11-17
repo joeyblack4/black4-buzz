@@ -28,6 +28,7 @@ Not requests (run from cron or by agentctl itself):
                               (a slot is a harness, or <harness>-key for its key)
   agentctl models <slot>      makes a slot's model listing again, out of band
   agentctl restart-agents <harness> [pays]   restarts agents after a sign-in
+  agentctl apply-later <pubkey>   applies an agent's own change once its turn ends
 
 Callers: a teammate reaches this machine with their own SSH key, whose
 authorized_keys entry forces `agentctl --caller <label>` (machine/teammates.sh
@@ -53,6 +54,13 @@ goes into a command line.
 
 Root: ~/workforce, or BLACK4_WORKFORCE_ROOT for a second runner beside it (its
 own agents, sign-ins and cron lines).
+
+An agent changing itself: each agent's home holds a note on what it is and how
+to read and change its own heartbeat, model, effort, instructions and restart
+with agentctl from its shell. Such a request (from inside the agent's own
+process tree) is saved at once and applied after its current turn, by a
+detached waiter, so the turn that asked still finishes; see "an agent changing
+itself" below. Requests from people restart the agent at once.
 
 Black 4 MCP: when setup.sh has installed the connector (mcp/black4), every agent
 gets it as buzz-acp's MCP server. It signs each request with the agent's own key
@@ -777,12 +785,76 @@ DEFERRED_MCP_NOTE = {
              "start_next_standing_run and the rest) are not in your tool list. Find one with tool_search "
              "(\"select:mcp__black4__<tool>\" or a keyword) and run it with tool_call.\n"),
 }
+# What every agent knows about itself: a short note in each CLI's own
+# user-level instructions file in its private home (every agent on that slot
+# reads it at the start of each session), saying what it is, how to read and
+# change its own setup with agentctl from its shell, that such a change
+# applies after its current turn, and that job schedules live in Platform
+# Control. The files: Claude Code's CLAUDE.md in CLAUDE_CONFIG_DIR, Codex's
+# AGENTS.md in CODEX_HOME, grok's AGENTS.md in GROK_HOME ("global rules"),
+# Qwen Code's QWEN.md in QWEN_HOME (with its note on deferred tools first).
+NOTE_FILE = {"claude": "CLAUDE.md", "codex": "AGENTS.md", "grok": "AGENTS.md", "qwen": "QWEN.md"}
+
+
+def agentctl_command():
+    """How an agent on this machine runs agentctl from its shell: its root is
+    named when it is not the default one."""
+    prefix = "".join(f"{k}={v} " for k, v in root_env().items())
+    return f"{prefix}{BIN / 'agentctl'}"
+
+
+def self_note(harness):
+    cmd = agentctl_command()
+    return f"""# Black 4 hardware
+
+You are a Black 4 hardware agent on the machine {machine_name()}, running {LABEL[harness]}. Your agent folder is the one above your working folder ({AGENTS}/<pubkey>/work); its name is your pubkey.
+
+You can read and change your own setup with agentctl: one JSON request on stdin, one JSON reply. Replace <pubkey> with yours.
+
+    echo '{{"op":"status","pubkey":"<pubkey>"}}' | {cmd}
+    echo '{{"op":"heartbeat.get","pubkey":"<pubkey>"}}' | {cmd}
+    echo '{{"op":"heartbeat.set","pubkey":"<pubkey>","minutes":30}}' | {cmd}
+        minutes: 5 to 1440, or 0 for off. "prompt" sets what each heartbeat does ("" for the default).
+    echo '{{"op":"models"}}' | {cmd}
+        the models and efforts you can run here
+    echo '{{"op":"settings.set","pubkey":"<pubkey>","model":"<id>","effort":"<level>"}}' | {cmd}
+        "" for the machine's default
+    echo '{{"op":"instructions.get","pubkey":"<pubkey>"}}' | {cmd}
+    echo '{{"op":"instructions.set","pubkey":"<pubkey>","instructions":"<text>"}}' | {cmd}
+    echo '{{"op":"start","pubkey":"<pubkey>"}}' | {cmd}
+        restarts you
+
+A change you make to yourself is saved at once and applies after your current turn ends (the reply says "applies": "after this turn"): finish your answer first.
+
+Your heartbeat only sets how often you wake and ask start_next_standing_run. Which jobs run, and when, lives in Platform Control: change that with the Black 4 tools create_standing_work and update_standing_work.
+"""
+
+
+def write_note(home, harness, first=""):
+    """The note for this harness in its home's instructions file, after
+    `first` (a harness's own note); written only when it changes."""
+    note = first + self_note(harness)
+    path = home / NOTE_FILE[harness]
+    try: current = path.read_text()
+    except FileNotFoundError: current = None
+    if current != note: write_private(path, note)
+
+
 # Qwen Code's private home settings: no update of itself, no usage statistics
 # or telemetry, and no managed memory (one folder shared by every Qwen agent
 # on the machine, written by a second, paid model call after every turn).
+# Context: Black 4 tool results are large (a job list or a business's skills
+# run to ~64k characters, the review queue past 90k) and sit in context, so
+# with a 1M window Qwen Code's own compaction (85% of the window) never came
+# and every request re-read them all. autoCompactThreshold is a fraction of
+# the window: 0.08 compacts at about 80k tokens on qwen4-max (a warning at
+# 60k). toolOutputBatchBudget caps one message's combined tool output in
+# characters (the rest is kept in a file the agent can read); Qwen Code's
+# default is 200k, 100k still lets one of those results through whole.
 QWEN_SETTINGS = {"general": {"enableAutoUpdate": False}, "privacy": {"usageStatisticsEnabled": False},
                  "telemetry": {"enabled": False},
-                 "memory": {"enableManagedAutoMemory": False, "enableManagedAutoDream": False}}
+                 "memory": {"enableManagedAutoMemory": False, "enableManagedAutoDream": False},
+                 "context": {"autoCompactThreshold": 0.08}, "tools": {"toolOutputBatchBudget": 100000}}
 
 
 def qwen_home(base=None):
@@ -800,12 +872,9 @@ def qwen_home(base=None):
     if new != old: write_private(path, json.dumps(new, indent=2) + "\n")
     # Qwen Code reads QWEN.md in its home into every session's system prompt
     # (proven on 0.27.4), whatever the host passes, so the note on reaching
-    # the deferred Black 4 tools goes there, for every agent on this harness.
-    note = DEFERRED_MCP_NOTE["qwen"]
-    context = home / "QWEN.md"
-    try: current = context.read_text()
-    except FileNotFoundError: current = None
-    if current != note: write_private(context, note)
+    # the deferred Black 4 tools goes there, for every agent on this harness,
+    # and the note on itself after it.
+    write_note(home, "qwen", DEFERRED_MCP_NOTE["qwen"] + "\n")
     return home
 
 
@@ -817,13 +886,19 @@ def qwen_env(home=None):
 
 
 def slot_home(slot):
-    """The private home a slot's CLI runs in, made and settled: homes/<slot>.
-    None for Claude Code's subscription, which keeps nothing on disk here."""
+    """The private home a slot's CLI runs in, made and settled: homes/<slot>,
+    with the note on itself in the CLI's instructions file. Claude Code's
+    homes hold only that note and the state Claude Code keeps (CLAUDE_CONFIG_DIR)."""
     harness = harness_of(slot)
     if harness == "qwen": return qwen_home(HOMES / slot)
-    if harness in DEVICE: return cli_home(harness, HOMES / slot, KEYS.get(harness, {}).get("settings", ()) if slot.endswith("-key") else ())
-    if slot == "claude-key": return private_dir(private_dir(HOMES) / slot)
-    return None
+    if harness in DEVICE:
+        home = cli_home(harness, HOMES / slot, KEYS.get(harness, {}).get("settings", ()) if slot.endswith("-key") else ())
+    elif harness == "claude":
+        home = private_dir(private_dir(HOMES) / slot)
+    else:
+        return None
+    write_note(home, harness)
+    return home
 
 
 def slot_env(slot):
@@ -832,7 +907,7 @@ def slot_env(slot):
     if harness == "qwen": return qwen_env(slot_home(slot))
     if harness in DEVICE: return device_env(harness, slot_home(slot))
     env = base_env()
-    if slot == "claude-key": env[KEYS["claude"]["home_env"]] = str(slot_home(slot))
+    if harness == "claude": env[KEYS["claude"]["home_env"]] = str(slot_home(slot))
     return env
 
 
@@ -1744,7 +1819,7 @@ def _start(d):
         token = claude_token()
         if not token or known_bad("claude"):
             fail("Claude Code is not signed in on this machine. Sign in to Claude from Buzz first.")
-        env = base_env()
+        env = slot_env("claude")
         env["CLAUDE_CODE_OAUTH_TOKEN"] = token
     elif harness in DEVICE or harness in MEMBER:
         if known_bad(harness):
@@ -1763,6 +1838,8 @@ def _start(d):
     stop(d)
     (d / "launch.json").unlink(missing_ok=True)
     command = HARNESS[harness][0]
+    env.update(root_env())  # so the agent's own agentctl calls reach this root
+    env.update(TURN_LOG)    # buzz-acp's turn lines, which a self-change waits for
     env.update({
         "BUZZ_PRIVATE_KEY": (d / "key").read_text().strip(),
         # The harness speaks WebSocket to the relay; the CLI below uses HTTPS.
@@ -1838,6 +1915,140 @@ def restart_harness_agents(harness, pays=None):
 def stop_harness_agents(harness, pays=None):
     for d, _ in harness_agents(harness, pays):
         with agent_lock(d): stop(d)
+
+
+# ---------------------------------------------------------------- an agent changing itself
+# An agent may change its own setup from its shell (its note says how). Such a
+# request comes from inside its own process tree: under its buzz-acp, or in
+# the session or process group buzz-acp leads (it is started with its own).
+# Restarting it there would kill the very turn that asked, before the reply
+# posts, so a self-change is saved at once, answered with "applies": "after
+# this turn", and applied by a detached `agentctl apply-later <pubkey>`
+# outside the agent's process group. The turn's end is read from agent.log:
+# agents are started with buzz-acp's ACP wire log on (TURN_LOG), which writes
+# every session/prompt it sends and the result it gets back ({"stopReason":
+# ...}). From the log's size at the request, the waiter counts prompts opened
+# and results closed; the asking turn has ended when one more has closed than
+# opened (a heartbeat turn that starts and ends meanwhile cancels out). It
+# then waits for the log to be quiet for TURN_SETTLE seconds, so the reply has
+# gone out, and restarts the agent on the saved settings. buzz-acp sent SIGTERM
+# mid-turn does not wait (checked on 0.5.30: it cancels the turn after a few
+# seconds of silence), so nothing is signalled before that. A turn that has not
+# ended after APPLY_WAIT is stopped the hard way. Changes from people (the door,
+# SSH) restart at once, as before.
+
+APPLY_WAIT = 10 * 60   # a self-change waits this long for the agent's turn to end
+TURN_SETTLE = 5        # then this long of a quiet log, for the reply to go out
+TURN_LOG = {"RUST_LOG": "info,acp::wire=debug"}  # buzz-acp's ACP traffic, in agent.log
+TURN_OPEN = re.compile(rb'acp::wire: \xe2\x86\x92 .*"method": "session/prompt"')  # → a prompt sent
+TURN_CLOSE = re.compile(rb'acp::wire: \xe2\x86\x90 .*"result": \{"stopReason"')  # ← its result
+APPLY_MARK = "applying.json"
+
+
+def process_tree():
+    """{pid: (ppid, pgid, sid)} of every process now."""
+    done = subprocess.run(["/bin/ps", "-axo", "pid=,ppid=,pgid=,sess="], capture_output=True, text=True)
+    tree = {}
+    for line in done.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 4 and all(p.isdigit() for p in parts): tree[int(parts[0])] = tuple(int(p) for p in parts[1:])
+    return tree
+
+
+def inside_agent(d, pid=None, tree=None):
+    """Whether the process `pid` (this one) runs inside agent d's own tree."""
+    agent = running(d)
+    if not agent: return False
+    pid = pid or os.getpid()
+    tree = process_tree() if tree is None else tree
+    own = tree.get(pid)
+    if own and agent in own[1:]: return True  # its process group or session
+    seen, p = set(), pid
+    while p in tree and p not in seen and p > 1:
+        if p == agent: return True
+        seen.add(p)
+        p = tree[p][0]
+    return p == agent
+
+
+def applying(d):
+    """Whether a self-change is waiting to be applied to this agent."""
+    mark = read_json(d / APPLY_MARK, {}) or {}
+    return bool(mark) and time.time() - (mark.get("at") or 0) < APPLY_WAIT + 60
+
+
+def log_size(d):
+    try: return (d / "agent.log").stat().st_size
+    except OSError: return 0
+
+
+def defer_apply(d):
+    """A self-change: nothing restarts now; a detached waiter applies it after
+    the agent's turn. The settings are already saved; the log's size now is
+    where the waiter starts looking for the turn's end."""
+    write_private(d / APPLY_MARK, json.dumps({"at": time.time(), "pid": running(d), "logAt": log_size(d)}))
+    spawn_apply(d)
+
+
+def spawn_apply(d):
+    env = {**base_env(), **root_env()}
+    if os.environ.get("AGENTCTL_NO_CRON"): env["AGENTCTL_NO_CRON"] = "1"
+    try:
+        subprocess.Popen([PYTHON, str(SELF), "apply-later", d.name], env=env, cwd=str(private_dir(RUN)),
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:
+        pass
+
+
+def turn_ended(d, since):
+    """Whether, past byte `since` of agent.log, one more turn has closed than
+    opened: the turn that was running at `since` has ended. (A cut-over log
+    starts again at 0, so a smaller log is read from its start.)"""
+    path = d / "agent.log"
+    try:
+        size = path.stat().st_size
+        with open(path, "rb") as f:
+            f.seek(since if size >= since else 0)
+            text = f.read()
+    except OSError:
+        return False
+    return len(TURN_CLOSE.findall(text)) > len(TURN_OPEN.findall(text))
+
+
+def log_quiet(d, seconds, limit=30):
+    """Waits until agent.log has not grown for `seconds` (at most `limit`)."""
+    end = time.time() + limit
+    last, at = log_size(d), time.time()
+    while time.time() < end:
+        time.sleep(0.5)
+        size = log_size(d)
+        if size != last: last, at = size, time.time()
+        elif time.time() - at >= seconds: return
+
+
+def apply_later(d):
+    """Runs detached, outside the agent's process group: waits for the turn
+    to end, then restarts the agent on its saved settings. One per agent."""
+    lock = open(d / "apply.lock", "a")
+    try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError: return
+    try:
+        mark = read_json(d / APPLY_MARK, {}) or {}
+        pid, since = running(d), mark.get("logAt") or 0
+        if pid:
+            deadline = time.time() + APPLY_WAIT
+            while running(d) == pid and time.time() < deadline and not turn_ended(d, since): time.sleep(0.5)
+            if running(d) == pid and not turn_ended(d, since):
+                log_line("supervisor", f"apply {d.name[:8]}: its turn did not end in {APPLY_WAIT} s; stopping it")
+            elif running(d) == pid:
+                log_quiet(d, TURN_SETTLE)  # the reply goes out after the turn completes
+        (d / "restarts.json").unlink(missing_ok=True)
+        if read_settings(d).get("auth"):
+            try: log_line("supervisor", f"applied {d.name[:8]} after its turn: pid {start(d)}")
+            except Exception as e: log_line("supervisor", f"apply {d.name[:8]} failed: {str(e)[:200]}")
+    finally:
+        (d / APPLY_MARK).unlink(missing_ok=True)
+        lock.close()
 
 
 # ---------------------------------------------------------------- persistence
@@ -1963,6 +2174,7 @@ def supervise_pass(now=None):
         cap_log(d / "agent.log", AGENT_LOG_CAP)
         s = read_settings(d)
         if not s.get("auth"): continue
+        if applying(d): continue  # a self-change's waiter restarts it
         r = restarts(d)
         if running(d):
             if r and now - r.get("at", now) > HEALTHY_AFTER: (d / "restarts.json").unlink(missing_ok=True)
@@ -2531,6 +2743,7 @@ def community_url(value):
 # ---------------------------------------------------------------- requests
 
 CHANGES = {"remove", "activate", "profile", "instructions.set", "settings.set", "start", "heartbeat.set"}
+SELF_APPLY = {"profile", "instructions.set", "settings.set", "start", "heartbeat.set"}  # restart later when the agent asks
 
 
 def model_fields(s, cache=None, d=None):
@@ -2652,6 +2865,9 @@ def handle(req):
 
     d = folder(req.get("pubkey"))
     if op in CHANGES and d.exists(): may_change(read_settings(d))
+    # The agent itself asking (from its shell): its restart waits for its turn.
+    me = CALLER is None and op in SELF_APPLY and d.exists() and inside_agent(d)
+    later = {"applies": "after this turn"} if me else {}
     # Asked for in person: the supervisor's backoff starts over.
     if op in ("start", "activate", "instructions.set", "settings.set") and d.exists(): (d / "restarts.json").unlink(missing_ok=True)
     if op == "remove":
@@ -2689,8 +2905,8 @@ def handle(req):
         ok, detail = publish_profile(d)
         if not ok: fail("profile was not published: " + detail)
         # A new name reaches Black 4's records from the agent's next start.
-        if renamed and s.get("auth") and running(d): start(d)
-        return {"ok": True}
+        if renamed and s.get("auth") and running(d): defer_apply(d) if me else start(d)
+        return {"ok": True, **(later if renamed else {})}
 
     if op == "heartbeat.get":
         return {"ok": True, **heartbeat_view(s)}
@@ -2707,8 +2923,8 @@ def handle(req):
             if prompt is not None and not isinstance(prompt, str): fail("prompt is text")
             s["heartbeatPrompt"] = (prompt or "").strip()[:HEARTBEAT_PROMPT_MAX]
         write_settings(d, s)
-        if s.get("auth"): start(d)
-        return {"ok": True, **heartbeat_view(s)}
+        if s.get("auth"): defer_apply(d) if me else start(d)
+        return {"ok": True, **heartbeat_view(s), **later}
 
     if op == "instructions.get":
         return {"ok": True, "instructions": s.get("instructions") or ""}
@@ -2717,8 +2933,8 @@ def handle(req):
             s = read_settings(d)
             s["instructions"] = str(req.get("instructions") or "")[:20000]
             write_settings(d, s)
-            if s.get("auth"): _start(d)
-        return {"ok": True}
+            if s.get("auth"): defer_apply(d) if me else _start(d)
+        return {"ok": True, **later}
 
     if op == "settings.set":
         # The agent's model and effort ("" is the harness's default here) and
@@ -2736,10 +2952,13 @@ def handle(req):
             s["model"], s["effort"] = checked_choice(harness, model, effort, pays)
             s["pays"] = pays
             write_settings(d, s)
-            if s.get("auth"): _start(d)
-        return {"ok": True, "pays": pays, **model_fields(s, d=d)}
+            if s.get("auth"): defer_apply(d) if me else _start(d)
+        return {"ok": True, "pays": pays, **model_fields(s, d=d), **later}
 
     if op == "start":
+        if me:
+            defer_apply(d)
+            return {"ok": True, "pid": running(d), **later}
         return {"ok": True, "pid": start(d)}
 
     if op == "status":
@@ -2770,6 +2989,8 @@ def main(argv=None):
     if argv[:1] == ["models"] and len(argv) == 2 and model_source(argv[1]): return refresh_models(argv[1])
     if argv[:1] == ["restart-agents"] and len(argv) in (2, 3) and argv[1] in HARNESS and argv[2:] in ([], ["subscription"], ["key"]):
         return restart_harness_agents(argv[1], argv[2] if len(argv) == 3 else None)
+    if argv[:1] == ["apply-later"] and len(argv) == 2 and HEX64.match(argv[1]) and (AGENTS / argv[1]).is_dir():
+        return apply_later(AGENTS / argv[1])
     try:
         try: req = json.loads(sys.stdin.read() or "{}")
         except ValueError: fail("request is not JSON")

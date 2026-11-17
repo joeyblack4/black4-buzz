@@ -12,7 +12,7 @@ home). QwenCloud's GET /models (the key check and listing) is a fake in
 process: it answers 200 for the fake keys, 401 for any other, and nothing at
 all for a key starting sk-offline.
 """
-import contextlib, io, re, importlib.machinery, importlib.util, json, os, signal, stat, subprocess, sys, tempfile, textwrap, time, unittest
+import contextlib, io, re, importlib.machinery, importlib.util, json, os, shutil, signal, stat, subprocess, sys, tempfile, textwrap, time, unittest
 from pathlib import Path
 
 AGENTCTL = Path(__file__).resolve().parent.parent / "agentctl"
@@ -88,8 +88,16 @@ if sys.argv[1:2] == ["models"]:  # what 0.5.30 printed for claude-agent-acp 0.94
     sys.exit(0)
 if os.path.exists(os.path.join(home, "crash.txt")):
     print("buzz-acp: relay refused the connection", flush=True); sys.exit(1)
+import signal
+signal.signal(signal.SIGTERM, lambda *_: (open(os.path.join(home, "got-term.txt"), "a").write(str(os.getpid()) + "\\n"), sys.exit(0)))
+if os.path.exists(os.path.join(home, "turn.txt")):
+    # A turn in flight: its end is buzz-acp's own debug line, written when
+    # finish.txt appears (what the real one logs with RUST_LOG buzz_acp=debug).
+    while not os.path.exists(os.path.join(home, "finish.txt")): time.sleep(0.1)
+    # What buzz-acp 0.5.30 writes with RUST_LOG acp::wire=debug when the prompt's result comes back.
+    print('2026-11-17T00:00:00.000000Z DEBUG acp::wire: \u2190 {{"jsonrpc": "2.0", "id": 2, "result": {{"stopReason": "end_turn"}}}}', flush=True)
 with open("env.json", "w") as f:
-    json.dump({{k: v for k, v in os.environ.items() if k.startswith(("BUZZ_ACP", "CLAUDE_CODE", "CLAUDE_CONFIG_DIR", "PATH", "CODEX", "GROK", "QWEN", "NO_BROWSER", "OPENAI", "XAI", "INITIAL_AGENT_MODE", "GOOSE", "ANTHROPIC"))}}, f)
+    json.dump({{k: v for k, v in os.environ.items() if k.startswith(("BUZZ_ACP", "BLACK4_", "RUST_LOG", "CLAUDE_CODE", "CLAUDE_CONFIG_DIR", "PATH", "CODEX", "GROK", "QWEN", "NO_BROWSER", "OPENAI", "XAI", "INITIAL_AGENT_MODE", "GOOSE", "ANTHROPIC"))}}, f)
 while True: time.sleep(1)
 """
 
@@ -670,6 +678,162 @@ class Callers(Base):
             self.assertFalse(self.run_main("--caller", bad)["ok"], repr(bad))
 
 
+class SelfChange(Base):
+    """An agent changing its own setup from its shell: detected by its process
+    tree, saved at once, applied after its turn; people's changes restart now."""
+    def running_agent(self):
+        self.sign_in()
+        agent = self.make_agent("claude")
+        self.assertTrue(self.req(op="start", pubkey=agent.name)["ok"])
+        return agent, self.a.running(agent)
+
+    def as_agent(self, pid):
+        """Make this test process look like a shell inside the agent's tree."""
+        me = os.getpid()
+        self.a.process_tree = lambda: {me: (pid + 1, me, me), pid + 1: (pid, pid, pid), pid: (1, pid, pid)}
+
+    def test_a_request_from_inside_the_agents_tree_is_its_own(self):
+        agent, pid = self.running_agent()
+        me = os.getpid()
+        self.assertFalse(self.a.inside_agent(agent), "a person's shell is not inside it")
+        self.assertTrue(self.a.inside_agent(agent, tree={me: (pid, me, me), pid: (1, pid, pid)}), "a child of its buzz-acp")
+        self.assertTrue(self.a.inside_agent(agent, tree={me: (pid + 9, me, me), pid + 9: (pid, pid + 9, pid + 9), pid: (1, pid, pid)}), "a grandchild")
+        self.assertTrue(self.a.inside_agent(agent, tree={me: (1, pid, me), pid: (1, pid, pid)}), "in its process group")
+        self.assertTrue(self.a.inside_agent(agent, tree={me: (1, me, pid), pid: (1, pid, pid)}), "in its session")
+        self.assertFalse(self.a.inside_agent(agent, tree={me: (1, me, me), pid: (1, pid, pid)}), "unrelated")
+        other = self.make_agent("claude")
+        self.assertFalse(self.a.inside_agent(other, tree={me: (pid, me, me), pid: (1, pid, pid)}), "another agent is not it")
+
+    def test_a_self_change_is_saved_at_once_and_applied_after_the_turn(self):
+        agent, pid = self.running_agent()
+        self.as_agent(pid)
+        spawned = []
+        self.a.spawn_apply = lambda d: spawned.append(d.name)
+        r = self.req(op="heartbeat.set", pubkey=agent.name, minutes=30)
+        self.assertEqual((r["ok"], r["heartbeat"], r["applies"]), (True, 30, "after this turn"))
+        self.assertEqual(self.a.read_settings(agent)["heartbeat"], 30, "saved")
+        self.assertEqual(self.a.running(agent), pid, "not restarted under the turn that asked")
+        self.assertEqual(spawned, [agent.name])
+        self.assertTrue(self.a.applying(agent))
+        r = self.req(op="settings.set", pubkey=agent.name, model="opus")
+        self.assertEqual((r["applies"], r["modelChosen"]), ("after this turn", True))
+        self.assertEqual(r["model"], "claude-fable-5-2", "a running agent reports what it runs until it restarts")
+        self.assertEqual(self.a.read_settings(agent)["model"], "opus", "saved")
+        self.assertEqual(self.req(op="instructions.set", pubkey=agent.name, instructions="Be brief.")["applies"], "after this turn")
+        r = self.req(op="start", pubkey=agent.name)
+        self.assertEqual((r["pid"], r["applies"]), (pid, "after this turn"))
+        self.assertEqual(self.a.running(agent), pid)
+        self.assertEqual(spawned, [agent.name] * 4)
+        self.a.supervise_pass()
+        self.assertEqual(self.a.running(agent), pid, "the supervisor leaves it to the waiter")
+
+    def test_the_waiter_lets_the_turn_end_then_restarts_on_the_saved_settings(self):
+        agent, pid = self.running_agent()
+        self.a.stop(agent)
+        (self.home / "turn.txt").write_text("x")  # buzz-acp with a turn in flight
+        self.assertTrue(self.req(op="start", pubkey=agent.name)["ok"])
+        pid = self.a.running(agent)
+        env = json.loads((agent / "work" / "env.json").read_text())
+        self.assertEqual(env.get("RUST_LOG"), self.a.TURN_LOG["RUST_LOG"], "started so buzz-acp logs its turns' end")
+        self.as_agent(pid)
+        self.a.spawn_apply = lambda d: None
+        self.assertEqual(self.req(op="heartbeat.set", pubkey=agent.name, minutes=45)["applies"], "after this turn")
+        import threading
+        self.a.APPLY_WAIT, self.a.TURN_SETTLE = 20, 0.2
+        waiter = threading.Thread(target=self.a.apply_later, args=(agent,)); waiter.start()
+        time.sleep(1.5)
+        self.assertEqual(self.a.running(agent), pid, "still up while the turn runs: nothing signalled")
+        termed = (self.home / "got-term.txt").read_text() if (self.home / "got-term.txt").exists() else ""
+        self.assertNotIn(str(pid), termed, "no SIGTERM mid-turn: buzz-acp would cancel the turn")
+        self.a.supervise_pass()
+        self.assertEqual(self.a.running(agent), pid, "the supervisor waits too")
+        (self.home / "finish.txt").write_text("x")  # the turn ends: buzz-acp logs it
+        waiter.join(30)
+        new = self.a.running(agent)
+        self.assertTrue(new and new != pid, "restarted once the turn ended")
+        env = json.loads((agent / "work" / "env.json").read_text())
+        self.assertEqual(env["BUZZ_ACP_HEARTBEAT_INTERVAL"], str(45 * 60), "on the saved setting")
+        self.assertFalse(self.a.applying(agent))
+        self.assertIn("applied", (self.a.RUN / "supervisor.log").read_text())
+        self.assertTrue(self.a.turn_ended(agent, 0))
+        self.assertFalse(self.a.turn_ended(agent, (agent / "agent.log").stat().st_size), "nothing past the end")
+        self.assertTrue(self.a.turn_ended(agent, 10 ** 9), "a log cut over since the request is read from its start")
+
+    def test_a_turn_that_starts_and_ends_meanwhile_does_not_count_as_the_asking_one(self):
+        agent = self.make_agent("claude", activate=False)
+        log = agent / "agent.log"
+        wire = lambda arrow, body: f"2026-11-17T00:00:00Z DEBUG acp::wire: {arrow} {body}\n"
+        log.write_text(wire("\u2192", '{"jsonrpc": "2.0", "id": 5, "method": "session/prompt", "params": {}}'))  # a heartbeat turn starts
+        self.assertFalse(self.a.turn_ended(agent, 0))
+        log.write_text(log.read_text() + wire("\u2190", '{"jsonrpc": "2.0", "id": 5, "result": {"stopReason": "end_turn"}}'))  # and ends
+        self.assertFalse(self.a.turn_ended(agent, 0), "that was not the turn that asked")
+        log.write_text(log.read_text() + wire("\u2190", '{"jsonrpc": "2.0", "id": 4, "result": {"stopReason": "end_turn"}}'))
+        self.assertTrue(self.a.turn_ended(agent, 0), "one more closed than opened: the asking turn ended")
+        self.assertFalse(self.a.turn_ended(agent, log.stat().st_size), "nothing past the end")
+
+    def test_a_turn_that_never_ends_is_stopped_the_hard_way(self):
+        agent, pid = self.running_agent()
+        self.a.stop(agent)
+        (self.home / "turn.txt").write_text("x")
+        self.assertTrue(self.req(op="start", pubkey=agent.name)["ok"])
+        pid = self.a.running(agent)
+        self.as_agent(pid)
+        self.a.spawn_apply = lambda d: None
+        self.req(op="heartbeat.set", pubkey=agent.name, minutes=45)
+        self.a.APPLY_WAIT = 1.5
+        self.a.apply_later(agent)
+        new = self.a.running(agent)
+        self.assertTrue(new and new != pid)
+        self.assertIn("did not end", (self.a.RUN / "supervisor.log").read_text())
+
+    def test_a_persons_change_restarts_at_once_as_before(self):
+        agent, pid = self.running_agent()
+        r = self.req(op="heartbeat.set", pubkey=agent.name, minutes=30)
+        self.assertNotIn("applies", r)
+        self.assertNotEqual(self.a.running(agent), pid, "restarted now")
+        self.a.CALLER = "sam"  # a teammate's shell could never be inside the agent's tree either
+        self.as_agent(self.a.running(agent))
+        self.a.spawn_apply = lambda d: self.fail("deferred for a caller")
+        self.assertIn("belongs to", self.req(op="heartbeat.set", pubkey=agent.name, minutes=35)["error"])
+
+    def test_every_harness_home_tells_the_agent_what_it_is_and_how_to_change_itself(self):
+        self.a.ROOT.mkdir(parents=True, exist_ok=True)
+        (self.a.ROOT / "machine.json").write_text('{"name": "testbox"}')
+        command = str(self.a.BIN / "agentctl")
+        for slot, name in (("claude", "CLAUDE.md"), ("claude-key", "CLAUDE.md"), ("codex", "AGENTS.md"), ("codex-key", "AGENTS.md"),
+                           ("grok", "AGENTS.md"), ("grok-key", "AGENTS.md"), ("qwen", "QWEN.md"), ("qwen-key", "QWEN.md")):
+            with self.subTest(slot=slot):
+                home = self.a.slot_home(slot)
+                note = (home / name).read_text()
+                self.assertEqual(stat.S_IMODE((home / name).stat().st_mode), 0o600)
+                self.assertIn("You are a Black 4 hardware agent on the machine testbox, running " + self.a.LABEL[self.a.harness_of(slot)], note)
+                self.assertIn(str(self.a.AGENTS) + "/<pubkey>/work", note)
+                self.assertIn('echo \'{"op":"heartbeat.set","pubkey":"<pubkey>","minutes":30}\' | ' + command, note)
+                self.assertIn("5 to 1440, or 0 for off", note)
+                for op in ("models", "settings.set", "instructions.get", "instructions.set", "start", "status", "heartbeat.get"):
+                    self.assertIn('"op":"%s"' % op, note)
+                self.assertIn("applies after your current turn ends", note)
+                self.assertIn("create_standing_work and update_standing_work", note)
+                self.assertIn("start_next_standing_run", note)
+                if slot.startswith("qwen"): self.assertTrue(note.startswith(self.a.DEFERRED_MCP_NOTE["qwen"]), "Qwen's own note first")
+        self.assertFalse((self.home / ".claude").exists())
+
+    def test_a_second_runner_names_its_root_in_the_note_and_the_agents_environment(self):
+        self.a.set_root(self.home, "workforce-dev")
+        bin_ = self.a.BIN; bin_.mkdir(parents=True)
+        for name in ("claude", "claude-agent-acp", "buzz-acp", "buzz"): shutil.copy(self.home / "workforce" / "bin" / name, bin_ / name)
+        self.a.agent_path = lambda: f"{bin_}:/usr/bin:/bin"
+        note = (self.a.slot_home("claude") / "CLAUDE.md").read_text()
+        self.assertIn("| BLACK4_WORKFORCE_ROOT=%s %s/agentctl" % (self.a.ROOT, bin_), note, "a dev-root agent must name its root")
+        self.sign_in()
+        agent = self.make_agent("claude")
+        self.assertTrue(self.req(op="start", pubkey=agent.name)["ok"])
+        env = json.loads((agent / "work" / "env.json").read_text())
+        self.assertEqual(env.get("BLACK4_WORKFORCE_ROOT"), str(self.a.ROOT))
+        self.a.set_root(self.home)
+        self.assertNotIn("BLACK4_WORKFORCE_ROOT", self.a.agentctl_command(), "the default root needs no name")
+
+
 class Supervisor(Base):
     def test_killed_agent_comes_back(self):
         self.sign_in()
@@ -1181,7 +1345,9 @@ class KeyLogin(DeviceBase):
         self.assertFalse(settings["telemetry"]["enabled"])
         self.assertEqual(settings["memory"], {"enableManagedAutoMemory": False, "enableManagedAutoDream": False},
                          "no shared memory folder, no second model call per turn")
-        self.assertEqual((self.a.HOMES / "qwen-key" / "QWEN.md").read_text(), self.a.DEFERRED_MCP_NOTE["qwen"])
+        self.assertEqual(settings["context"], {"autoCompactThreshold": 0.08}, "compaction at about 80k tokens of a 1M window")
+        self.assertEqual(settings["tools"], {"toolOutputBatchBudget": 100000})
+        self.assertTrue((self.a.HOMES / "qwen-key" / "QWEN.md").read_text().startswith(self.a.DEFERRED_MCP_NOTE["qwen"]))
         self.assertFalse((self.home / ".qwen").exists(), "never the machine user's own ~/.qwen")
 
     def test_the_private_home_keeps_what_qwen_code_wrote_there(self):
@@ -1201,10 +1367,12 @@ class KeyLogin(DeviceBase):
         self.assertIn("mcp__black4__", note)
         home = self.a.qwen_home()
         context = home / "QWEN.md"
-        self.assertEqual(context.read_text(), note, "Qwen Code reads QWEN.md in its home into every session")
+        self.assertTrue(context.read_text().startswith(note), "Qwen Code reads QWEN.md in its home into every session")
+        self.assertIn("# Black 4 hardware", context.read_text(), "and the note on itself after it")
         self.assertEqual(stat.S_IMODE(context.stat().st_mode), 0o600)
+        before = context.stat().st_mtime_ns
         self.a.qwen_home()
-        self.assertEqual(context.read_text(), note)
+        self.assertEqual(context.stat().st_mtime_ns, before, "written only when it changes")
         self.assertIn("tool_search", self.a.heartbeat_prompt({"name": "Q", "model": "qwen4-max"}))
 
     def test_a_token_plan_key_is_kept_for_its_own_base(self):
@@ -1337,7 +1505,7 @@ class MemberLogin(DeviceBase):
         self.assertNotIn("OPENAI_API_KEY", env)
         self.assertNotIn("OPENAI_BASE_URL", env)
         self.assertFalse((self.a.HOMES / "qwen-key" / "subscription_credentials.json").exists())
-        self.assertEqual((self.a.HOMES / "qwen" / "QWEN.md").read_text(), self.a.DEFERRED_MCP_NOTE["qwen"])
+        self.assertTrue((self.a.HOMES / "qwen" / "QWEN.md").read_text().startswith(self.a.DEFERRED_MCP_NOTE["qwen"]))
 
     def test_a_membership_below_plus_is_refused(self):
         (self.home / "member-type.txt").write_text("free")
@@ -1503,7 +1671,7 @@ class HarnessKeys(DeviceBase):
         by_sub = self.env_after_start(self.make_agent("claude", pays="subscription"))
         self.assertEqual(by_sub["CLAUDE_CODE_OAUTH_TOKEN"], FAKE_TOKEN)
         self.assertNotIn("ANTHROPIC_API_KEY", by_sub)
-        self.assertNotIn("CLAUDE_CONFIG_DIR", by_sub, "the subscription runs as it always has")
+        self.assertEqual(by_sub["CLAUDE_CONFIG_DIR"], str(self.a.HOMES / "claude"), "its own home too, for the note on itself")
         rows = {h["id"]: h for h in self.req(op="machine.status")["harnesses"]}
         self.assertEqual((rows["claude"]["signedIn"], rows["claude"]["key"]["signedIn"], rows["claude"]["key"]["plan"]), (True, True, "api"))
 

@@ -145,7 +145,13 @@ sees only the sign-in it pays with.
   Qwen Code (pay-as-you-go or Token Plan).
 
 Qwen Code runs in a private home per sign-in with its self-update, usage
-statistics and managed memory off. New agents run `qwen4-max` (or the next
+statistics and managed memory off (`tools.toolOutputBatchBudget` 100k
+characters). When an agent compacts its context is its own setting, **Compact
+at** next to Model and Effort (a new agent: 150k tokens; *Harness default*
+leaves it to the harness), through the lever each harness has per process;
+where a harness has none, or the machine does not know the model's window yet,
+the choice is greyed with the reason. Black 4 tool results are large, so this
+is what keeps a long session from re-reading them on every request. New agents run `qwen4-max` (or the next
 model that sign-in lists), with no effort setting: Qwen Code has no effort
 lever for a model it is given this way, so the service's default thinking for
 the model applies.
@@ -232,6 +238,22 @@ that stops, waiting 5, 10, 20 … up to 300 seconds while it keeps stopping, and
 Agents run with full access on their own machine: no harness asks permission
 or runs sandboxed (`FULL_ACCESS` in `agentctl`; `doctor` shows each one's mode).
 Changes to a customer's systems are gated by Reviews in Platform Control.
+
+Every agent knows what it is: its home holds a short note, in its CLI's own
+instructions file (`CLAUDE.md`, `AGENTS.md`, `QWEN.md`), saying it is a
+Black 4 hardware agent on this machine, which folder is its own, and the exact
+`agentctl` commands to read and change its heartbeat, model, effort,
+instructions, and to restart. When an agent changes itself from its shell (a
+person asked it to), `agentctl` sees the request comes from inside the
+agent's own process tree, saves the change at once and answers `"applies":
+"after this turn"`; a detached waiter restarts it once no turn is in flight
+(agents run with buzz-acp's ACP wire log on for this; buzz-acp writes to a
+private `agent.raw.log` and a filter follows it into `agent.log`, keeping
+bare "turn opened" and "turn closed" lines and dropping the wire, which
+carries the agent's key and everything the model says), so the turn that
+asked still finishes and its reply posts. A change made by
+a person restarts the agent at once, as before. Job schedules are not the
+agent's to change here: they live in Platform Control.
 
 ### Buzz updates and releases
 

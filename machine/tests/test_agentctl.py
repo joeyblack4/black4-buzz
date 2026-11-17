@@ -12,7 +12,7 @@ home). QwenCloud's GET /models (the key check and listing) is a fake in
 process: it answers 200 for the fake keys, 401 for any other, and nothing at
 all for a key starting sk-offline.
 """
-import contextlib, io, re, importlib.machinery, importlib.util, json, os, signal, stat, subprocess, sys, tempfile, textwrap, time, unittest
+import contextlib, io, re, importlib.machinery, importlib.util, json, os, shutil, signal, stat, subprocess, sys, tempfile, textwrap, time, unittest
 from pathlib import Path
 
 AGENTCTL = Path(__file__).resolve().parent.parent / "agentctl"
@@ -88,8 +88,19 @@ if sys.argv[1:2] == ["models"]:  # what 0.5.30 printed for claude-agent-acp 0.94
     sys.exit(0)
 if os.path.exists(os.path.join(home, "crash.txt")):
     print("buzz-acp: relay refused the connection", flush=True); sys.exit(1)
+import signal
+signal.signal(signal.SIGTERM, lambda *_: (open(os.path.join(home, "got-term.txt"), "a").write(str(os.getpid()) + "\\n"), sys.exit(0)))
+print("2026-11-17T00:00:00.000000Z  INFO buzz_acp: buzz-acp starting: relay=wss://relay.example.com pubkey=x agent_cmd=fake", flush=True)
+# The real wire log hands the MCP server the agent's key in session/new.
+print('2026-11-17T00:00:00.000000Z DEBUG acp::wire: \u2192 {{"id":1,"jsonrpc":"2.0","method":"session/new","params":{{"mcpServers":[{{"env":[{{"name":"BUZZ_PRIVATE_KEY","value":"' + os.environ.get("BUZZ_PRIVATE_KEY", "") + '"}}]}}]}}}}', flush=True)
+if os.path.exists(os.path.join(home, "turn.txt")):
+    # A turn in flight (what buzz-acp 0.5.30 writes with RUST_LOG acp::wire=debug
+    # when it sends a prompt); its result comes back when finish.txt appears.
+    print('2026-11-17T00:00:00.000000Z DEBUG acp::wire: \u2192 {{"id":2,"jsonrpc":"2.0","method":"session/prompt","params":{{}}}}', flush=True)
+    while not os.path.exists(os.path.join(home, "finish.txt")): time.sleep(0.1)
+    print('2026-11-17T00:00:00.000000Z DEBUG acp::wire: \u2190 {{"jsonrpc": "2.0", "id": 2, "result": {{"stopReason": "end_turn"}}}}', flush=True)
 with open("env.json", "w") as f:
-    json.dump({{k: v for k, v in os.environ.items() if k.startswith(("BUZZ_ACP", "CLAUDE_CODE", "CLAUDE_CONFIG_DIR", "PATH", "CODEX", "GROK", "QWEN", "NO_BROWSER", "OPENAI", "XAI", "INITIAL_AGENT_MODE", "GOOSE", "ANTHROPIC"))}}, f)
+    json.dump({{k: v for k, v in os.environ.items() if k.startswith(("BUZZ_ACP", "BLACK4_", "RUST_LOG", "CLAUDE_CODE", "CLAUDE_CONFIG_DIR", "PATH", "CODEX", "GROK", "QWEN", "NO_BROWSER", "OPENAI", "XAI", "INITIAL_AGENT_MODE", "GOOSE", "ANTHROPIC"))}}, f)
 while True: time.sleep(1)
 """
 
@@ -670,6 +681,220 @@ class Callers(Base):
             self.assertFalse(self.run_main("--caller", bad)["ok"], repr(bad))
 
 
+class SelfChange(Base):
+    """An agent changing its own setup from its shell: detected by its process
+    tree, saved at once, applied after its turn; people's changes restart now."""
+    def running_agent(self):
+        self.sign_in()
+        agent = self.make_agent("claude")
+        self.assertTrue(self.req(op="start", pubkey=agent.name)["ok"])
+        return agent, self.a.running(agent)
+
+    def as_agent(self, pid):
+        """Make this test process look like a shell inside the agent's tree."""
+        me = os.getpid()
+        self.a.process_tree = lambda: {me: (pid + 1, me, me), pid + 1: (pid, pid, pid), pid: (1, pid, pid)}
+
+    def test_a_request_from_inside_the_agents_tree_is_its_own(self):
+        agent, pid = self.running_agent()
+        me = os.getpid()
+        self.assertFalse(self.a.inside_agent(agent), "a person's shell is not inside it")
+        self.assertTrue(self.a.inside_agent(agent, tree={me: (pid, me, me), pid: (1, pid, pid)}), "a child of its buzz-acp")
+        self.assertTrue(self.a.inside_agent(agent, tree={me: (pid + 9, me, me), pid + 9: (pid, pid + 9, pid + 9), pid: (1, pid, pid)}), "a grandchild")
+        self.assertTrue(self.a.inside_agent(agent, tree={me: (1, pid, me), pid: (1, pid, pid)}), "in its process group")
+        self.assertTrue(self.a.inside_agent(agent, tree={me: (1, me, pid), pid: (1, pid, pid)}), "in its session")
+        self.assertFalse(self.a.inside_agent(agent, tree={me: (1, me, me), pid: (1, pid, pid)}), "unrelated")
+        other = self.make_agent("claude")
+        self.assertFalse(self.a.inside_agent(other, tree={me: (pid, me, me), pid: (1, pid, pid)}), "another agent is not it")
+
+    def test_a_self_change_is_saved_at_once_and_applied_after_the_turn(self):
+        agent, pid = self.running_agent()
+        self.as_agent(pid)
+        spawned = []
+        self.a.spawn_apply = lambda d: spawned.append(d.name)
+        r = self.req(op="heartbeat.set", pubkey=agent.name, minutes=30)
+        self.assertEqual((r["ok"], r["heartbeat"], r["applies"]), (True, 30, "after this turn"))
+        self.assertEqual(self.a.read_settings(agent)["heartbeat"], 30, "saved")
+        self.assertEqual(self.a.running(agent), pid, "not restarted under the turn that asked")
+        self.assertEqual(spawned, [agent.name])
+        self.assertTrue(self.a.applying(agent))
+        r = self.req(op="settings.set", pubkey=agent.name, model="opus")
+        self.assertEqual((r["applies"], r["modelChosen"]), ("after this turn", True))
+        self.assertEqual(r["model"], "claude-fable-5-2", "a running agent reports what it runs until it restarts")
+        self.assertEqual(self.a.read_settings(agent)["model"], "opus", "saved")
+        self.assertEqual(self.req(op="instructions.set", pubkey=agent.name, instructions="Be brief.")["applies"], "after this turn")
+        r = self.req(op="start", pubkey=agent.name)
+        self.assertEqual((r["pid"], r["applies"]), (pid, "after this turn"))
+        self.assertEqual(self.a.running(agent), pid)
+        self.assertEqual(self.req(op="settings.set", pubkey=agent.name, compactAt=250000)["applies"], "after this turn", "its context setting too")
+        self.assertEqual(self.a.read_settings(agent)["compactAt"], 250000)
+        self.assertEqual(spawned, [agent.name] * 5)
+        self.a.supervise_pass()
+        self.assertEqual(self.a.running(agent), pid, "the supervisor leaves it to the waiter")
+
+    def test_the_waiter_lets_the_turn_end_then_restarts_on_the_saved_settings(self):
+        agent, pid = self.running_agent()
+        self.a.stop(agent)
+        (self.home / "turn.txt").write_text("x")  # buzz-acp with a turn in flight
+        self.assertTrue(self.req(op="start", pubkey=agent.name)["ok"])
+        pid = self.a.running(agent)
+        env = json.loads((agent / "work" / "env.json").read_text())
+        self.assertEqual(env.get("RUST_LOG"), self.a.TURN_LOG["RUST_LOG"], "started so buzz-acp logs its turns' end")
+        self.as_agent(pid)
+        self.a.spawn_apply = lambda d: None
+        self.assertEqual(self.req(op="heartbeat.set", pubkey=agent.name, minutes=45)["applies"], "after this turn")
+        import threading
+        self.a.APPLY_WAIT, self.a.TURN_SETTLE = 20, 0.2
+        waiter = threading.Thread(target=self.a.apply_later, args=(agent,)); waiter.start()
+        time.sleep(1.5)
+        self.assertEqual(self.a.running(agent), pid, "still up while the turn runs: nothing signalled")
+        termed = (self.home / "got-term.txt").read_text() if (self.home / "got-term.txt").exists() else ""
+        self.assertNotIn(str(pid), termed, "no SIGTERM mid-turn: buzz-acp would cancel the turn")
+        self.a.supervise_pass()
+        self.assertEqual(self.a.running(agent), pid, "the supervisor waits too")
+        (self.home / "finish.txt").write_text("x")  # the turn ends: buzz-acp logs it
+        waiter.join(30)
+        new = self.a.running(agent)
+        self.assertTrue(new and new != pid, "restarted once the turn ended")
+        env = json.loads((agent / "work" / "env.json").read_text())
+        self.assertEqual(env["BUZZ_ACP_HEARTBEAT_INTERVAL"], str(45 * 60), "on the saved setting")
+        self.assertFalse(self.a.applying(agent))
+        self.assertIn("applied", (self.a.RUN / "supervisor.log").read_text())
+        self.assertTrue(self.a.turn_ended(agent, 0))
+        self.assertFalse(self.a.turn_ended(agent, (agent / "agent.log").stat().st_size), "nothing past the end")
+        self.assertTrue(self.a.turn_ended(agent, 10 ** 9), "a log cut over since the request is read from its start")
+
+    def test_the_log_filter_keeps_turn_markers_and_never_the_wire(self):
+        sieve = self.a.sieve_line
+        self.assertEqual(sieve(b"2026-11-17T00:00:00Z  INFO buzz_acp: buzz-acp starting: relay=x\n"), b"2026-11-17T00:00:00Z  INFO buzz_acp: buzz-acp starting: relay=x\n", "passes through")
+        self.assertEqual(sieve(b"2026-11-17T00:00:00Z DEBUG acp::wire: \xe2\x86\x92 {\"id\":4,\"jsonrpc\":\"2.0\",\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"text\":\"secret things\"}]}}\n"),
+                         b"2026-11-17T00:00:00Z  INFO agentctl: turn opened\n", "what buzz-acp sends, compact")
+        self.assertEqual(sieve(b"2026-11-17T00:00:00Z DEBUG acp::wire: \xe2\x86\x90 {\"jsonrpc\": \"2.0\", \"id\": 4, \"result\": {\"stopReason\": \"end_turn\", \"_meta\": {}}}\n"),
+                         b"2026-11-17T00:00:00Z  INFO agentctl: turn closed\n", "what a Python agent answers, with spaces")
+        self.assertEqual(sieve(b"2026-11-17T00:00:00Z DEBUG acp::wire: \xe2\x86\x90 {\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{\"stopReason\":\"end_turn\"}}\n"),
+                         b"2026-11-17T00:00:00Z  INFO agentctl: turn closed\n", "what Qwen Code answers, without")
+        self.assertEqual(sieve(b"2026-11-17T00:00:00Z DEBUG acp::wire: \xe2\x86\x92 {\"method\":\"session/new\",\"params\":{\"mcpServers\":[{\"env\":[{\"name\":\"BUZZ_PRIVATE_KEY\",\"value\":\"" + b"k" * 64 + b"\"}]}]}}\n"), b"", "the agent's key never reaches the log")
+        self.assertEqual(sieve(b"2026-11-17T00:00:00Z DEBUG acp::wire: \xe2\x86\x90 {\"method\":\"session/update\",\"params\":{\"update\":{\"text\":\"what the model said\"}}}\n"), b"", "nor what the model says")
+        # As buzz-acp really writes it: coloured, the target split by escape codes.
+        coloured = b"\x1b[2m2026-11-17T00:00:00Z\x1b[0m \x1b[34mDEBUG\x1b[0m \x1b[2macp::wire\x1b[0m\x1b[2m:\x1b[0m \xe2\x86\x92 {\"id\":2,\"jsonrpc\":\"2.0\",\"method\":\"session/prompt\",\"params\":{}}\n"
+        self.assertEqual(sieve(coloured), b"2026-11-17T00:00:00Z  INFO agentctl: turn opened\n")
+        self.assertEqual(sieve(b"\x1b[2m2026-11-17T00:00:00Z\x1b[0m \x1b[34mDEBUG\x1b[0m \x1b[2macp::wire\x1b[0m\x1b[2m:\x1b[0m \xe2\x86\x92 {\"method\":\"session/new\",\"params\":{\"env\":[{\"name\":\"BUZZ_PRIVATE_KEY\",\"value\":\"k\"}]}}\n"), b"", "coloured or not, the key never reaches the log")
+        agent = self.make_agent("claude", activate=False)
+        (agent / "agent.log").write_bytes(b"\x1b[2m2026-11-17T00:00:00Z\x1b[0m  \x1b[32mINFO\x1b[0m \x1b[2mbuzz_acp\x1b[0m\x1b[2m:\x1b[0m buzz-acp starting: relay=x\n" + b"2026-11-17T00:00:00Z  INFO agentctl: turn opened\n")
+        self.assertEqual(self.a.turns_in_flight(agent), 1, "a coloured start line still counts")
+
+    def test_a_running_agents_log_holds_markers_and_no_key(self):
+        self.sign_in()
+        agent = self.make_agent("claude")
+        (self.home / "turn.txt").write_text("x"); (self.home / "finish.txt").write_text("x")
+        self.assertTrue(self.req(op="start", pubkey=agent.name)["ok"])
+        time.sleep(0.8)
+        log = (agent / "agent.log").read_text()
+        key = (agent / "key").read_text().strip()
+        self.assertNotIn(key, log, "the key buzz-acp hands the MCP server is filtered out")
+        self.assertNotIn("acp::wire", log)
+        self.assertIn("buzz-acp starting", log)
+        self.assertIn("agentctl: turn opened", log)
+        self.assertIn("agentctl: turn closed", log)
+        self.assertEqual(self.a.turns_in_flight(agent), 0)
+        self.assertIn(key, (agent / "agent.raw.log").read_text(), "buzz-acp itself writes to the raw log, a file, never a pipe")
+        self.assertEqual(stat.S_IMODE((agent / "agent.raw.log").stat().st_mode), 0o600)
+        sieve = json.loads((agent / "sieve.json").read_text())["pid"]
+        self.assertIn("log-filter", self.a.process_command(sieve))
+        self.assertNotIn(key, self.req(op="status", pubkey=agent.name)["log"], "nor in what status shows")
+        self.a.stop(agent)
+        time.sleep(1.0)
+        self.assertEqual(self.a.process_command(sieve), "", "the filter ends with buzz-acp")
+        self.assertTrue(self.req(op="start", pubkey=agent.name)["ok"])
+        time.sleep(0.8)
+        self.assertEqual((agent / "agent.log").read_text().count("buzz-acp starting"), 2, "each start once, from one filter")
+
+    def test_the_restart_waits_until_no_turn_is_in_flight_not_just_the_first_to_end(self):
+        agent = self.make_agent("claude", activate=False)
+        log = agent / "agent.log"
+        start = "2026-11-17T00:00:00Z  INFO buzz_acp: buzz-acp starting: relay=wss://r pubkey=x agent_cmd=y\n"
+        opened, closed = "2026-11-17T00:00:00Z  INFO agentctl: turn opened\n", "2026-11-17T00:00:00Z  INFO agentctl: turn closed\n"
+        log.write_text(start + opened)  # the asking turn
+        since = log.stat().st_size  # the self-change comes now
+        self.assertEqual(self.a.turns_in_flight(agent), 1)
+        self.assertFalse(self.a.turn_ended(agent, since))
+        log.write_text(log.read_text() + opened)  # a heartbeat turn starts on the other process
+        log.write_text(log.read_text() + closed)  # the asking turn ends
+        self.assertEqual(self.a.turns_in_flight(agent), 1)
+        self.assertFalse(self.a.turn_ended(agent, since), "the other turn is still running: a restart now would cut it")
+        log.write_text(log.read_text() + closed)
+        self.assertEqual(self.a.turns_in_flight(agent), 0)
+        self.assertTrue(self.a.turn_ended(agent, since), "now nothing is in flight")
+        self.assertFalse(self.a.turn_ended(agent, log.stat().st_size), "nothing past the end")
+        log.write_text(log.read_text() + start)  # buzz-acp started again: the old counts are history
+        self.assertEqual(self.a.turns_in_flight(agent), 0)
+        (agent / "agent.log.1").write_text(log.read_text()); log.write_text("")  # cut over: the start line is in agent.log.1
+        self.assertEqual(self.a.turns_in_flight(agent), 0)
+        (agent / "agent.log.1").unlink(); self.assertIsNone(self.a.turns_in_flight(agent), "no start line anywhere: cannot tell")
+
+    def test_a_turn_that_never_ends_is_stopped_the_hard_way(self):
+        agent, pid = self.running_agent()
+        self.a.stop(agent)
+        (self.home / "turn.txt").write_text("x")
+        self.assertTrue(self.req(op="start", pubkey=agent.name)["ok"])
+        pid = self.a.running(agent)
+        self.as_agent(pid)
+        self.a.spawn_apply = lambda d: None
+        self.req(op="heartbeat.set", pubkey=agent.name, minutes=45)
+        self.a.APPLY_WAIT = 1.5
+        self.a.apply_later(agent)
+        new = self.a.running(agent)
+        self.assertTrue(new and new != pid)
+        self.assertIn("did not end", (self.a.RUN / "supervisor.log").read_text())
+
+    def test_a_persons_change_restarts_at_once_as_before(self):
+        agent, pid = self.running_agent()
+        r = self.req(op="heartbeat.set", pubkey=agent.name, minutes=30)
+        self.assertNotIn("applies", r)
+        self.assertNotEqual(self.a.running(agent), pid, "restarted now")
+        self.a.CALLER = "sam"  # a teammate's shell could never be inside the agent's tree either
+        self.as_agent(self.a.running(agent))
+        self.a.spawn_apply = lambda d: self.fail("deferred for a caller")
+        self.assertIn("belongs to", self.req(op="heartbeat.set", pubkey=agent.name, minutes=35)["error"])
+
+    def test_every_harness_home_tells_the_agent_what_it_is_and_how_to_change_itself(self):
+        self.a.ROOT.mkdir(parents=True, exist_ok=True)
+        (self.a.ROOT / "machine.json").write_text('{"name": "testbox"}')
+        command = str(self.a.BIN / "agentctl")
+        for slot, name in (("claude", "CLAUDE.md"), ("claude-key", "CLAUDE.md"), ("codex", "AGENTS.md"), ("codex-key", "AGENTS.md"),
+                           ("grok", "AGENTS.md"), ("grok-key", "AGENTS.md"), ("qwen", "QWEN.md"), ("qwen-key", "QWEN.md")):
+            with self.subTest(slot=slot):
+                home = self.a.slot_home(slot)
+                note = (home / name).read_text()
+                self.assertEqual(stat.S_IMODE((home / name).stat().st_mode), 0o600)
+                self.assertIn("You are a Black 4 hardware agent on the machine testbox, running " + self.a.LABEL[self.a.harness_of(slot)], note)
+                self.assertIn(str(self.a.AGENTS) + "/<pubkey>/work", note)
+                self.assertIn('echo \'{"op":"heartbeat.set","pubkey":"<pubkey>","minutes":30}\' | ' + command, note)
+                self.assertIn("5 to 1440, or 0 for off", note)
+                for op in ("models", "settings.set", "instructions.get", "instructions.set", "start", "status", "heartbeat.get"):
+                    self.assertIn('"op":"%s"' % op, note)
+                self.assertIn("applies after your current turn ends", note)
+                self.assertIn("create_standing_work and update_standing_work", note)
+                self.assertIn("start_next_standing_run", note)
+                if slot.startswith("qwen"): self.assertTrue(note.startswith(self.a.DEFERRED_MCP_NOTE["qwen"]), "Qwen's own note first")
+        self.assertFalse((self.home / ".claude").exists())
+
+    def test_a_second_runner_names_its_root_in_the_note_and_the_agents_environment(self):
+        self.a.set_root(self.home, "workforce-dev")
+        bin_ = self.a.BIN; bin_.mkdir(parents=True)
+        for name in ("claude", "claude-agent-acp", "buzz-acp", "buzz"): shutil.copy(self.home / "workforce" / "bin" / name, bin_ / name)
+        self.a.agent_path = lambda: f"{bin_}:/usr/bin:/bin"
+        note = (self.a.slot_home("claude") / "CLAUDE.md").read_text()
+        self.assertIn("| BLACK4_WORKFORCE_ROOT=%s %s/agentctl" % (self.a.ROOT, bin_), note, "a dev-root agent must name its root")
+        self.sign_in()
+        agent = self.make_agent("claude")
+        self.assertTrue(self.req(op="start", pubkey=agent.name)["ok"])
+        env = json.loads((agent / "work" / "env.json").read_text())
+        self.assertEqual(env.get("BLACK4_WORKFORCE_ROOT"), str(self.a.ROOT))
+        self.a.set_root(self.home)
+        self.assertNotIn("BLACK4_WORKFORCE_ROOT", self.a.agentctl_command(), "the default root needs no name")
+
+
 class Supervisor(Base):
     def test_killed_agent_comes_back(self):
         self.sign_in()
@@ -1181,7 +1406,9 @@ class KeyLogin(DeviceBase):
         self.assertFalse(settings["telemetry"]["enabled"])
         self.assertEqual(settings["memory"], {"enableManagedAutoMemory": False, "enableManagedAutoDream": False},
                          "no shared memory folder, no second model call per turn")
-        self.assertEqual((self.a.HOMES / "qwen-key" / "QWEN.md").read_text(), self.a.DEFERRED_MCP_NOTE["qwen"])
+        self.assertNotIn("context", settings, "when it compacts is each agent's own setting, not the shared home's")
+        self.assertEqual(settings["tools"], {"toolOutputBatchBudget": 100000})
+        self.assertTrue((self.a.HOMES / "qwen-key" / "QWEN.md").read_text().startswith(self.a.DEFERRED_MCP_NOTE["qwen"]))
         self.assertFalse((self.home / ".qwen").exists(), "never the machine user's own ~/.qwen")
 
     def test_the_private_home_keeps_what_qwen_code_wrote_there(self):
@@ -1201,10 +1428,12 @@ class KeyLogin(DeviceBase):
         self.assertIn("mcp__black4__", note)
         home = self.a.qwen_home()
         context = home / "QWEN.md"
-        self.assertEqual(context.read_text(), note, "Qwen Code reads QWEN.md in its home into every session")
+        self.assertTrue(context.read_text().startswith(note), "Qwen Code reads QWEN.md in its home into every session")
+        self.assertIn("# Black 4 hardware", context.read_text(), "and the note on itself after it")
         self.assertEqual(stat.S_IMODE(context.stat().st_mode), 0o600)
+        before = context.stat().st_mtime_ns
         self.a.qwen_home()
-        self.assertEqual(context.read_text(), note)
+        self.assertEqual(context.stat().st_mtime_ns, before, "written only when it changes")
         self.assertIn("tool_search", self.a.heartbeat_prompt({"name": "Q", "model": "qwen4-max"}))
 
     def test_a_token_plan_key_is_kept_for_its_own_base(self):
@@ -1337,7 +1566,7 @@ class MemberLogin(DeviceBase):
         self.assertNotIn("OPENAI_API_KEY", env)
         self.assertNotIn("OPENAI_BASE_URL", env)
         self.assertFalse((self.a.HOMES / "qwen-key" / "subscription_credentials.json").exists())
-        self.assertEqual((self.a.HOMES / "qwen" / "QWEN.md").read_text(), self.a.DEFERRED_MCP_NOTE["qwen"])
+        self.assertTrue((self.a.HOMES / "qwen" / "QWEN.md").read_text().startswith(self.a.DEFERRED_MCP_NOTE["qwen"]))
 
     def test_a_membership_below_plus_is_refused(self):
         (self.home / "member-type.txt").write_text("free")
@@ -1503,7 +1732,7 @@ class HarnessKeys(DeviceBase):
         by_sub = self.env_after_start(self.make_agent("claude", pays="subscription"))
         self.assertEqual(by_sub["CLAUDE_CODE_OAUTH_TOKEN"], FAKE_TOKEN)
         self.assertNotIn("ANTHROPIC_API_KEY", by_sub)
-        self.assertNotIn("CLAUDE_CONFIG_DIR", by_sub, "the subscription runs as it always has")
+        self.assertEqual(by_sub["CLAUDE_CONFIG_DIR"], str(self.a.HOMES / "claude"), "its own home too, for the note on itself")
         rows = {h["id"]: h for h in self.req(op="machine.status")["harnesses"]}
         self.assertEqual((rows["claude"]["signedIn"], rows["claude"]["key"]["signedIn"], rows["claude"]["key"]["plan"]), (True, True, "api"))
 
@@ -1528,12 +1757,12 @@ class HarnessKeys(DeviceBase):
         self.assertIn(FAKE_CRED, (self.a.HOMES / "codex" / "auth.json").read_text(), "the ChatGPT sign-in is untouched")
         by_key = self.env_after_start(self.make_agent("codex", pays="key"))
         self.assertEqual(by_key["CODEX_HOME"], str(key_home))
-        self.assertNotIn("OPENAI_API_KEY", by_key, "Codex reads its file, not the environment")
+        self.assertEqual(by_key["OPENAI_API_KEY"], FAKE_OPENAI_KEY, "codex-acp wants it in the environment too")
         self.assertIn('cli_auth_credentials_store = "file"', (key_home / "config.toml").read_text())
         self.assertEqual(by_key["INITIAL_AGENT_MODE"], "agent-full-access")
         by_sub = self.env_after_start(self.make_agent("codex", pays="subscription"))
         self.assertEqual(by_sub["CODEX_HOME"], str(self.a.HOMES / "codex"))
-        self.assertNotIn("OPENAI_API_KEY", json.dumps(by_sub))
+        self.assertNotIn("OPENAI_API_KEY", by_sub)
         (key_home / "auth.json").unlink()
         self.env_after_start(self.make_agent("codex", pays="key"))
         self.assertTrue((key_home / "auth.json").exists(), "start puts the file back when it is gone")
@@ -1605,6 +1834,99 @@ class HarnessKeys(DeviceBase):
         with contextlib.redirect_stdout(out): self.a.print_doctor()
         for label in ("Claude Code", "Codex", "Grok Build", "Qwen Code"):
             self.assertIn(f"{label}: signed out (subscription signed out, API key signed out)", out.getvalue())
+
+
+class CompactAt(DeviceBase):
+    """When each agent compacts its context: its own setting, through the lever
+    each harness has per process, and buzz-acp's own levers per agent."""
+    def setUp(self):
+        super().setUp()
+        self.sign_in(); self.sign_in_device("codex"); self.sign_in_device("grok"); self.sign_in_member()
+        for harness, cache in (("codex", CODEX_MODELS), ("grok", GROK_MODELS)):
+            (self.a.private_dir(self.a.HOMES / harness) / "models_cache.json").write_text(json.dumps(cache))
+
+    def test_a_new_agent_compacts_at_150k_where_its_harness_takes_it(self):
+        for harness in ("claude", "codex", "grok", "qwen"):
+            with self.subTest(harness=harness):
+                agent = self.make_agent(harness, activate=False)
+                self.assertEqual(self.req(op="status", pubkey=agent.name)["compactAt"], 150000)
+        rows = {h["id"]: h for h in self.req(op="models")["harnesses"]}
+        self.assertEqual(rows["claude"]["compact"], {"supported": True, "min": 100000, "max": 1000000, "default": 150000})
+        self.assertEqual(rows["qwen"]["compact"]["supported"], True)
+        self.assertEqual(rows["grok"]["compact"]["supported"], True, "grok-4.7's window is in its cached listing")
+        (self.a.HOMES / "grok" / "models_cache.json").unlink()
+        grok = next(h for h in self.req(op="models")["harnesses"] if h["id"] == "grok")["compact"]
+        self.assertEqual(grok["supported"], False)
+        self.assertEqual(grok["note"], "The machine does not know grok-4.7's context window yet; Grok Build lists it after its first run.")
+        later = self.req(op="provision", name="Grok, later", community="wss://relay.example.com", config={"harness": "grok"})
+        self.assertIsNone(self.req(op="status", pubkey=later["pubkey"])["compactAt"], "then a new Grok agent keeps the harness default")
+        self.assertIn("does not know grok-4.7's context window", self.req(op="provision", name="Grok, chosen", community="wss://relay.example.com", config={"harness": "grok", "compactAt": 100000})["error"])
+        existing = self.make_agent("claude", activate=False)
+        st = self.a.read_settings(existing); del st["compactAt"]; self.a.write_settings(existing, st)
+        self.assertIsNone(self.req(op="status", pubkey=existing.name)["compactAt"], "an agent from before keeps the harness default")
+
+    def test_each_harness_gets_its_own_lever(self):
+        claude = self.env_after_start(self.make_agent("claude"))
+        self.assertEqual(claude["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], "150000")
+        codex = self.env_after_start(self.make_agent("codex"))
+        self.assertEqual(json.loads(codex["CODEX_CONFIG"])["model_auto_compact_token_limit"], 150000)
+        grok = self.env_after_start(self.make_agent("grok"))
+        self.assertEqual(grok["GROK_AUTO_COMPACT_THRESHOLD_PERCENT"], "59", "150k of grok-4.7's 256k window")
+        qwen_agent = self.make_agent("qwen")
+        qwen = self.env_after_start(qwen_agent)
+        self.assertNotIn("CLAUDE_CODE_AUTO_COMPACT_WINDOW", qwen)
+        workspace = json.loads((qwen_agent / "work" / ".qwen" / "settings.json").read_text())
+        self.assertEqual(workspace, {"context": {"autoCompactThreshold": 0.15}}, "150k of qwen4-max's 1M window, in the agent's own folder")
+        self.assertNotIn("context", json.loads((self.a.HOMES / "qwen" / "settings.json").read_text()), "the shared home carries no threshold")
+        self.assertEqual(json.loads((qwen_agent / "launch.json").read_text())["compactAt"], 150000)
+
+    def test_settings_set_changes_it_within_each_harness_s_range(self):
+        agent = self.make_agent("claude")
+        self.assertEqual(self.req(op="settings.set", pubkey=agent.name, compactAt=50000)["error"], "Claude Code compacts at 100,000 to 1,000,000 tokens here.")
+        self.assertEqual(self.req(op="settings.set", pubkey=agent.name, compactAt="lots")["error"], "compactAt is a number of tokens, or null for the harness's default")
+        done = self.req(op="settings.set", pubkey=agent.name, compactAt=250000)
+        self.assertEqual((done["compactAt"], done["model"]), (250000, "claude-fable-5-2"))
+        self.assertEqual(json.loads((agent / "work" / "env.json").read_text())["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], "250000")
+        done = self.req(op="settings.set", pubkey=agent.name, compactAt=None)
+        self.assertIsNone(done["compactAt"])
+        self.assertNotIn("CLAUDE_CODE_AUTO_COMPACT_WINDOW", json.loads((agent / "work" / "env.json").read_text()), "the harness's own default again")
+        qwen_agent = self.make_agent("qwen")
+        self.env_after_start(qwen_agent)
+        (qwen_agent / "work" / ".qwen" / "settings.json").write_text(json.dumps({"context": {"autoCompactThreshold": 0.15}, "ui": {"theme": "dark"}}))
+        self.req(op="settings.set", pubkey=qwen_agent.name, compactAt=None)
+        self.assertEqual(json.loads((qwen_agent / "work" / ".qwen" / "settings.json").read_text()), {"ui": {"theme": "dark"}}, "our key goes, the agent's own stay")
+        self.req(op="settings.set", pubkey=qwen_agent.name, compactAt=500000)
+        self.assertEqual(json.loads((qwen_agent / "work" / ".qwen" / "settings.json").read_text())["context"], {"autoCompactThreshold": 0.5})
+        rows = {a["pubkey"]: a for a in self.req(op="list")["agents"]}
+        self.assertEqual(rows[qwen_agent.name]["compactAt"], 500000)
+        self.assertIn("compact at 500,000 tokens", self.a.heartbeat_prompt(self.a.read_settings(qwen_agent)))
+        self.assertIn("compaction at your harness's default", self.a.heartbeat_prompt({"name": "x"}))
+
+    def test_buzz_acps_own_levers_are_per_agent_and_a_heartbeat_keeps_two_in_parallel(self):
+        agent = self.make_agent("claude")
+        self.assertEqual(self.req(op="settings.set", pubkey=agent.name, agents=9)["error"], "agents is a whole number from 1 to 8, or null for buzz-acp's default")
+        self.assertEqual(self.req(op="settings.set", pubkey=agent.name, sessionPolicy="room")["error"], "sessionPolicy is one of channel, thread, or null for buzz-acp's default")
+        done = self.req(op="settings.set", pubkey=agent.name, agents=3, sessionPolicy="thread", multipleEventHandling="queue",
+                        maxTurnsPerSession=40, maxTurnDuration=900, contextMessageLimit=0)
+        self.assertEqual(done["controls"], {"agents": 3, "sessionPolicy": "thread", "multipleEventHandling": "queue",
+                                            "maxTurnsPerSession": 40, "maxTurnDuration": 900, "contextMessageLimit": 0})
+        env = json.loads((agent / "work" / "env.json").read_text())
+        self.assertEqual([env[k] for k in ("BUZZ_ACP_AGENTS", "BUZZ_ACP_SESSION_POLICY", "BUZZ_ACP_MULTIPLE_EVENT_HANDLING", "BUZZ_ACP_MAX_TURNS_PER_SESSION", "BUZZ_ACP_MAX_TURN_DURATION", "BUZZ_ACP_CONTEXT_MESSAGE_LIMIT")],
+                         ["3", "thread", "queue", "40", "900", "0"])
+        self.req(op="settings.set", pubkey=agent.name, agents=None, maxTurnDuration="")
+        env = json.loads((agent / "work" / "env.json").read_text())
+        self.assertNotIn("BUZZ_ACP_AGENTS", env, "buzz-acp's default again")
+        self.assertNotIn("BUZZ_ACP_MAX_TURN_DURATION", env)
+        self.assertEqual(self.req(op="status", pubkey=agent.name)["controls"]["agents"], None)
+        self.req(op="heartbeat.set", pubkey=agent.name, minutes=15)
+        self.assertEqual(json.loads((agent / "work" / "env.json").read_text())["BUZZ_ACP_AGENTS"], "2", "a heartbeat agent keeps two")
+        self.req(op="settings.set", pubkey=agent.name, agents=4)
+        self.assertEqual(json.loads((agent / "work" / "env.json").read_text())["BUZZ_ACP_AGENTS"], "4")
+        self.req(op="settings.set", pubkey=agent.name, agents=1)
+        self.assertEqual(json.loads((agent / "work" / "env.json").read_text())["BUZZ_ACP_AGENTS"], "2", "never below two while it has a heartbeat")
+        schema = self.req(op="models")["controls"]
+        self.assertEqual(schema["multipleEventHandling"], {"values": ["steer", "queue", "interrupt", "owner-interrupt"], "default": "steer"})
+        self.assertEqual(schema["maxTurnDuration"], {"min": 60, "max": 86400, "default": 7200})
 
 
 def install_pinned(a, home):
@@ -1955,7 +2277,7 @@ CODEX_MODELS = {"client_version": "0.160.1", "models": [
      "supported_reasoning_levels": [{"effort": "medium"}]},
 ]}
 GROK_MODELS = {"grok_version": "1.0.70", "models": {
-    "grok-4.7": {"info": {"id": "grok-4.7", "name": "Grok 4.7", "hidden": False, "supports_reasoning_effort": True,
+    "grok-4.7": {"info": {"id": "grok-4.7", "name": "Grok 4.7", "hidden": False, "supports_reasoning_effort": True, "context_window": 256000,
                           "reasoning_efforts": [{"value": e} for e in ("xhigh", "high", "medium", "low")]}},
     "grok-4.5": {"info": {"id": "grok-4.5", "name": "Grok 4.5", "hidden": False, "supports_reasoning_effort": True,
                           "reasoning_efforts": [{"value": e} for e in ("medium", "low")]}},
@@ -2059,7 +2381,7 @@ class ModelAndEffort(DeviceBase):
         self.assertNotIn("BUZZ_ACP_MODEL", env, "buzz-acp keeps the default model when the adapter refuses it, silently")
         self.assertNotIn("BUZZ_ACP_EFFORT_LEVEL", env)
         env = self.env_of(self.make_agent("codex"))
-        self.assertEqual(json.loads(env["CODEX_CONFIG"]), {"model": "gpt-6-astra", "model_reasoning_effort": "high"})
+        self.assertEqual(json.loads(env["CODEX_CONFIG"]), {"model": "gpt-6-astra", "model_reasoning_effort": "high", "model_auto_compact_token_limit": 150000})
         self.assertEqual(env["INITIAL_AGENT_MODE"], "agent-full-access")
         env = self.env_of(self.make_agent("grok"))
         self.assertEqual(env["BUZZ_ACP_AGENT_ARGS"], "agent,--model,grok-4.7,--reasoning-effort,high,--always-approve,stdio")
@@ -2118,7 +2440,7 @@ class ModelAndEffort(DeviceBase):
         (self.a.HOMES / "codex" / "models_cache.json").unlink()
         agent = self.make_agent("codex")
         env = self.env_of(agent)
-        self.assertEqual(json.loads(env["CODEX_CONFIG"]), {"model": "gpt-6-astra", "model_reasoning_effort": "high"})
+        self.assertEqual(json.loads(env["CODEX_CONFIG"]), {"model": "gpt-6-astra", "model_reasoning_effort": "high", "model_auto_compact_token_limit": 150000})
         self.assertFalse(json.loads((agent / "launch.json").read_text())["checked"])
         row = next(h for h in self.req(op="models")["harnesses"] if h["id"] == "codex")
         self.assertEqual((row["models"], row["checked"]), ([], False))

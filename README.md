@@ -123,28 +123,31 @@ Each harness on a machine is signed in once, to the subscription of whoever
 signs it in. Every agent on that machine that runs the harness uses that
 sign-in:
 
-- **Claude Code** (Claude subscription): open the link, approve, then paste
-  the code the Anthropic page shows into the form.
-- **Codex** (ChatGPT subscription) and **Grok Build** (SuperGrok or grok.com):
-  open the link and approve the short code the form shows. There is nothing to
-  paste: the machine notices the approval. The code lasts 15 minutes.
-- **Qwen Code** has two ways to pay, and each agent chooses one (**Pays
-  with** in the form and in its Settings):
-  - **Subscription**: a Qwen membership (Plus or Pro on chat.qwen.ai). Open
-    the link and approve the short code, as for Codex and Grok Build; the
-    machine keeps Qwen Code's own sign-in file and Qwen Code refreshes it.
-  - **API key**: a QwenCloud key (pay-as-you-go or Token Plan). Open the link
-    to QwenCloud's API keys page, make a key there and paste it into the
-    form. The machine checks it against QwenCloud and keeps it to itself; it
-    never comes back to Buzz.
+Each harness has two ways to pay, a **subscription** and an **API key**, and
+each agent chooses one (**Pays with** in the form and in its Settings). A new
+agent pays by subscription when the machine's subscription for that harness
+is signed in, else by key, and keeps that until you change it. Each agent
+sees only the sign-in it pays with.
 
-  A new agent pays by subscription when the machine's membership is signed
-  in, else by key, and keeps that until you change it. Each agent sees only
-  the sign-in it pays with. Qwen Code runs in a private home per sign-in with
-  its self-update, usage statistics and managed memory off. New agents run
-  `qwen4-max` (or the next model that sign-in lists), with no effort
-  setting: Qwen Code has no effort lever for a model it is given this way,
-  so the service's default thinking for the model applies.
+- **Subscription.**
+  - **Claude Code** (Claude subscription): open the link, approve, then paste
+    the code the Anthropic page shows into the form.
+  - **Codex** (ChatGPT), **Grok Build** (SuperGrok or grok.com) and **Qwen
+    Code** (a Qwen membership, Plus or Pro on chat.qwen.ai): open the link
+    and approve the short code the form shows. There is nothing to paste: the
+    machine notices the approval. The code lasts 15 minutes.
+- **API key.** Open the link to the service's keys page, make a key there and
+  paste it into the form (**Add key**). The machine checks it against the
+  service's model list, keeps it to itself in its own home for that harness,
+  and it never comes back to Buzz: an Anthropic key for Claude Code, a
+  QwenCloud key for Qwen Code (pay-as-you-go or Token Plan). Codex and Grok
+  Build keys follow.
+
+Qwen Code runs in a private home per sign-in with its self-update, usage
+statistics and managed memory off. New agents run `qwen4-max` (or the next
+model that sign-in lists), with no effort setting: Qwen Code has no effort
+lever for a model it is given this way, so the service's default thinking for
+the model applies.
 
 A harness that the machine has installed but Buzz can't sign in (Goose) is
 listed as unavailable, with the reason.

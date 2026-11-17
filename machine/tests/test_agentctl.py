@@ -1187,11 +1187,12 @@ class KeyLogin(DeviceBase):
         note = self.a.DEFERRED_MCP_NOTE["qwen"]
         self.assertIn("tool_search", note)
         self.assertIn("mcp__black4__", note)
-        self.assertEqual(self.a.system_prompt("qwen", {}, True), note)
-        self.assertEqual(self.a.system_prompt("qwen", {"instructions": "Be brief."}, True), note + "\nBe brief.")
-        self.assertEqual(self.a.system_prompt("qwen", {"instructions": "Be brief."}, False), "Be brief.", "no connector, no note")
-        self.assertEqual(self.a.system_prompt("claude", {"instructions": "Be brief."}, True), "Be brief.", "other harnesses list the tools themselves")
-        self.assertEqual(self.a.system_prompt("claude", {"instructions": "  "}, True), "")
+        home = self.a.key_home("qwen")
+        context = home / "QWEN.md"
+        self.assertEqual(context.read_text(), note, "Qwen Code reads QWEN.md in its home into every session")
+        self.assertEqual(stat.S_IMODE(context.stat().st_mode), 0o600)
+        self.a.key_home("qwen")
+        self.assertEqual(context.read_text(), note)
         self.assertIn("tool_search", self.a.heartbeat_prompt({"name": "Q", "model": "qwen4-max"}))
 
     def test_a_teammate_may_sign_qwen_in_while_it_is_signed_out_only(self):

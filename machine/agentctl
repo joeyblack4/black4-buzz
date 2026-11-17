@@ -574,6 +574,16 @@ KEY = {
                           "memory": {"enableManagedAutoMemory": False, "enableManagedAutoDream": False}}},
 }
 KEY_RE = re.compile(r"^[\x21-\x7e]{16,512}$")  # printable ASCII, no spaces: it goes in a header and the environment
+# Qwen Code lists no MCP tool by name at startup: every tool of the Black 4
+# connector is a deferred tool, reached only through its own tool_search and
+# tool_call (proven on 0.27.4: tool_search "probe" returned
+# mcp__probe__probe_ping, tool_call ran it on the MCP server). Without this
+# note a Qwen agent does not know the Black 4 tools exist. key_home writes it.
+DEFERRED_MCP_NOTE = {
+    "qwen": ("Your Black 4 tools (the black4 MCP server: whoami, list_businesses, get_business_context, "
+             "start_next_standing_run and the rest) are not in your tool list. Find one with tool_search "
+             "(\"select:mcp__black4__<tool>\" or a keyword) and run it with tool_call.\n"),
+}
 
 
 def key_home(harness, base=None):
@@ -589,6 +599,15 @@ def key_home(harness, base=None):
         if not isinstance(new.get(section), dict): new[section] = {}
         new[section].update(values)
     if new != old: write_private(path, json.dumps(new, indent=2) + "\n")
+    # Qwen Code reads QWEN.md in its home into every session's system prompt
+    # (proven on 0.27.4), whatever the host passes, so the note on reaching
+    # the deferred Black 4 tools goes there, for every agent on this harness.
+    note = DEFERRED_MCP_NOTE.get(harness)
+    if note:
+        context = home / "QWEN.md"
+        try: current = context.read_text()
+        except FileNotFoundError: current = None
+        if current != note: write_private(context, note)
     return home
 
 
@@ -624,10 +643,14 @@ def http_get_json(url, key, timeout=20):
     None), or (None, None) when nothing answered. The key is in the header
     only, never in a command line or a log."""
     import urllib.error, urllib.request
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *args, **kwargs): return None  # a redirect would carry the key to another host
+
     req = urllib.request.Request(url, headers={"Authorization": "Bearer " + key, "Accept": "application/json",
                                                "User-Agent": "black4-agentctl"})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with urllib.request.build_opener(NoRedirect).open(req, timeout=timeout) as r:
             status, body = r.status, r.read()
     except urllib.error.HTTPError as e:
         status, body = e.code, e.read()
@@ -980,27 +1003,6 @@ DEFAULT_HEARTBEAT_PROMPT = """Black 4 heartbeat: run whatever standing job is du
 3. Finish with finish_standing_run (the same way): runId, agent "{name}", model {model}, and businesses: one entry per business marked run, each with businessId, outcome (done, no_action or failed), a one-line summary and its reviewIds. Use failed only when you truly cannot do the work, and say why.
 4. Call start_next_standing_run again and repeat. Do not start another run after 30 minutes of work, but never close a run undone to move on.
 """
-
-
-# Qwen Code lists no MCP tool by name at startup: every tool of the Black 4
-# connector is a deferred tool, reached only through its own tool_search and
-# tool_call (proven on 0.27.4: tool_search "probe" returned
-# mcp__probe__probe_ping, tool_call ran it on the MCP server). Without this
-# note a Qwen agent does not know the Black 4 tools exist.
-DEFERRED_MCP_NOTE = {
-    "qwen": ("Your Black 4 tools (the black4 MCP server: whoami, list_businesses, get_business_context, "
-             "start_next_standing_run and the rest) are not in your tool list. Find one with tool_search "
-             "(\"select:mcp__black4__<tool>\" or a keyword) and run it with tool_call.\n"),
-}
-
-
-def system_prompt(harness, s, has_mcp):
-    """The agent's system prompt file: the harness's note on reaching the Black 4
-    tools (only when the connector is there), then the owner's instructions."""
-    note = DEFERRED_MCP_NOTE.get(harness, "") if has_mcp else ""
-    own = s.get("instructions") or ""
-    if not own.strip(): return note
-    return note + "\n" + own if note else own
 
 
 def heartbeat_prompt(s):
@@ -1465,9 +1467,8 @@ def _start(d):
     # buzz CLI, so the slot is free for Black 4. Missing connector: no MCP.
     if os.access(BLACK4_MCP, os.X_OK): env["BUZZ_ACP_MCP_COMMAND"] = str(BLACK4_MCP)
     if s.get("allow"): env["BUZZ_ACP_RESPOND_TO_ALLOWLIST"] = ",".join(s["allow"])
-    system = system_prompt(harness, s, "BUZZ_ACP_MCP_COMMAND" in env)
-    if system:
-        (d / "instructions.md").write_text(system)
+    if (s.get("instructions") or "").strip():
+        (d / "instructions.md").write_text(s["instructions"])
         env["BUZZ_ACP_SYSTEM_PROMPT_FILE"] = str(d / "instructions.md")
     # Never BUZZ_ACP_MODEL: see "model and effort" above.
     env.update(model_env)

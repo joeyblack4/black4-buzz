@@ -32,9 +32,10 @@ async function harness(t, { signedIn = false, polls = ["authorization_pending", 
   const tools = new Map();
   const relayListeners = new Set();
   const cleanups = [];
-  const h = (type, props, ...children) => ({ type, props: props ?? {}, children });
+  // Children sit in props as well, as React keeps them, for components that render their children.
+  const h = (type, props, ...children) => { const kids = children.flat(); return { type, props: { ...(props ?? {}), children: kids }, children: kids }; };
   const ctx = {
-    react: { createElement: h, useState: (v) => [typeof v === "function" ? v() : v, () => {}], useEffect: () => {}, useRef: (v) => ({ current: v }), Component: class { constructor(props) { this.props = props; } } },
+    react: { createElement: h, useState: (v) => [typeof v === "function" ? v() : v, () => {}], useEffect: () => {}, useLayoutEffect: () => {}, useRef: (v) => ({ current: v }), useId: (() => { let n = 0; return () => `id-${++n}`; })(), Component: class { constructor(props) { this.props = props; } } },
     agents: { snapshot: () => ({ running: [] }), addTool: (tool) => { tools.set(tool.name, tool); return () => tools.delete(tool.name); }, register: (type) => { regs.hardware = type; } },
     settingsCards: { register: (value) => { regs.card = value; } },
     pages: { register: (value) => { regs.page = value; } },
@@ -410,12 +411,14 @@ function testReact() {
     createElement: (type, props, ...children) => ({ type, props: { ...(props ?? {}), children: children.flat() } }),
     useState(init) { const key = slot(() => (typeof init === "function" ? init() : init)); return [slots.get(key), (next) => slots.set(key, typeof next === "function" ? next(slots.get(key)) : next)]; },
     useRef(value) { return slots.get(slot(() => ({ current: value }))); },
+    useId() { return slots.get(slot(() => `id-${slots.size}`)); },
     useEffect(effect, deps) {
       const key = `${path}:${index++}`;
       const before = slots.get(key);
       if (!before || !deps || deps.some((dep, i) => dep !== before[i])) { slots.set(key, deps ?? []); effects.push(effect); }
     },
   };
+  React.useLayoutEffect = React.useEffect;
   const render = (node, at = "r") => {
     if (!node || typeof node !== "object") return node;
     if (typeof node.type === "function") {

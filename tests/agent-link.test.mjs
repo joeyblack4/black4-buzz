@@ -89,9 +89,10 @@ async function harness(t, black4, { viewer = VIEWER, plugin = true, register, si
   const cleanups = [];
   const relayListeners = new Set();
   const relay = { viewer };
-  const h = (type, props, ...children) => ({ type, props: props ?? {}, children });
+  // Children sit in props as well, as React keeps them, for components that render their children.
+  const h = (type, props, ...children) => { const kids = children.flat(); return { type, props: { ...(props ?? {}), children: kids }, children: kids }; };
   const ctx = {
-    react: { createElement: h, useState: (v) => [typeof v === "function" ? v() : v, () => {}], useEffect: () => {}, useRef: (v) => ({ current: v }), Component: class { constructor(props) { this.props = props; } } },
+    react: { createElement: h, useState: (v) => [typeof v === "function" ? v() : v, () => {}], useEffect: () => {}, useLayoutEffect: () => {}, useRef: (v) => ({ current: v }), useId: (() => { let n = 0; return () => `id-${++n}`; })(), Component: class { constructor(props) { this.props = props; } } },
     agents: { snapshot: () => ({ running: [] }), addTool: (tool) => { tools.add(tool.name); toolMap.set(tool.name, tool); return () => { tools.delete(tool.name); toolMap.delete(tool.name); }; }, register: (type) => { addType(type); } },
     settingsCards: { register: (value) => { card = value; } },
     pages: { register() {} }, panels: { register() {} },

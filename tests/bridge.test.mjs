@@ -39,9 +39,10 @@ async function harness(t, options = {}) {
   let page;
   let link;
   let preview;
-  const h = (type, props, ...children) => ({ type, props: props ?? {}, children });
+  // Children sit in props as well, as React keeps them, for components that render their children.
+  const h = (type, props, ...children) => { const kids = children.flat(); return { type, props: { ...(props ?? {}), children: kids }, children: kids }; };
   const ctx = {
-    react: { createElement: h, useState: (v) => [v, () => {}], useEffect: () => {}, useRef: (v) => ({ current: v }), Component: class {} },
+    react: { createElement: h, useState: (v) => [v, () => {}], useEffect: () => {}, useLayoutEffect: () => {}, useRef: (v) => ({ current: v }), useId: (() => { let n = 0; return () => `id-${++n}`; })(), Component: class {} },
     agents: {
       snapshot: () => ({ running: [{ key: "agent", relay: "wss://example.test" }] }),
       addTool: (tool) => { registered.set(tool.name, tool); return () => registered.delete(tool.name); },

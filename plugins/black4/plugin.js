@@ -2015,7 +2015,9 @@ export function statusReader(ask, { op = "machine.status", ttlMs = STATUS_TTL_MS
         if (flight.has(id)) return flight.get(id);
       }
       const request = askMachine(ask, id, { op }, { timeoutMs })
-        .then((reply) => ({ kind: "ok", harnesses: Array.isArray(reply.harnesses) ? reply.harnesses : [] }))
+        // The models reply also lists buzz-acp's conversation levers (`controls`); an older machine lists none.
+        .then((reply) => ({ kind: "ok", harnesses: Array.isArray(reply.harnesses) ? reply.harnesses : [],
+          ...(reply.controls && typeof reply.controls === "object" ? { controls: reply.controls } : {}) }))
         .catch((error) => (unsupported(error) ? { kind: "unsupported" } : { kind: "unreachable", error: String(error?.message ?? error) }))
         .then((status) => {
           if (flight.get(id) === request) flight.delete(id);
@@ -2393,6 +2395,11 @@ export function hardwareProvider(ask, requestId = () => crypto.randomUUID(), dir
         ...(picture ? { picture } : {}), config: settled,
       }, { signal });
       directory.remember(reply.pubkey, { machine: settled.machine, harness: settled.harness, respondTo: settled.respondTo });
+      // Conversation levers chosen in the form: provision does not take them,
+      // so they follow as settings.set, which only writes before activation.
+      const controls = Object.fromEntries(Object.entries(settled.controls && typeof settled.controls === "object" ? settled.controls : {})
+        .filter(([, value]) => value !== null && value !== undefined && value !== ""));
+      if (Object.keys(controls).length) await askMachine(ask, settled.machine, { op: "settings.set", pubkey: reply.pubkey, ...controls }, { signal });
       return { pubkey: reply.pubkey, ...(picture ? { picture } : {}) };
     },
     async activate({ pubkey, name, community, auth, config, signal }) {
@@ -2459,12 +2466,281 @@ export function beatFrom(reply) {
     custom: !!reply?.custom, defaultPrompt: String(reply?.defaultPrompt ?? "") };
 }
 
-/** Sets an agent's model and effort ("" for the machine's default); the
- * machine refuses one it does not offer, and restarts a running agent on it. */
-export async function setModel(ask, directory, { pubkey, model, effort, pays, compactAt, signal }) {
+/** Sets an agent's model and effort ("" for the machine's default), how it
+ * pays, when it compacts, or a conversation lever (`controls`: { name: value
+ * or null }); the machine refuses what it does not offer, and restarts a
+ * running agent on it. */
+export async function setModel(ask, directory, { pubkey, model, effort, pays, compactAt, controls, signal }) {
   return askMachine(ask, await directory.machine(pubkey), { op: "settings.set", pubkey, model, effort, ...(pays ? { pays } : {}),
-    ...(compactAt !== undefined ? { compactAt: compactAt === "" ? null : compactAt } : {}) }, { signal });
+    ...(compactAt !== undefined ? { compactAt: compactAt === "" ? null : compactAt } : {}), ...(controls ?? {}) }, { signal });
 }
+
+/** Draw the dropdowns as the same pill over a transparent native <select> (the
+ * OS menu opens) instead of Buzz's own popup. Off: the popup is Buzz's. */
+export const NATIVE_SELECT = false;
+
+// Tabler icons 3.46 (chevron-down, check, loader-2): Buzz's CaretDownIcon, CheckIcon and CircleNotchIcon.
+const ICON = { chevron: "M6 9l6 6l6 -6", check: "M5 12l5 5l10 -10", loader: "M12 3a9 9 0 1 0 9 9" };
+
+/** Buzz's design-system primitives (Buzz 1.0.4, `src/shared/design-system/ui`)
+ * as plain elements with the same classes, data attributes and structure, so
+ * Buzz's own stylesheet paints them. Nothing else in the hardware part draws a
+ * control. Each takes what Buzz's component takes, in Buzz's names. */
+export function buzzUi(React, { nativeSelect = NATIVE_SELECT } = {}) {
+  const h = React.createElement;
+  const Fragment = React.Fragment;
+  const icon = (path, size, props = {}) => h("svg", { xmlns: "http://www.w3.org/2000/svg", width: `${size / 16}rem`, height: `${size / 16}rem`,
+    viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": true, ...props },
+    h("path", { d: path }));
+
+  /** Header.tsx `InlineHeader`: a section's title above its card. */
+  const SectionTitle = ({ title, subtitle, id }) =>
+    h("div", { "data-buzz-ui": "", className: "buzz-content-header", "data-inline": "" },
+      h("div", { className: "buzz-content-header-copy" },
+        h("h3", { id, className: "buzz-content-header-title" }, title),
+        subtitle ? h("p", { className: "buzz-content-header-subtitle" }, subtitle) : null));
+
+  /** SettingsGroup.tsx: the rounded card. Every direct child is a row. */
+  const Group = ({ layout = "rows", children }) =>
+    h("div", { "data-buzz-ui": "", className: "buzz-settings-group", "data-layout": layout }, children);
+
+  /** PreferenceRow.tsx: title and muted description left, `trailing` right
+   * (an element, or a function of the aria props that name the control).
+   * `controlId` makes the title a <label>, as SwitchPreferenceRow does. */
+  const Row = ({ id, title, description, trailing, controlId, accessibleTitle, disabled = false, icon: leading }) => {
+    const base = React.useId();
+    const titleId = `${base}-title`;
+    const descriptionId = description ? `${base}-description` : undefined;
+    const Title = controlId ? "label" : "div";
+    return h("div", { id, "data-buzz-ui": "", className: "buzz-preference-row", "data-variant": "default",
+        "data-disabled": disabled || undefined, "data-has-icon": leading ? "" : undefined },
+      leading ? h("span", { className: "buzz-preference-row-icon", "aria-hidden": true }, leading) : null,
+      h("div", { className: "buzz-preference-row-content" },
+        h(Title, { id: titleId, className: "buzz-preference-row-label", htmlFor: controlId, "aria-label": accessibleTitle }, title),
+        description ? h("span", { id: descriptionId, className: "buzz-preference-row-description" }, description) : null),
+      trailing == null ? null : h("div", { className: "buzz-preference-row-trailing" },
+        typeof trailing === "function" ? trailing({ "aria-labelledby": titleId, "aria-describedby": descriptionId }) : trailing));
+  };
+
+  /** Button.tsx: variant prominent | subtle | outline | ghost | destructive; size sm | md;
+   * shape capsule | control. `loading` hides the label under Buzz's spinner.
+   * With `href` it is a link that looks the same (Buzz renders links through Button too). */
+  const Button = ({ variant = "subtle", size = "md", shape = "capsule", type = "button", loading = false, disabled, onClick, href, children, ...props }) => {
+    const shared = { ...props, "aria-busy": loading || props["aria-busy"],
+      "data-buzz-ui": "", className: "buzz-button", "data-variant": variant, "data-size": size, "data-button-shape": shape,
+      "data-disabled": disabled || loading ? "" : undefined, "data-loading": loading || undefined };
+    const body = [
+      h("span", { key: "label", className: "buzz-button-label" }, children),
+      loading ? icon(ICON.loader, 18, { key: "spinner", className: "buzz-button-spinner tabler-icon tabler-icon-loader-2" }) : null,
+    ];
+    if (href) return h("a", { ...shared, href, target: "_blank", rel: "noopener noreferrer", onClick }, ...body);
+    return h("button", { ...shared, type, disabled: disabled || loading,
+      onClick: (event) => { if (loading || disabled) { event.preventDefault(); return; } onClick?.(event); } }, ...body);
+  };
+
+  /** Input.tsx: one line of text. */
+  const Input = ({ controlSize = "md", ...props }) =>
+    h("input", { type: "text", ...props, "data-buzz-ui": "", "data-size": controlSize, className: "buzz-input" });
+
+  /** Switch.tsx without its own label: the row names it. */
+  const Switch = ({ id, checked, disabled, onCheckedChange, ...aria }) =>
+    h("button", { type: "button", role: "switch", id, "aria-checked": checked, ...aria, disabled,
+        "data-buzz-ui": "", className: "buzz-switch-control",
+        "data-checked": checked ? "" : undefined, "data-unchecked": checked ? undefined : "", "data-disabled": disabled ? "" : undefined,
+        onClick: () => { if (!disabled) onCheckedChange(!checked); } },
+      h("span", { className: "buzz-switch-thumb", "data-checked": checked ? "" : undefined, "data-unchecked": checked ? undefined : "" }));
+
+  /** SwitchPreferenceRow.tsx. */
+  const SwitchRow = ({ id, label, description, checked, disabled, onCheckedChange }) => {
+    const generated = React.useId();
+    const controlId = id ?? generated;
+    return h(Row, { title: label, description, controlId, disabled,
+      trailing: (aria) => h(Switch, { ...aria, id: controlId, "aria-label": label, checked, disabled, onCheckedChange }) });
+  };
+
+  const chevron = () => h("span", { "aria-hidden": true }, icon(ICON.chevron, 14, { className: "buzz-dropdown-chevron tabler-icon tabler-icon-chevron-down" }));
+  const shown = (current, placeholder) => h("span", { className: "buzz-select-value-content" },
+    h("span", { className: "buzz-select-value-text" },
+      h("span", { className: "buzz-select-value", title: current?.label, "data-placeholder": current ? undefined : "" }, current?.label ?? placeholder)));
+
+  /** Select.tsx variant "compact" (shape "control": variant "preference"):
+   * the closed pill is Buzz's outline sm Button inside `.buzz-select`; the open
+   * menu is a listbox in Buzz's popup classes, shown through the native
+   * popover attribute (the top layer, so no scroller clips it), placed under
+   * the pill. Arrow keys move, Enter picks, Escape and a click outside close.
+   * Options: { id, label, detail?, unavailable? } (unavailable: shown, not
+   * pickable, unless it is the current one). */
+  const Popup = ({ label, value, options, onChange, disabled, shape = "capsule", title, placeholder = "Choose", describedBy }) => {
+    const id = React.useId();
+    const [open, setOpen] = React.useState(false);
+    const trigger = React.useRef(null);
+    const popup = React.useRef(null);
+    const current = options.find((option) => option.id === value);
+    React.useLayoutEffect(() => {
+      const list = popup.current;
+      const at = trigger.current;
+      if (!list || !at || typeof document === "undefined") return undefined;
+      if (!open) { try { list.hidePopover?.(); } catch {} return undefined; }
+      const gap = 4;
+      list.setAttribute("data-starting-style", "");
+      Object.assign(list.style, { position: "fixed", margin: "0", inset: "auto", top: "0px", left: "0px" });
+      try { list.showPopover?.(); } catch {}
+      // Under the pill (above it when there is more room there), within the window.
+      const place = () => {
+        const box = at.getBoundingClientRect();
+        list.style.setProperty("--anchor-width", `${box.width}px`);
+        list.style.setProperty("--available-width", `${window.innerWidth - 16}px`);
+        const below = window.innerHeight - box.bottom - gap - 8;
+        const above = box.top - gap - 8;
+        const side = list.offsetHeight > below && above > below ? "top" : "bottom";
+        list.setAttribute("data-side", side);
+        list.style.setProperty("--available-height", `${Math.max(120, side === "top" ? above : below)}px`);
+        list.style.setProperty("--transform-origin", side === "top" ? "bottom left" : "top left");
+        const left = Math.max(8, Math.min(box.left, window.innerWidth - 8 - list.offsetWidth));
+        const top = side === "top" ? Math.max(8, box.top - gap - list.offsetHeight) : box.bottom + gap;
+        Object.assign(list.style, { top: `${top}px`, left: `${left}px` });
+      };
+      place();
+      const frame = requestAnimationFrame(() => list.removeAttribute("data-starting-style"));
+      (list.querySelector('[role="option"][aria-selected="true"]') ?? list.querySelector('[role="option"]:not([data-disabled])'))?.focus({ preventScroll: true });
+      const away = (event) => { if (!list.contains(event.target) && !at.contains(event.target)) setOpen(false); };
+      const keys = (event) => { if (event.key === "Escape") { event.stopPropagation(); setOpen(false); at.focus(); } };
+      document.addEventListener("pointerdown", away, true);
+      document.addEventListener("keydown", keys, true);
+      window.addEventListener("resize", place);
+      document.addEventListener("scroll", place, true);
+      return () => {
+        cancelAnimationFrame(frame);
+        document.removeEventListener("pointerdown", away, true);
+        document.removeEventListener("keydown", keys, true);
+        window.removeEventListener("resize", place);
+        document.removeEventListener("scroll", place, true);
+      };
+    }, [open]);
+    const pick = (option) => {
+      if (!option || (option.unavailable && option.id !== value)) return;
+      setOpen(false);
+      trigger.current?.focus?.();
+      if (option.id !== value) onChange(option.id);
+    };
+    return h("div", { "data-buzz-ui": "", className: "buzz-select text-body", "data-variant": "compact", "data-appearance": "outlined" },
+      h("span", { id: `${id}-label`, className: "sr-only" }, label),
+      h(Button, { ref: trigger, variant: "outline", size: "sm", shape, disabled, title,
+          role: "combobox", "aria-haspopup": "listbox", "aria-expanded": open, "aria-controls": `${id}-list`, "aria-label": label,
+          "aria-describedby": describedBy, "data-popup-open": open ? "" : undefined,
+          onClick: () => setOpen((value) => !value),
+          onKeyDown: (event) => { if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); setOpen(true); } } },
+        shown(current, placeholder), chevron()),
+      h("div", { ref: popup, id: `${id}-list`, role: "listbox", popover: "manual", "aria-labelledby": `${id}-label`,
+          "data-buzz-ui": "", className: "buzz-select-popup text-body", "data-variant": "compact",
+          onKeyDown: (event) => {
+            const items = [...event.currentTarget.querySelectorAll('[role="option"]:not([data-disabled])')];
+            const index = items.indexOf(document.activeElement);
+            if (event.key === "ArrowDown") { event.preventDefault(); items[Math.min(index + 1, items.length - 1)]?.focus(); }
+            else if (event.key === "ArrowUp") { event.preventDefault(); items[Math.max(index - 1, 0)]?.focus(); }
+            else if (event.key === "Home") { event.preventDefault(); items[0]?.focus(); }
+            else if (event.key === "End") { event.preventDefault(); items[items.length - 1]?.focus(); }
+            else if ((event.key === "Enter" || event.key === " ") && index >= 0) { event.preventDefault(); pick(options.find((option) => option.id === items[index].dataset.value)); }
+            else if (event.key === "Tab") setOpen(false);
+          } },
+        ...options.map((option) => {
+          const selected = option.id === value;
+          const unavailable = !!option.unavailable && !selected;
+          return h("div", { key: option.id, role: "option", tabIndex: -1, "data-value": option.id,
+              "aria-selected": selected, "aria-disabled": unavailable || undefined, "data-disabled": unavailable ? "" : undefined,
+              className: "buzz-select-option", "data-selected": selected ? "" : undefined,
+              onPointerMove: (event) => { if (!unavailable && document.activeElement !== event.currentTarget) event.currentTarget.focus({ preventScroll: true }); },
+              onFocus: (event) => event.currentTarget.setAttribute("data-highlighted", ""),
+              onBlur: (event) => event.currentTarget.removeAttribute("data-highlighted"),
+              onClick: () => pick(option) },
+            h("span", { className: "buzz-select-option-main" },
+              h("span", { className: "buzz-select-option-content" }, option.label,
+                option.detail ? h("span", { className: "buzz-select-option-description text-body-sm text-subtle" }, option.detail) : null)),
+            h("span", { className: "buzz-select-indicator", "data-selected": selected ? "" : undefined },
+              icon(ICON.check, 14, { className: "tabler-icon tabler-icon-check" })));
+        })));
+  };
+
+  /** The same closed pill over a transparent native <select>: the OS menu
+   * opens. The pill shows no hover or open state (the select takes the pointer). */
+  const Native = ({ label, value, options, onChange, disabled, shape = "capsule", title, placeholder = "Choose", describedBy }) => {
+    const current = options.find((option) => option.id === value);
+    return h("div", { "data-buzz-ui": "", className: "buzz-select text-body", "data-variant": "compact", "data-appearance": "outlined", style: { position: "relative" } },
+      h(Button, { variant: "outline", size: "sm", shape, disabled, title, tabIndex: -1, "aria-hidden": true }, shown(current, placeholder), chevron()),
+      h("select", { "aria-label": label, "aria-describedby": describedBy, value, disabled, onChange: (event) => onChange(event.target.value),
+          style: { position: "absolute", inset: 0, width: "100%", height: "100%", opacity: 0, cursor: disabled ? "not-allowed" : "pointer", font: "inherit" } },
+        ...options.map((option) => h("option", { key: option.id, value: option.id, disabled: !!option.unavailable && option.id !== value }, option.label))));
+  };
+  const Pill = nativeSelect ? Native : Popup;
+
+  /** Field.tsx around Textarea.tsx (AgentInstructions): label, the text, a
+   * muted description or the error. */
+  const TextField = ({ label, description, error, optional = false, value, onChange, rows = 8, maxLength, placeholder, disabled }) => {
+    const id = React.useId();
+    return h("div", { "data-buzz-ui": "", className: "buzz-field", "data-invalid": error ? "" : undefined },
+      h("label", { className: "buzz-field-label", htmlFor: id }, label,
+        optional ? h(Fragment, null, " ", h("span", { className: "buzz-field-optional" }, "Optional")) : null),
+      h("textarea", { id, rows, maxLength, placeholder, value, disabled,
+        "data-buzz-ui": "", className: "buzz-textarea", "data-variant": "text", "data-surface": "inset", "data-appearance": "outlined",
+        "data-invalid": error ? "" : undefined, "aria-invalid": error ? "true" : undefined,
+        onChange: (event) => onChange(event.target.value) }),
+      description && !error ? h("p", { className: "buzz-field-description" }, description) : null,
+      error ? h("div", { className: "buzz-field-error-track" }, h("div", { role: "alert", className: "buzz-field-error" }, error)) : null);
+  };
+
+  // Lines Buzz writes around its cards.
+  const Note = (text) => h("p", { className: "m-0 text-body-sm text-secondary" }, text);
+  const ErrorLine = (text) => h("p", { role: "alert", className: "buzz-field-error" }, text);
+  const Spinner = () => icon(ICON.loader, 16, { className: "motion-safe:animate-spin tabler-icon tabler-icon-loader-2" });
+  /** A line of progress: Buzz's spinner beside a few words. */
+  const Status = (text) => h("span", { role: "status", className: "flex items-center gap-2 text-body-sm text-secondary" }, h(Spinner), text);
+  /** A value a row shows but does not change. */
+  const Value = (text) => h("span", { className: "text-body-sm" }, text);
+  /** A line a row shows as broken (red only for broken). */
+  const Alert = (text) => h("span", { role: "alert", className: "text-danger" }, text);
+  const Code = (text) => h("code", { className: "text-body tabular-nums", style: { letterSpacing: "0.08em" } }, text);
+
+  return { SectionTitle, Group, Row, Button, Input, Switch, SwitchRow, Pill, Popup, Native, TextField, Note, ErrorLine, Spinner, Status, Value, Alert, Code };
+}
+
+/** buzz-acp's own conversation levers, by the names the machine lists them
+ * under (`controls` in its models reply: the bounds or values of each, and
+ * buzz-acp's default), as rows. A number row offers a few presets within the
+ * machine's bounds; "" is buzz-acp's default (sent as null). */
+const durationLabel = (seconds) => seconds % 3600 === 0 ? (seconds === 3600 ? "1 hour" : `${seconds / 3600} hours`) : `${Math.round(seconds / 60)} minutes`;
+export const CONVERSATION_ROWS = [
+  { id: "agents", title: "Parallel work", description: "Conversations it works on at once.", presets: [1, 2, 3, 4, 5, 6, 7, 8], label: (n) => String(n) },
+  { id: "sessionPolicy", title: "Session per", labels: { channel: "Channel", thread: "Thread" } },
+  { id: "multipleEventHandling", title: "New message while working", labels: { steer: "Weave it in", queue: "Wait", interrupt: "Replace the task", "owner-interrupt": "Replace only for me" } },
+  { id: "maxTurnsPerSession", title: "Fresh session after", description: "Turns before a conversation starts over.", presets: [0, 10, 25, 50, 100, 250, 500, 1000], label: (n) => n === 0 ? "Never" : `${n} turns` },
+  { id: "maxTurnDuration", title: "Max turn length", description: "How long one answer may take.", presets: [300, 900, 1800, 3600, 7200, 14400, 28800, 86400], label: durationLabel },
+  { id: "contextMessageLimit", title: "Context for replies", description: "Earlier messages it reads before answering.", presets: [0, 4, 8, 12, 20, 30, 50, 100], label: (n) => n === 0 ? "None" : `${n} messages` },
+];
+
+/** One conversation row's choices for `value` (the agent's own, or null for
+ * buzz-acp's default) under the machine's `schema` for it, or null when the
+ * machine lists none. A heartbeat agent runs at least two parallel
+ * conversations, so with `heartbeat` on the default reads 2 and 1 cannot be
+ * picked. A value outside the presets stays offered, so it is never hidden. */
+export function controlOptions(row, schema, value, { heartbeat = false } = {}) {
+  if (!schema || typeof schema !== "object") return null;
+  const numeric = !Array.isArray(schema.values);
+  const label = (entry) => (row.labels ? row.labels[entry] ?? String(entry) : row.label(entry));
+  const within = (n) => (schema.min === undefined || n >= schema.min) && (schema.max === undefined || n <= schema.max);
+  const values = numeric ? row.presets.filter(within) : schema.values;
+  const floor = row.id === "agents" && heartbeat ? 2 : null;
+  const standard = schema.default === undefined ? null : floor !== null ? Math.max(floor, Number(schema.default)) : schema.default;
+  const chosen = value === null || value === undefined || value === "" ? "" : String(value);
+  const options = [
+    { id: "", label: standard === null ? "Default" : `Default (${label(standard)})` },
+    ...values.map((entry) => ({ id: String(entry), label: label(entry), ...(floor !== null && Number(entry) < floor ? { unavailable: true } : {}) })),
+  ];
+  if (chosen && !options.some((option) => option.id === chosen)) options.push({ id: chosen, label: label(numeric ? Number(chosen) : chosen) });
+  return { value: chosen, options, numeric };
+}
+
+/** What `settings.set` takes for a conversation row's pick: null for buzz-acp's default. */
+export const controlValue = (row, schema, id) => (id === "" ? null : Array.isArray(schema?.values) ? id : Number(id));
 
 /** Registers the "Black 4 hardware" agent type on `ctx`. `report(error)` hears
  * any failure of its components, so the plugin's Settings card can say so;
@@ -2487,8 +2763,13 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
   // summaries and later steps have them.
   if (ask) setTimeout(() => { void directory.refresh(); }, 0);
 
-  const muted = { color: "var(--text-secondary, inherit)", opacity: 0.8 };
-  const row = { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" };
+  // The screens are drawn in Buzz's own primitives (buzzUi), laid out as
+  // Buzz's Settings: a title, a rounded card of rows, each row a label and a
+  // muted line on the left and its control on the right.
+  const { SectionTitle, Group, Row, Button, Input, SwitchRow, Pill, TextField, ErrorLine, Spinner, Status, Value, Alert, Code } = buzzUi(React);
+  // An unsaved edit per agent, kept across Buzz mounting the Identity and
+  // Settings tabs apart (each tab mounts the component anew).
+  const drafts = new Map();
 
   // The person's Black 4 sign-in, and its Sign in, from the plugin. A sign-in
   // that ended leaves this type registered; its views then show Sign in, and
@@ -2506,12 +2787,6 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
     // Idle shows the same prompt as signed out (its Approve); neither reaches the machine.
     return { signedOut: status === "signed-out" || status === "signing-in" || status === "idle", reachable: status === "connected", needsApproval: approval.needed, epoch: approval.epoch };
   };
-  const useSignedOut = () => useBlack4().signedOut;
-
-  const Select = ({ label, value, options, onChange, disabled, title }) =>
-    h("label", { style: { display: "grid", gap: 4 } }, label,
-      h("select", { value, disabled, title, onChange: (event) => onChange(event.target.value) },
-        ...options.map((option) => h("option", { key: option.id, value: option.id, disabled: !!option.unavailable && option.id !== value }, option.label))));
 
   /** The machine's status (or its models), read in an effect and shared across views. */
   const useReader = (reader, machineId) => {
@@ -2534,34 +2809,47 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
   };
   const useStatus = (machineId) => useReader(statuses, machineId);
   const useModels = (machineId) => useReader(modelLists, machineId);
+  /** The conversation levers the machine lists (its models reply), or null on an older machine. */
+  const controlSchema = (models) => (models?.kind === "ok" && models.controls && typeof models.controls === "object" ? models.controls : null);
 
-  /** Model and Effort for one harness, when the machine lists its models. */
-  const ModelPicker = ({ models, harness, value, onPick, disabled, note }) => {
+  /** Model, Thinking and Compact at for one harness, when the machine lists its models. */
+  const ModelRows = ({ models, harness, value, onPick, disabled, note, shape }) => {
     const choices = modelChoices(models, harness, value);
     if (!choices) return null;
     return h(React.Fragment, null,
-      h(Select, { label: "Model", value: choices.model, options: choices.models, disabled, title: note || undefined,
-        onChange: (model) => onPick(applyPick(models, harness, value, { model })) }),
-      choices.efforts.length > 0 && h(Select, { label: "Effort", value: choices.effort ?? "", options: choices.efforts, disabled,
-        onChange: (effort) => onPick(applyPick(models, harness, value, { effort })) }),
+      h(Row, { title: "Model", description: note || undefined,
+        trailing: h(Pill, { label: "Model", shape, value: choices.model, options: choices.models, disabled,
+          onChange: (model) => onPick(applyPick(models, harness, value, { model })) }) }),
+      choices.efforts.length > 0 && h(Row, { title: "Thinking",
+        trailing: h(Pill, { label: "Thinking", shape, value: choices.effort ?? "", options: choices.efforts, disabled,
+          onChange: (effort) => onPick(applyPick(models, harness, value, { effort })) }) }),
       // Greyed, with the machine's one-line reason, where the harness has no lever here.
-      choices.compact && h(Select, { label: "Compact at", value: choices.compact.value, options: choices.compact.options,
-        disabled: disabled || !choices.compact.supported, title: choices.compact.supported ? undefined : choices.compact.note ?? undefined,
-        onChange: (id) => onPick({ compactAt: id ? Number(id) : null }) }));
+      choices.compact && h(Row, { title: "Compact at", description: choices.compact.supported ? "Context it keeps before compacting." : choices.compact.note ?? undefined, disabled: !choices.compact.supported,
+        trailing: h(Pill, { label: "Compact at", shape, value: choices.compact.value, options: choices.compact.options, disabled: disabled || !choices.compact.supported,
+          onChange: (id) => onPick({ compactAt: id ? Number(id) : null }) }) }));
   };
 
-  // Buzz's own spinner class (the app ships Tailwind's `animate-spin`).
-  const Spinner = () => h("span", { "aria-hidden": true, className: "motion-safe:animate-spin",
-    style: { display: "inline-block", width: 12, height: 12, borderRadius: "50%", border: "2px solid currentColor", borderRightColor: "transparent" } });
+  /** The Conversations card: buzz-acp's levers, as the machine lists them. */
+  const ConversationRows = ({ schema, controls, heartbeat, disabled, onChange, shape }) =>
+    h(React.Fragment, null, ...CONVERSATION_ROWS.map((row) => {
+      const choice = controlOptions(row, schema[row.id], controls?.[row.id], { heartbeat });
+      if (!choice) return null;
+      const description = row.id === "agents" && heartbeat ? "At least 2 while its heartbeat is on." : row.description;
+      return h(Row, { key: row.id, title: row.title, description,
+        trailing: h(Pill, { label: row.title, shape, value: choice.value, options: choice.options, disabled,
+          onChange: (id) => onChange(row.id, controlValue(row, schema[row.id], id)) }) });
+    }));
 
-  /** Sign-in for one harness on one machine: the state, and the flow. */
-  const SignIn = ({ machineId, harness, status, disabled, pays = "subscription" }) => {
+  /** Sign-in for one harness on one machine, as rows of the card: its state,
+   * and the flow (a link to open, a code or key to paste) when one is under way. */
+  const SignInRows = ({ machineId, harness, status, disabled, pays = "subscription", shape }) => {
     const machine = machineOf(machineId);
     const state = signInState(status, harness, pays);
     const [login, setLogin] = React.useState({ step: "idle" });
     const [code, setCode] = React.useState("");
     const [copied, setCopied] = React.useState(false);
     const flow = React.useRef(null);
+    const inputId = React.useId();
     React.useEffect(() => {
       const current = createLogin(ask, machine.id, harness, {
         pays,
@@ -2577,86 +2865,70 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
 
     const label = harnessLabel(harness) ?? harness;
     const key = pays === "key";
-    if (state.kind === "loading") return h("div", { role: "status", style: { ...row, ...muted } }, h(Spinner), `Checking ${machine.label}…`);
-    if (state.kind === "unreachable") return h("div", { role: "alert", style: { display: "grid", gap: 6 } },
-      h("span", null, state.error || `Could not reach the ${machine.label}.`),
-      h("div", null, h("button", { type: "button", disabled, onClick: () => void statuses.read(machine.id, { force: true }) }, "Try again")));
-    if (state.kind === "unsupported") return h("div", { style: muted }, `The ${machine.label} cannot report sign-in yet.`);
-    if (state.kind === "not-installed") return h("div", { role: "alert" }, `${label} is not installed on the ${machine.label}.`);
-    if (state.kind === "unavailable") return h("div", { role: "alert" }, `${label} is unavailable: ${state.reason}`);
-    if (state.kind === "signed-in" && !["waiting", "finishing", "renewing"].includes(login.step)) return h("div", { style: row },
-      h("span", null, state.account ? `Signed in as ${state.account}` : key ? `${label} has an API key` : `${label} is signed in`));
-    if (state.kind === "unknown" && login.step === "idle") return h("div", { style: { display: "grid", gap: 6 } },
-      h("div", { style: { ...row, ...muted } },
-        h("span", null, key ? "API key status unknown" : "Sign-in status unknown"),
-        h("button", { type: "button", disabled, onClick: () => void flow.current?.start() }, key ? "Add key" : "Sign in")),
-      login.error && h("span", { role: "alert" }, login.error));
+    const title = key ? "API key" : "Sign-in";
+    const row = (description, trailing) => h(Row, { title, description, trailing });
+    const button = (props, text) => h(Button, { size: "sm", shape, ...props }, text);
+    const cancel = (extra) => button({ onClick: () => { setCode(""); void flow.current?.cancel(); }, ...extra }, "Cancel");
+    if (state.kind === "loading") return row(`Checking ${machine.label}…`, h(Spinner));
+    if (state.kind === "unreachable") return row(Alert(state.error || `Could not reach the ${machine.label}.`),
+      button({ disabled, onClick: () => void statuses.read(machine.id, { force: true }) }, "Try again"));
+    if (state.kind === "unsupported") return row(`The ${machine.label} cannot report sign-in yet.`);
+    if (state.kind === "not-installed") return row(Alert(`${label} is not installed on the ${machine.label}.`));
+    if (state.kind === "unavailable") return row(Alert(`${label} is unavailable: ${state.reason}`));
+    if (state.kind === "signed-in" && !["waiting", "finishing", "renewing"].includes(login.step))
+      return row(state.account ? `Signed in as ${state.account}` : key ? `${label} has an API key` : `${label} is signed in`);
+    const start = (busy) => button({ variant: "prominent", disabled: disabled || busy, loading: busy, onClick: () => void flow.current?.start() }, key ? "Add key" : "Sign in");
+    if (state.kind === "unknown" && login.step === "idle")
+      return row(login.error ? Alert(login.error) : key ? "API key status unknown" : "Sign-in status unknown", start(false));
 
     // Not signed in, or a sign-in under way.
     const busy = login.step === "starting" || login.step === "finishing" || login.step === "renewing";
-    if (login.step === "renewing") return h("div", { style: { display: "grid", gap: 6 } },
-      h("span", { role: "alert" }, login.error),
-      h("div", { role: "status", style: { ...row, ...muted } }, h(Spinner), "Getting a new link…"));
-    if (login.step === "idle" || login.step === "starting" || login.step === "done") return h("div", { style: { display: "grid", gap: 6 } },
-      h("div", { style: row },
-        h("span", null, login.step === "done" ? (key ? "Key saved. Checking…" : "Signed in. Checking…") : key ? `${label} has no API key` : `${label} is not signed in`),
-        login.step !== "done" && h("button", { type: "button", disabled: disabled || busy, "aria-busy": busy, onClick: () => void flow.current?.start() },
-          busy ? h(Spinner) : key ? "Add key" : "Sign in"),
-        login.step === "starting" && h("button", { type: "button", onClick: () => void flow.current?.cancel() }, "Cancel")),
-      login.error && h("span", { role: "alert" }, login.error));
+    if (login.step === "renewing") return row(Alert(login.error), Status("Getting a new link…"));
+    if (login.step === "idle" || login.step === "starting" || login.step === "done")
+      return row(login.error ? Alert(login.error)
+          : login.step === "done" ? (key ? "Key saved. Checking…" : "Signed in. Checking…") : key ? `${label} has no API key` : `${label} is not signed in`,
+        h(React.Fragment, null, login.step !== "done" && start(busy), login.step === "starting" && cancel()));
 
+    const copy = () => {
+      Promise.resolve(globalThis.navigator?.clipboard?.writeText?.(login.url))
+        .then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }, () => {});
+    };
+    const pasteKey = login.flow === "key";
+    const link = (text) => h(Row, { title: text, trailing: h(React.Fragment, null,
+      button({ href: login.url }, "Open"), button({ onClick: copy }, copied ? "Copied" : "Copy link")) });
+    if (!login.needsCode) return h(React.Fragment, null,
+      row(login.error ? Alert(login.error) : login.step === "finishing" ? "Signing in…" : `Waiting for you to approve it. The ${machine.label} finishes by itself.`,
+        h(React.Fragment, null, h(Spinner), cancel())),
+      link(SIGN_IN_SITE[harness] ? `Open ${SIGN_IN_SITE[harness]}` : `Open ${label} sign-in`),
+      login.userCode && h(Row, { title: "Approve this code there", trailing: Code(login.userCode) }));
+    // A key (flow "key"): the link opens the page where an API key is made,
+    // and the key is pasted in place of a code. It goes to the machine once
+    // and is kept there; it is never shown or kept here.
     const submit = () => {
       const pasted = code;
       setCode("");
       void flow.current?.finish(pasted);
     };
-    if (!login.needsCode) return h("div", { style: { display: "grid", gap: 8 } },
-      h("div", { style: row },
-        h("a", { href: login.url, target: "_blank", rel: "noopener noreferrer" }, SIGN_IN_SITE[harness] ? `Open ${SIGN_IN_SITE[harness]}` : `Open ${label} sign-in`),
-        h("button", { type: "button", onClick: () => {
-          Promise.resolve(globalThis.navigator?.clipboard?.writeText?.(login.url))
-            .then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }, () => {});
-        } }, copied ? "Copied" : "Copy link")),
-      login.userCode && h("div", { style: row },
-        h("span", null, "Approve this code there:"),
-        h("code", { style: { fontSize: "1.1em", letterSpacing: "0.08em" } }, login.userCode)),
-      h("div", { role: "status", style: { ...row, ...muted } }, h(Spinner),
-        login.step === "finishing" ? "Signing in…" : `Waiting for you to approve it. The ${machine.label} finishes by itself.`,
-        h("button", { type: "button", onClick: () => void flow.current?.cancel() }, "Cancel")),
-      login.error && h("span", { role: "alert" }, login.error));
-    // A key (flow "key"): the link opens the page where an API key is made,
-    // and the key is pasted in place of a code. It goes to the machine once
-    // and is kept there; it is never shown or kept here.
-    const pasteKey = login.flow === "key";
-    return h("div", { style: { display: "grid", gap: 8 } },
-      h("div", { style: row },
-        h("a", { href: login.url, target: "_blank", rel: "noopener noreferrer" },
-          pasteKey ? "Open the API keys page" : login.renewed ? `Open new ${label} sign-in` : `Open ${label} sign-in`),
-        h("button", { type: "button", onClick: () => {
-          Promise.resolve(globalThis.navigator?.clipboard?.writeText?.(login.url))
-            .then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }, () => {});
-        } }, copied ? "Copied" : "Copy link")),
+    return h(React.Fragment, null,
+      row(login.error ? Alert(login.error) : pasteKey ? "The key goes to the machine once and stays there." : "Paste the code the page shows.", cancel()),
+      link(pasteKey ? "Open the API keys page" : login.renewed ? `Open new ${label} sign-in` : `Open ${label} sign-in`),
       // Not a <form>: this sits inside Buzz's own Create agent form, and a
       // nested form's submit goes to the outer one, which abandons the dialog.
-      h("div", { style: row },
-          h("input", { type: "password", autoComplete: "off", spellCheck: false,
-            placeholder: pasteKey ? "Paste API key" : "Paste code", "aria-label": pasteKey ? "API key" : "Sign-in code",
-            value: code, disabled: busy, onChange: (event) => setCode(event.target.value), style: { flex: 1, minWidth: 160 },
-            onKeyDown: (event) => { if (event.key === "Enter") { event.preventDefault(); event.stopPropagation(); if (!busy && code.trim()) submit(); } } }),
-          h("button", { type: "button", disabled: busy || !code.trim(), "aria-busy": busy, onClick: submit }, busy ? h(Spinner) : pasteKey ? "Save key" : "Finish"),
-          h("button", { type: "button", onClick: () => { setCode(""); void flow.current?.cancel(); } }, "Cancel")),
-      login.error && h("span", { role: "alert" }, login.error));
+      h(Row, { title: pasteKey ? "Paste the key" : "Paste the code", controlId: inputId, trailing: h(React.Fragment, null,
+        h(Input, { id: inputId, type: "password", autoComplete: "off", spellCheck: false, controlSize: "sm", style: { width: "11rem" },
+          placeholder: pasteKey ? "API key" : "Code", value: code, disabled: busy, onChange: (event) => setCode(event.target.value),
+          onKeyDown: (event) => { if (event.key === "Enter") { event.preventDefault(); event.stopPropagation(); if (!busy && code.trim()) submit(); } } }),
+        button({ variant: "prominent", disabled: !code.trim(), loading: busy, onClick: submit }, pasteKey ? "Save key" : "Finish")) }));
   };
 
   /** The one step before an agent here can use Black 4 as its owner: the
    * Agent access link from Settings → Black 4, offered in place. */
-  const LinkPrompt = () => {
+  const LinkRow = () => {
     const link = access.use();
     if (link.status !== "unlinked" && link.status !== "linking") return null;
     const linking = link.status === "linking";
-    return h("div", { style: row },
-      h("span", null, "Link your agents so it can use Black 4 as you."),
-      h("button", { type: "button", disabled: linking, "aria-busy": linking, onClick: () => void access.link() }, linking ? h(Spinner) : "Link my agents"));
+    return h(Row, { title: "Agent access", description: "Link your agents so it can use Black 4 as you.",
+      trailing: h(Button, { size: "sm", variant: "prominent", loading: linking, onClick: () => void access.link() }, "Link my agents") });
   };
 
   const Configuration = ({ config, onChange, disabled, harnessControl, onReadyChange }) => {
@@ -2681,37 +2953,53 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
     React.useEffect(() => { onReadyChange?.(isReady); }, [onReadyChange, isReady]);
     React.useEffect(() => () => onReadyChange?.(false), [onReadyChange]);
 
-    if (signedOut && SignInPrompt) return h("div", { style: { display: "grid", gap: 12 } }, harnessControl, h(SignInPrompt, null));
-    if (needsApproval && ApprovalPrompt) return h("div", { style: { display: "grid", gap: 12 } }, harnessControl, h(ApprovalPrompt, null));
+    // The host's Harness row is the first row of this card, as in Buzz's own dialog.
+    if (signedOut && SignInPrompt) return h("div", { className: "grid gap-4" }, h(Group, null, harnessControl), h(SignInPrompt, null));
+    if (needsApproval && ApprovalPrompt) return h("div", { className: "grid gap-4" }, h(Group, null, harnessControl), h(ApprovalPrompt, null));
 
-    return h("div", { style: { display: "grid", gap: 12 } },
-      harnessControl,
-      access && h(LinkPrompt),
-      h(Select, { label: "Runs on", value: machine.id, options: MACHINES, disabled, onChange: (id) => onChange({ ...value, machine: id }) }),
-      h(Select, { label: "Runs", value: value.harness, options: status?.kind === "ok" && !options.length ? [] : offered, disabled: disabled || (status?.kind === "ok" && !options.length),
-        onChange: (harness) => onChange({ ...value, harness, pays: "", model: "", effort: "" }) }),
-      status?.kind === "ok" && !options.length && h("span", { role: "alert" }, `No harness is installed on the ${machine.label}.`),
-      takesKey(status, value.harness) && h(Select, { label: "Pays with", value: pays, options: PAYS, disabled,
-        onChange: (next) => onChange({ ...value, pays: next, model: "", effort: "" }) }),
-      h(ModelPicker, { models, harness: value.harness, value: { ...value, pays }, disabled, onPick: (pick) => onChange({ ...value, ...pick }) }),
-      h(Select, { label: "Answers", value: value.respondTo, options: ANSWERS, disabled, onChange: (respondTo) => onChange({ ...value, respondTo }) }),
-      ask
-        ? h(SignIn, { machineId: machine.id, harness: value.harness, status, disabled, pays })
-        : SignInPrompt ? h(SignInPrompt, null) : h("p", { role: "alert" }, "Sign in to Black 4 in Settings → Black 4 to reach Black 4 hardware."));
+    const noHarness = status?.kind === "ok" && !options.length;
+    const schema = controlSchema(models);
+    const controls = value.controls && typeof value.controls === "object" ? value.controls : {};
+    const minutes = Number(value.heartbeat) > 0 ? Number(value.heartbeat) : 0;
+    return h("div", { className: "grid gap-4" },
+      h(Group, null,
+        harnessControl,
+        access && h(LinkRow),
+        h(Row, { title: "Runs on", trailing: h(Pill, { label: "Runs on", value: machine.id, options: MACHINES, disabled, onChange: (id) => onChange({ ...value, machine: id }) }) }),
+        h(Row, { title: "Runs", description: noHarness ? Alert(`No harness is installed on the ${machine.label}.`) : undefined,
+          trailing: h(Pill, { label: "Runs", value: value.harness, options: noHarness ? [] : offered, disabled: disabled || noHarness,
+            onChange: (harness) => onChange({ ...value, harness, pays: "", model: "", effort: "" }) }) }),
+        takesKey(status, value.harness) && h(Row, { title: "Pays with", trailing: h(Pill, { label: "Pays with", value: pays, options: PAYS, disabled,
+          onChange: (next) => onChange({ ...value, pays: next, model: "", effort: "" }) }) }),
+        h(ModelRows, { models, harness: value.harness, value: { ...value, pays }, disabled, onPick: (pick) => onChange({ ...value, ...pick }) }),
+        h(Row, { title: "Answers", trailing: h(Pill, { label: "Answers", value: value.respondTo, options: ANSWERS, disabled, onChange: (respondTo) => onChange({ ...value, respondTo }) }) }),
+        ask && h(SignInRows, { machineId: machine.id, harness: value.harness, status, disabled, pays })),
+      !ask && (SignInPrompt ? h(SignInPrompt, null) : ErrorLine("Sign in to Black 4 in Settings → Black 4 to reach Black 4 hardware.")),
+      // The heartbeat is set with the agent (activate takes it); its prompt is Black 4's standard until changed in Settings.
+      h("div", null,
+        h(SectionTitle, { title: "Heartbeat" }),
+        h(Group, null,
+          h(SwitchRow, { label: "Heartbeat", description: "Wakes on its own to run the jobs due in Black 4.", checked: minutes > 0, disabled,
+            onCheckedChange: (on) => onChange({ ...value, heartbeat: on ? HEARTBEAT_MINUTES : 0 }) }),
+          minutes > 0 && h(Row, { title: "Wakes", trailing: h(Pill, { label: "Heartbeat interval", value: String(minutes), disabled,
+            options: heartbeatChoices(minutes).map((choice) => ({ id: String(choice.value), label: choice.label })),
+            onChange: (id) => onChange({ ...value, heartbeat: Number(id) }) }) }))),
+      schema && h("div", null,
+        h(SectionTitle, { title: "Conversations" }),
+        h(Group, null, h(ConversationRows, { schema, controls, heartbeat: minutes > 0, disabled,
+          onChange: (name, next) => onChange({ ...value, controls: { ...controls, [name]: next } }) }))));
   };
 
   const Create = ({ config, onChange, disabled }) => {
     const value = { ...hardwareDefaults(), ...(config ?? {}) };
-    return h("label", { style: { display: "grid", gap: 4 } }, "Instructions",
-      h("textarea", { rows: 6, maxLength: 20000, value: value.instructions, disabled,
-        onChange: (event) => onChange({ ...value, instructions: event.target.value }) }));
+    return h(TextField, { label: "Instructions", optional: true, rows: 4, maxLength: 20000, placeholder: "Help me plan my week and prioritize tasks.",
+      value: value.instructions, disabled, onChange: (instructions) => onChange({ ...value, instructions }) });
   };
 
-  /** One labelled line of the Settings tab. */
-  const Line = ({ title, children }) => h("div", { style: { display: "grid", gridTemplateColumns: "8rem 1fr", gap: 8, alignItems: "baseline" } },
-    h("span", { style: muted }, title), h("div", null, children));
-
-  const Settings = ({ agent, settingsHost, settingsContent }) => {
+  /** The Identity and Settings tabs (splitSettings): `settingsSection`
+   * "identity" (harness, model, instructions), "runtime" (the machine, the
+   * heartbeat, conversations), or both when unset. */
+  const Settings = ({ agent, settingsHost, settingsSection, settingsContent }) => {
     const pubkey = agent.pubkey;
     const [seen, setSeen] = React.useState(() => directory.peek(pubkey));
     const [machineId, setMachineId] = React.useState(() => machineOf(seen?.machine).id);
@@ -2746,17 +3034,27 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
           directory.remember(pubkey, { machine: machine.id, harness: reply.harness, respondTo: reply.respondTo });
           const pays = reply.pays === "key" ? "key" : "subscription";
           setRun({ loading: false, running: !!reply.running, activated: !!reply.activated, harness: reply.harness, respondTo: reply.respondTo, pays,
+            controls: reply.controls && typeof reply.controls === "object" ? reply.controls : null,
             ...("model" in reply ? { model: { pays, model: reply.modelChosen ? reply.model : "", effort: reply.effortChosen ? reply.effort : "",
               compactAt: typeof reply.compactAt === "number" ? reply.compactAt : null,
               shown: reply.model, shownEffort: reply.effort, note: reply.modelNote, problem: reply.modelProblem } } : {}) });
         } else setRun({ loading: false, error: String(status.reason?.message ?? status.reason) });
-        if (instructions.status === "fulfilled") setText({ loading: false, base: instructions.value, draft: instructions.value });
+        const kept = drafts.get(pubkey) ?? {};
+        if (instructions.status === "fulfilled") setText({ loading: false, base: instructions.value, draft: kept.instructions ?? instructions.value });
         else setText({ loading: false, base: "", draft: "", error: String(instructions.reason?.message ?? instructions.reason) });
-        if (heartbeat.status === "fulfilled") setBeat(beatFrom(heartbeat.value));
+        if (heartbeat.status === "fulfilled") setBeat({ ...beatFrom(heartbeat.value), ...(kept.prompt === undefined ? {} : { draft: kept.prompt }) });
         else setBeat({ loading: false, minutes: 0, base: "", draft: "", custom: false, defaultPrompt: "", error: String(heartbeat.reason?.message ?? heartbeat.reason) });
       })().catch((error) => { if (!signal.aborted) setRun({ loading: false, error: String(error?.message ?? error) }); });
       return () => controller.abort();
     }, [pubkey, revision, reachable, epoch]);
+
+    const latest = React.useRef(null);
+    latest.current = { text, beat };
+    React.useEffect(() => () => {
+      const { text, beat } = latest.current;
+      const kept = { ...(!text.loading && text.draft !== text.base ? { instructions: text.draft } : {}), ...(!beat.loading && beat.draft !== beat.base ? { prompt: beat.draft } : {}) };
+      if (Object.keys(kept).length) drafts.set(pubkey, kept); else drafts.delete(pubkey);
+    }, [pubkey]);
 
     const machine = machineOf(machineId);
     const harness = run.harness ?? seen?.harness;
@@ -2764,17 +3062,20 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
     const status = useStatus(machine.id);
     const models = useModels(machine.id);
 
-    const pick = async (choice) => {
+    // A pick goes to the machine at once (Buzz's selects apply on change);
+    // its progress and any refusal show under the card it was made in.
+    const pick = async (choice, section) => {
       if (picking.saving) return;
-      setPicking({ saving: true });
+      setPicking({ saving: true, section });
       try {
         await setModel(ask, directory, { pubkey, ...choice });
-        setPicking({ saving: false });
+        setPicking({ saving: false, section });
         setRevision((value) => value + 1);
       } catch (error) {
-        setPicking({ saving: false, error: String(error?.message ?? error) });
+        setPicking({ saving: false, section, error: String(error?.message ?? error) });
       }
     };
+    const picked = (section) => picking.section === section && (picking.saving ? Status("Restarting with it…") : picking.error ? ErrorLine(picking.error) : null);
 
     const restart = async () => {
       if (restarting) return;
@@ -2815,64 +3116,71 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
       } finally { setBeatBusy(false); }
     };
     const beatDirty = beat.draft !== beat.base;
-
-    const running = run.loading ? h("span", { style: { ...row, ...muted } }, h(Spinner), "Checking…")
-      : run.error ? h("span", { role: "alert" }, run.error)
-        : h("span", null, run.running ? "Running" : run.activated === false ? "Not set up" : "Stopped");
     const dirty = text.draft !== text.base;
-    if (signedOut && SignInPrompt) return h("div", { style: { display: "grid", gap: 16 } },
-      settingsHost?.typeControl?.(false), h(SignInPrompt, null), settingsContent);
-    const approvalPrompt = needsApproval && ApprovalPrompt ? h(ApprovalPrompt, null) : null;
-    return h("div", { style: { display: "grid", gap: 16 } },
-      settingsHost?.typeControl?.(false),
-      approvalPrompt,
-      h("div", { style: { display: "grid", gap: 10 } },
-        h(Line, { title: "Runs on" }, machine.label),
-        h(Line, { title: "Runs" }, harnessLabel(harness) ?? (run.loading ? "…" : "Unknown")),
-        h(Line, { title: "Answers" }, ANSWERS.find((entry) => entry.id === respondTo)?.label ?? (run.loading ? "…" : "Unknown")),
-        // How it pays: a change restarts it on the other sign-in, with that one's default model.
-        run.pays && takesKey(status, harness) && h(Select, { label: "Pays with", value: run.pays, options: PAYS, disabled: picking.saving || run.loading,
-          onChange: (pays) => void pick({ pays, model: "", effort: "" }) }),
+    const identity = settingsSection !== "runtime";
+    const runtime = settingsSection !== "identity";
+    const shape = "control"; // Buzz's pills in an agent's settings
+    const harnessRow = settingsHost?.typeControl?.(false);
+    const busy = picking.saving || run.loading;
+
+    if (signedOut && SignInPrompt) return h("div", { className: "grid gap-4" },
+      identity && harnessRow && h(Group, null, harnessRow), h(SignInPrompt, null), runtime && settingsContent);
+    const schema = controlSchema(models);
+    const actions = (...buttons) => h("div", { className: "flex flex-wrap items-center gap-3" }, ...buttons);
+    return h("div", { className: "grid gap-4 [container-type:inline-size]" },
+      needsApproval && ApprovalPrompt && h(ApprovalPrompt, null),
+      identity && (harnessRow || run.model) && h(Group, null,
+        harnessRow,
         run.model && (modelChoices(models, harness, run.model)
-          ? h("div", { style: { display: "grid", gap: 10 } },
-            h(ModelPicker, { models, harness, value: run.model, disabled: picking.saving || run.loading, note: run.model.note, onPick: (choice) => void pick(choice) }),
-            picking.saving && h("span", { role: "status", style: { ...row, ...muted } }, h(Spinner), "Restarting with it…"))
-          : run.model.shown && h(Line, { title: "Model" }, run.model.shownEffort ? `${run.model.shown} · ${EFFORT_LABELS[run.model.shownEffort] ?? run.model.shownEffort}` : run.model.shown)),
-        run.model?.problem && h("span", { role: "alert" }, run.model.problem),
-        picking.error && h("span", { role: "alert" }, picking.error),
-        h(Line, { title: "Status" }, h("div", { style: row }, running,
-          h("button", { type: "button", disabled: restarting || run.loading, "aria-busy": restarting, onClick: () => void restart() }, restarting ? h(Spinner) : "Restart"))),
-        harness && h(Line, { title: run.pays === "key" ? "API key" : "Sign-in" }, h(SignIn, { machineId: machine.id, harness, status, disabled: false, pays: run.pays ?? "subscription" }))),
-      h("label", { style: { display: "grid", gap: 4 } }, "Instructions",
-        h("textarea", { rows: 8, maxLength: 20000, value: text.draft, disabled: text.loading || saving,
-          placeholder: text.loading ? "Loading…" : "", onChange: (event) => setText({ ...text, draft: event.target.value, error: undefined }) })),
-      (dirty || text.error) && h("div", { style: row },
-        dirty && h("button", { type: "button", disabled: saving, "aria-busy": saving, onClick: () => void save() }, saving ? h(Spinner) : "Save"),
-        dirty && h("button", { type: "button", disabled: saving, onClick: () => setText({ ...text, draft: text.base, error: undefined }) }, "Discard"),
-        text.error && h("span", { role: "alert" }, text.error)),
-      h("div", { style: { display: "grid", gap: 8 } },
-        h("div", { style: row },
-          h("label", { style: row },
-            h("input", { type: "checkbox", checked: beat.minutes > 0, disabled: beat.loading || beatBusy,
-              onChange: (event) => void saveBeat({ minutes: event.target.checked ? HEARTBEAT_MINUTES : 0 }) }),
-            "Heartbeat"),
-          beat.loading ? h("span", { style: muted }, "…")
-            : beat.minutes > 0
-              ? h("select", { "aria-label": "Heartbeat interval", value: String(beat.minutes), disabled: beatBusy,
-                  onChange: (event) => void saveBeat({ minutes: Number(event.target.value) }) },
-                ...heartbeatChoices(beat.minutes).map((choice) => h("option", { key: choice.value, value: String(choice.value) }, choice.label)))
-              : h("span", { style: muted }, "off"),
-          beatBusy && h(Spinner)),
-        h("label", { style: { display: "grid", gap: 4 } },
-          h("span", { style: row }, "On each heartbeat", h("span", { style: muted }, beat.loading ? "" : beat.custom ? "yours" : "Black 4's standard")),
-          h("textarea", { rows: 8, maxLength: 8000, value: beat.draft, disabled: beat.loading || beatBusy,
-            placeholder: beat.loading ? "Loading…" : "", onChange: (event) => setBeat({ ...beat, draft: event.target.value, error: undefined }) })),
-        (beatDirty || beat.custom || beat.error) && h("div", { style: row },
-          beatDirty && h("button", { type: "button", disabled: beatBusy, onClick: () => void saveBeat({ prompt: beat.draft.trim() === beat.defaultPrompt.trim() ? "" : beat.draft }) }, "Save"),
-          beatDirty && h("button", { type: "button", disabled: beatBusy, onClick: () => setBeat({ ...beat, draft: beat.base, error: undefined }) }, "Discard"),
-          !beatDirty && beat.custom && h("button", { type: "button", disabled: beatBusy, onClick: () => void saveBeat({ prompt: "" }) }, "Use Black 4's standard"),
-          beat.error && h("span", { role: "alert" }, beat.error))),
-      settingsContent);
+          ? h(ModelRows, { models, harness, value: run.model, disabled: busy, note: run.model.note, shape, onPick: (choice) => void pick(choice, "model") })
+          : run.model.shown && h(Row, { title: "Model", description: run.model.note || undefined,
+            trailing: Value(run.model.shownEffort ? `${run.model.shown} · ${EFFORT_LABELS[run.model.shownEffort] ?? run.model.shownEffort}` : run.model.shown) }))),
+      identity && picked("model"),
+      identity && run.model?.problem && ErrorLine(run.model.problem),
+      identity && !runtime && run.error && ErrorLine(run.error),
+      identity && h("form", { className: "grid gap-2", onSubmit: (event) => { event.preventDefault(); void save(); } },
+        h(TextField, { label: "Instructions", rows: 8, maxLength: 20000, value: text.draft, disabled: text.loading || saving, error: text.error,
+          placeholder: text.loading ? "Loading…" : "Help me plan my week and prioritize tasks.", onChange: (draft) => setText({ ...text, draft, error: undefined }) }),
+        dirty && actions(
+          h(Button, { disabled: saving, onClick: () => setText({ ...text, draft: text.base, error: undefined }) }, "Discard"),
+          h(Button, { type: "submit", variant: "prominent", loading: saving }, saving ? "Saving…" : "Save"))),
+      runtime && h("div", null,
+        h(SectionTitle, { title: "Machine" }),
+        h(Group, null,
+          h(Row, { title: "Runs on", trailing: Value(machine.label) }),
+          h(Row, { title: "Runs", trailing: Value(harnessLabel(harness) ?? (run.loading ? "…" : "Unknown")) }),
+          // How it pays: a change restarts it on the other sign-in, with that one's default model.
+          run.pays && takesKey(status, harness) && h(Row, { title: "Pays with", trailing: h(Pill, { label: "Pays with", shape, value: run.pays, options: PAYS, disabled: busy,
+            onChange: (pays) => void pick({ pays, model: "", effort: "" }, "machine") }) }),
+          harness && h(SignInRows, { machineId: machine.id, harness, status, disabled: false, pays: run.pays ?? "subscription", shape }),
+          h(Row, { title: "Status", description: run.error ? Alert(run.error) : undefined, trailing: h(React.Fragment, null,
+            run.loading ? Status("Checking…") : Value(run.running ? "Running" : run.activated === false ? "Not set up" : "Stopped"),
+            h(Button, { size: "sm", shape, loading: restarting, disabled: run.loading, onClick: () => void restart() }, "Restart")) }),
+          h(Row, { title: "Answers", trailing: Value(ANSWERS.find((entry) => entry.id === respondTo)?.label ?? (run.loading ? "…" : "Unknown")) })),
+        picked("machine")),
+      runtime && h("div", { className: "grid gap-4" },
+        h("div", null,
+          h(SectionTitle, { title: "Heartbeat" }),
+          h(Group, null,
+            h(SwitchRow, { label: "Heartbeat", description: beat.error ? Alert(beat.error) : "Wakes on its own to run the jobs due in Black 4.",
+              checked: beat.minutes > 0, disabled: beat.loading || beatBusy, onCheckedChange: (on) => void saveBeat({ minutes: on ? HEARTBEAT_MINUTES : 0 }) }),
+            beat.minutes > 0 && h(Row, { title: "Wakes", trailing: h(Pill, { label: "Heartbeat interval", shape, value: String(beat.minutes), disabled: beatBusy,
+              options: heartbeatChoices(beat.minutes).map((choice) => ({ id: String(choice.value), label: choice.label })),
+              onChange: (id) => void saveBeat({ minutes: Number(id) }) }) }))),
+        h("form", { className: "grid gap-2", onSubmit: (event) => { event.preventDefault(); void saveBeat({ prompt: beat.draft.trim() === beat.defaultPrompt.trim() ? "" : beat.draft }); } },
+          h(TextField, { label: "On each heartbeat", description: beat.loading ? undefined : beat.custom ? "Yours." : "Black 4’s standard.",
+            rows: 8, maxLength: 8000, value: beat.draft, disabled: beat.loading || beatBusy, placeholder: beat.loading ? "Loading…" : undefined,
+            onChange: (draft) => setBeat({ ...beat, draft, error: undefined }) }),
+          (beatDirty || beat.custom) && actions(
+            beatDirty && h(Button, { disabled: beatBusy, onClick: () => setBeat({ ...beat, draft: beat.base, error: undefined }) }, "Discard"),
+            !beatDirty && beat.custom && h(Button, { disabled: beatBusy, onClick: () => void saveBeat({ prompt: "" }) }, "Use Black 4’s standard"),
+            beatDirty && h(Button, { type: "submit", variant: "prominent", loading: beatBusy }, "Save")))),
+      runtime && schema && h("div", null,
+        h(SectionTitle, { title: "Conversations" }),
+        h(Group, null, h(ConversationRows, { schema, controls: run.controls, heartbeat: beat.minutes > 0, disabled: busy, shape,
+          onChange: (name, next) => void pick({ controls: { [name]: next } }, "conversations") })),
+        picked("conversations")),
+      runtime && settingsContent);
   };
 
   // A component that throws shows one sentence in its place and is reported,
@@ -2899,7 +3207,7 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
     },
     Create: guarded(Create, "instructions"),
     CreateConfiguration: guarded(Configuration, "form"),
-    tabs: [{ id: "settings", title: "Settings", role: "settings", component: guarded(Settings, "settings") }],
+    tabs: [{ id: "settings", title: "Settings", role: "settings", splitSettings: true, component: guarded(Settings, "settings") }],
     remote,
   });
 }

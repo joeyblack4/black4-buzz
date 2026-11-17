@@ -17,21 +17,29 @@
  * menu opens) instead of Buzz's popup. */
 function buzzUi(React, { nativeSelect = false } = {}) {
   // Tabler icons 3.46 (chevron-down, check, loader-2): Buzz's CaretDownIcon, CheckIcon and CircleNotchIcon.
-  const ICON = { chevron: "M6 9l6 6l6 -6", check: "M5 12l5 5l10 -10", loader: "M12 3a9 9 0 1 0 9 9" };
+  // Tabler icons 3.46 (Buzz draws the same shapes with its own icon set).
+  const ICON = { chevron: "M6 9l6 6l6 -6", check: "M5 12l5 5l10 -10", loader: "M12 3a9 9 0 1 0 9 9",
+    back: ["M5 12l14 0", "M5 12l6 6", "M5 12l6 -6"],
+    refresh: ["M20 11a8.1 8.1 0 0 0 -15.5 -2m-.5 -4v4h4", "M4 13a8.1 8.1 0 0 0 15.5 2m.5 4v-4h-4"],
+    decisions: ["M3.5 5.5l1.5 1.5l2.5 -2.5", "M3.5 11.5l1.5 1.5l2.5 -2.5", "M3.5 17.5l1.5 1.5l2.5 -2.5", "M11 6l9 0", "M11 12l9 0", "M11 18l9 0"],
+    inbox: ["M4 6a2 2 0 0 1 2 -2h12a2 2 0 0 1 2 2v12a2 2 0 0 1 -2 2h-12a2 2 0 0 1 -2 -2z", "M4 13h3l3 3h4l3 -3h3"],
+    link: ["M9 15l6 -6", "M11 6l.463 -.536a5 5 0 0 1 7.071 7.072l-.534 .464", "M13 18l-.397 .534a5.068 5.068 0 0 1 -7.127 0a4.972 4.972 0 0 1 0 -7.071l.524 -.463"] };
   const h = React.createElement;
   const Fragment = React.Fragment;
   /** The variants each part takes, all ones Buzz styles (kit/uses.json
    * lists the same; the canary checks them). Anything else draws the first. */
   const VARIANTS = {
     Group: { layout: ["rows"] },
-    Button: { variant: ["subtle", "prominent", "outline", "destructive"], size: ["md", "sm"], shape: ["capsule", "control"] },
+    Button: { variant: ["subtle", "prominent", "outline", "destructive", "ghost", "link"], size: ["md", "sm", "text"], shape: ["capsule", "control"] },
+    Header: { level: [2, 3, 4] },
     Input: { controlSize: ["md", "sm"] },
-    Stack: { gap: [4, 2] },
+    Stack: { gap: [4, 2, "section"] },
+    Column: { gap: [4, 2] },
   };
   const one = (list, value) => (list.includes(value) ? value : list[0]);
   const icon = (path, size, props = {}) => h("svg", { xmlns: "http://www.w3.org/2000/svg", width: `${size / 16}rem`, height: `${size / 16}rem`,
     viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": true, ...props },
-    h("path", { d: path }));
+    ...(Array.isArray(path) ? path : [path]).map((d) => h("path", { key: d, d })));
 
   /** Header.tsx `InlineHeader`: a section's title above its card. */
   const SectionTitle = ({ title, subtitle, id }) =>
@@ -231,14 +239,193 @@ function buzzUi(React, { nativeSelect = false } = {}) {
 
   // Layout, in the spacing Buzz's Settings screens use (Tailwind utilities
   // Buzz itself uses, so its stylesheet has them).
-  const GAPS = { 2: "grid gap-2", 4: "grid gap-4" };
+  const GAPS = { 2: "grid gap-2", 4: "grid gap-4", section: "grid gap-section-gap" };
   const each = (children) => (Array.isArray(children) ? children : [children]);
   /** A column of sections, cards or fields. `as: "form"` makes it the form
    * (with `onSubmit`); gap 4 between sections, 2 within a field. */
   const Stack = ({ as = "div", gap, onSubmit, children }) =>
     h(as, { className: GAPS[one(VARIANTS.Stack.gap, gap)], onSubmit }, ...each(children));
+  /** Builderlab's sign-in column: lines and a button, left-aligned. */
+  const Column = ({ gap, children }) =>
+    h("div", { "data-buzz-ui": "", className: one(VARIANTS.Column.gap, gap) === 2 ? "flex flex-col items-start gap-2" : "flex flex-col items-start gap-4" }, ...each(children));
   /** A row of buttons that wraps. */
   const Actions = ({ children }) => h("div", { className: "flex flex-wrap items-center gap-3" }, ...each(children));
+
+  // ---- Cards, pages and panels ------------------------------------------------
+
+  /** Header.tsx (not inline): a settings card's or page's title, with an
+   * optional eyebrow, subtitle and actions. In Settings it reads as Buzz's own
+   * card titles (GitHub, Claude). */
+  const Header = ({ title, subtitle, eyebrow, actions, id, level }) =>
+    h("div", { "data-buzz-ui": "", className: "buzz-content-header" },
+      h("div", { className: "buzz-content-header-copy" },
+        eyebrow ? h("p", { className: "buzz-content-header-eyebrow" }, eyebrow) : null,
+        h(`h${one(VARIANTS.Header.level, level)}`, { id, className: "buzz-content-header-title" }, title),
+        subtitle ? h("p", { className: "buzz-content-header-subtitle" }, subtitle) : null),
+      actions ? h("div", { className: "buzz-content-header-actions" }, ...each(actions)) : null);
+
+  /** IconButton.tsx: a ghost icon button. `glyph` is an ICON name; `large`
+   * draws the 18px artwork Buzz uses in a panel header (16px elsewhere).
+   * Name it with `label`. */
+  const IconButton = ({ label, glyph, large = false, disabled, onClick, ...props }) =>
+    h("button", { type: "button", ...props, "aria-label": label, title: props.title ?? label, disabled,
+        "data-buzz-ui": "", className: "buzz-button", "data-variant": "ghost", "data-size": "sm", "data-button-shape": "capsule",
+        "data-icon-variant": "ghost", "data-icon-size": "sm", "data-icon-shape": "control", "data-disabled": disabled ? "" : undefined,
+        onClick: (event) => { if (!disabled) onClick?.(event); } },
+      h("span", { className: "buzz-button-label" }, icon(ICON[glyph] ?? ICON.check, large ? 18 : 16)));
+
+  /** PanelHeader.tsx: a page's or drill-in's bar: `navigation` (a back
+   * IconButton) first, the title, then `actions`. */
+  const PanelHeader = ({ title, navigation, actions }) =>
+    h("header", { "data-buzz-ui": "", className: "panel-header", "data-variant": "default" },
+      navigation ?? null,
+      h("div", { className: "panel-header-title" }, h("h2", { className: "text-label text-primary" }, title)),
+      actions ? h("div", { className: "panel-header-actions" }, ...each(actions)) : null);
+
+  /** A dock page's surface (Panel.tsx, laid out as Shared notes' page):
+   * `header` (a PanelHeader) above a scrolling body. `fill`: the body has no
+   * inset (an embedded browser fills it). */
+  const Page = ({ label, header, fill = false, children }) =>
+    h("section", { className: "panel", "data-buzz-surface": "", "data-shape": "panel", "aria-label": label },
+      h("div", { "data-buzz-ui": "", style: { display: "flex", flexDirection: "column", height: "100%", minHeight: 0, containerType: "inline-size" } },
+        header ?? null,
+        h("div", { style: fill ? { display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }
+            : { overflow: "auto", padding: "var(--space-4)", display: "flex", flexDirection: "column", gap: "var(--space-4)", minHeight: 0, flex: 1 } },
+          ...each(children))));
+
+  /** A drill-in inside a panel (PanelSubview): its bar stays put while the body scrolls. */
+  const Subview = ({ header, children }) =>
+    h("div", { "data-buzz-ui": "", style: { display: "flex", flexDirection: "column", height: "100%", minHeight: 0 } }, header, ...each(children));
+  /** A side panel's body: Buzz leaves the inset to the panel (as GitHub's). */
+  const PanelBody = ({ children }) =>
+    h("div", { "data-buzz-ui": "", style: { padding: "var(--space-panel-inset)", overflowY: "auto", minHeight: 0, flex: 1, display: "flex", flexDirection: "column", gap: "var(--space-4)", color: "var(--text-standard)" } },
+      ...each(children));
+
+  /** A child that fills the rest of a `fill` page (an embedded browser). */
+  const Fill = ({ children }) => h("div", { style: { flex: 1, minHeight: 0, display: "flex" } }, ...each(children));
+  /** A bar above a page's body (Activity's toolbar). */
+  const Toolbar = ({ children }) =>
+    h("div", { "data-buzz-ui": "", style: { display: "flex", flex: "0 0 auto", minHeight: "var(--size-panel-header)", flexWrap: "wrap", alignItems: "center",
+      gap: "var(--space-2)", padding: "var(--space-2) calc(var(--space-1) + var(--space-2))", borderBottom: "1px solid var(--border-standard)" } }, ...each(children));
+
+  /** EmptyState.tsx. `frame` "none" drops the card border. */
+  const EmptyState = ({ glyph, title, description, action, frame }) =>
+    h("div", { "data-buzz-ui": "", className: "buzz-empty-state", "data-frame": frame === "none" ? "none" : undefined },
+      h("div", { className: "buzz-empty-state-content" },
+        glyph ? h("span", { className: "buzz-empty-state-icon", "aria-hidden": true }, icon(ICON[glyph], 32)) : null,
+        h("div", { className: "buzz-empty-state-copy" },
+          h("h3", { className: "buzz-empty-state-title" }, title),
+          description ? h("p", { className: "buzz-empty-state-description" }, description) : null),
+        action ? h("div", { className: "buzz-empty-state-action" }, action) : null));
+
+  /** NavigationItem.tsx (variant row): a list row that opens something.
+   * `multiline` lets the label wrap. */
+  const NavItem = ({ label, trailing, selected = false, multiline = false, onClick, ...props }) =>
+    h("button", { type: "button", ...props, "data-buzz-ui": "", className: "navigation-item", "data-variant": "row",
+        "data-selected": selected ? "" : undefined, "aria-current": selected ? "page" : undefined, "data-multiline": multiline ? "" : undefined, onClick },
+      h("span", { className: "navigation-item-label" }, label),
+      trailing == null ? null : h("span", { className: "navigation-item-trailing" }, trailing));
+
+  /** Tabs.tsx, variant "panel" size "sm": pick one of a few items. The
+   * indicator is measured from the selected tab, as Base UI does. */
+  const Tabs = ({ label, value, items, onChange }) => {
+    const list = React.useRef(null);
+    const bar = React.useRef(null);
+    React.useLayoutEffect(() => {
+      const place = () => {
+        const tab = list.current?.querySelector?.('[role="tab"][aria-selected="true"]');
+        if (!tab || !bar.current) return;
+        bar.current.style.setProperty("--active-tab-left", `${tab.offsetLeft}px`);
+        bar.current.style.setProperty("--active-tab-width", `${tab.offsetWidth}px`);
+        bar.current.hidden = false;
+      };
+      place();
+      const watch = typeof ResizeObserver === "function" && list.current ? new ResizeObserver(place) : null;
+      watch?.observe(list.current);
+      return () => watch?.disconnect();
+    }, [value, items.length]);
+    const keys = (event) => {
+      const at = items.findIndex((item) => item.value === value);
+      const step = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
+      if (!step || at < 0) return;
+      event.preventDefault();
+      const next = items[(at + step + items.length) % items.length];
+      onChange(next.value);
+      requestAnimationFrame?.(() => list.current?.querySelector?.('[role="tab"][aria-selected="true"]')?.focus());
+    };
+    return h("div", { "data-buzz-ui": "", className: "buzz-tabs", "data-variant": "panel", "data-size": "sm", "data-orientation": "horizontal" },
+      h("div", { ref: list, role: "tablist", "aria-label": label, "aria-orientation": "horizontal", className: "buzz-tabs-list", "data-orientation": "horizontal", onKeyDown: keys },
+        h("span", { ref: bar, className: "buzz-tabs-indicator", hidden: true }),
+        ...items.map((item) => {
+          const selected = item.value === value;
+          return h("span", { key: item.value, className: "buzz-tabs-item" },
+            h("button", { type: "button", role: "tab", className: "buzz-tabs-tab", title: item.label, "aria-selected": selected, tabIndex: selected ? 0 : -1,
+                "data-selected": selected ? "" : undefined, "data-orientation": "horizontal", "data-tab-value": item.value, onClick: () => onChange(item.value) },
+              h("span", null, item.label)));
+        })));
+  };
+
+  /** Accordion.tsx, variant "form", one item: a section that opens. */
+  const Disclosure = ({ title, children, defaultOpen = false }) => {
+    const id = React.useId();
+    const [open, setOpen] = React.useState(defaultOpen);
+    return h("div", { "data-buzz-ui": "", className: "buzz-accordion", "data-variant": "form" },
+      h("div", { className: "buzz-accordion-item" },
+        h("h3", { className: "buzz-accordion-heading" },
+          h("button", { type: "button", id: `${id}-trigger`, className: "buzz-accordion-trigger text-body", "aria-expanded": open, "aria-controls": `${id}-panel`,
+              onClick: () => setOpen(!open) },
+            h("span", null, title), icon(ICON.chevron, 14))),
+        h("div", { id: `${id}-panel`, role: "region", "aria-labelledby": `${id}-trigger`, className: "buzz-accordion-panel", hidden: !open },
+          open ? children : null)));
+  };
+
+  /** CountBadge.tsx: a count (99+ above 99); nothing at 0. `label` says it in words. */
+  const CountBadge = ({ count, label }) => count > 0
+    ? h("span", { "data-buzz-ui": "", className: "buzz-count-badge", role: "img", "aria-label": label }, count > 99 ? "99+" : String(count))
+    : null;
+  /** The unread dot Buzz's rows use: something waits on you, without a count. */
+  const Dot = ({ label }) =>
+    h("span", { role: "img", "aria-label": label, title: label, style: { display: "grid", placeItems: "center", width: "var(--space-2)", height: "var(--space-2)" } },
+      h("span", { style: { width: "var(--space-2)", height: "var(--space-2)", borderRadius: "var(--radius-pill)", background: "var(--text-navigation-unread)" } }));
+
+  /** InlineChip.tsx, an inert link chip (what a link renderer shows in a message). */
+  const LinkChip = ({ label }) =>
+    h("span", { "data-buzz-ui": "", className: "inline-chip", "data-kind": "link", "data-state": "resolved", role: "img", "aria-label": `Link ${label}` },
+      icon(ICON.link, 16, { className: "inline-chip-icon" }),
+      h("span", { className: "inline-chip-label" }, label));
+
+  /** A one-time code to confirm elsewhere, as Pairing shows its code. */
+  const OneTimeCode = ({ code, label = "Code" }) =>
+    h("fieldset", { className: "m-0 w-full whitespace-nowrap rounded-xl border border-shell-edge bg-surface px-4 py-4" },
+      h("legend", { className: "sr-only" }, label),
+      h("span", { className: "sr-only" }, String(code).split("").join(" ")),
+      h("span", { "aria-hidden": true, className: "font-mono text-title font-semibold tracking-widest" }, code));
+  /** Pairing's code column: the code above its buttons. */
+  const CodeColumn = ({ children }) => h("div", { className: "flex w-64 max-w-full shrink-0 flex-col gap-3" }, ...each(children));
+
+  /** A failure with its retry (relay-staff's Failure). */
+  const Failure = ({ message, retry, retryLabel = "Retry" }) =>
+    h("div", { className: "flex flex-wrap items-center gap-2" },
+      h("p", { role: "alert", className: "text-body-sm text-danger" }, message),
+      retry ? h(Button, { size: "sm", onClick: retry }, retryLabel) : null);
+  /** `.notice`: something that needs a person, not broken (a warning). */
+  const Notice = ({ title, children }) =>
+    h("div", { role: "status", className: "notice" }, title ? h("h3", null, title) : null, ...each(children));
+
+  // Text, in the roles Buzz's pages write.
+  const Title = (text, props = {}) => h("h2", { ...props, className: "text-heading" }, text);
+  const Heading = (text) => h("h3", { className: "text-label" }, text);
+  const Paragraph = (text) => h("p", { className: "m-0 text-body" }, text);
+  const Caption = (text) => h("span", { className: "text-caption text-subtle" }, text);
+  /** A row's emphasised line (Activity's sender). */
+  const Strong = (text) => h("span", { className: "text-label-sm text-standard" }, text);
+  /** Lines stacked inside a row's label. */
+  const Lines = (...lines) => h("span", { className: "grid gap-1" }, ...lines);
+  /** A status or alert line, as Builderlab's sign-in writes it. */
+  const Line = (text, { role, id, danger = false } = {}) => h("p", { role, id, className: danger ? "m-0 text-body-sm text-danger" : "m-0 text-body-sm text-secondary" }, text);
+  /** Pre-formatted text (the file viewer's). */
+  const Pre = (text) => h("pre", { style: { margin: 0, fontFamily: "var(--font-mono)", fontSize: "var(--text-mono)", lineHeight: "var(--text-mono--line-height)",
+    whiteSpace: "pre-wrap", overflowWrap: "anywhere", maxHeight: "18rem", overflow: "auto" } }, text);
 
   // Lines Buzz writes around its cards.
   const Note = (text) => h("p", { className: "m-0 text-body-sm text-secondary" }, text);
@@ -252,5 +439,7 @@ function buzzUi(React, { nativeSelect = false } = {}) {
   const Alert = (text) => h("span", { role: "alert", className: "text-danger" }, text);
   const Code = (text) => h("code", { className: "text-body tabular-nums", style: { letterSpacing: "0.08em" } }, text);
 
-  return { VARIANTS, SectionTitle, Group, Row, Button, Input, Switch, SwitchRow, Pill, Popup, Native, TextField, Stack, Actions, Note, ErrorLine, Spinner, Status, Value, Alert, Code };
+  return { VARIANTS, SectionTitle, Group, Row, Button, Input, Switch, SwitchRow, Pill, Popup, Native, TextField, Stack, Column, Actions, Note, ErrorLine, Spinner, Status, Value, Alert, Code,
+    Header, IconButton, PanelHeader, Page, Subview, PanelBody, Fill, Toolbar, EmptyState, NavItem, Tabs, Disclosure, CountBadge, Dot, LinkChip, OneTimeCode, CodeColumn, Failure, Notice,
+    Title, Heading, Paragraph, Caption, Strong, Lines, Line, Pre, ICON };
 }

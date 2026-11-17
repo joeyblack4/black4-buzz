@@ -157,6 +157,8 @@ const section = (node) => {
   for (const child of node.children ?? []) { const found = section(child); if (found) return found; }
   return null;
 };
+/** The role of the line that speaks the step's state (status or alert). */
+const spoken = (node) => { if (!node || typeof node !== "object") return null; if (["status", "alert"].includes(node.props?.role)) return node.props.role; for (const child of node.children ?? []) { const found = spoken(child); if (found) return found; } return null; };
 const texts = (node) => (node == null || node === false ? [] : typeof node !== "object" ? [String(node)] : (node.children ?? []).flatMap(texts));
 const find = (node, label) => {
   if (!node || typeof node !== "object") return null;
@@ -176,7 +178,7 @@ test("an unlinked key gets one prompt, and one click links it with the viewer's 
   assert.equal(linked.args.ownerKey, VIEWER);
   assert.match(linked.args.label, /^Buzz/);
   assert.equal(linked.via, "call_tool", "a core tool list reaches it through call_tool");
-  assert.match(ui.text(), /^Agent access Linked Nov 14, 2026 · No agents yet/);
+  assert.match(ui.text(), /^Agent access Agents on Black 4 hardware Linked Nov 14, 2026 · No agents yet/);
   assert.ok(find(ui.view(), "Remove…"));
 });
 
@@ -221,7 +223,7 @@ test("the server's own sentence is shown when the key is someone else's or the p
     const ui = await harness(t, black4);
     await settle();
     await ui.click("Link my agents");
-    assert.equal(section(ui.view()).children[1].props.role, "alert");
+    assert.equal(spoken(section(ui.view())), "alert");
     assert.match(ui.text(), new RegExp(message.replace(/\./g, "\\.")));
     assert.ok(find(ui.view(), "Try again"));
   }
@@ -275,7 +277,7 @@ test("signing in links this Buzz's key when it is not linked yet", async (t) => 
   await ui.signIn();
   assert.deepEqual(black4.calls.map((call) => call.name), ["list_agent_owner_keys", "link_agent_owner_key"]);
   assert.equal(black4.calls[1].args.ownerKey, VIEWER);
-  assert.match(ui.text(), /^Agent access Linked/);
+  assert.match(ui.text(), /^Agent access Agents on Black 4 hardware Linked/);
   assert.match(ui.wholeText(), /Signed in as person@example\.test \(staff\)/);
 });
 
@@ -285,7 +287,7 @@ test("signing in with the key already linked to me changes nothing", async (t) =
   await settle();
   await ui.signIn();
   assert.deepEqual(black4.calls.map((call) => call.name), ["list_agent_owner_keys"]);
-  assert.match(ui.text(), /^Agent access Linked/);
+  assert.match(ui.text(), /^Agent access Agents on Black 4 hardware Linked/);
 });
 
 test("signing in with the key linked to someone else says so plainly, once", async (t) => {
@@ -294,7 +296,7 @@ test("signing in with the key linked to someone else says so plainly, once", asy
   const ui = await harness(t, black4, { signedIn: false });
   await settle();
   await ui.signIn();
-  assert.equal(section(ui.view()).children[1].props.role, "alert");
+  assert.equal(spoken(section(ui.view())), "alert");
   assert.match(ui.text(), /Your agents are not linked\. This owner key is linked to another person\./);
   assert.equal(black4.calls.filter((call) => call.name === "link_agent_owner_key").length, 1, "never retried on its own");
   await ui.click("Try again");
@@ -347,7 +349,7 @@ test("staff get the Black 4 hardware type once signed in, and linking points to 
   assert.deepEqual(Object.keys(type.remote).sort(), ["activate", "instructions", "profile", "provision", "remove"]);
   assert.doesNotMatch(ui.text(), /Next:/, "nothing to do next until linked");
   await ui.click("Link my agents");
-  assert.match(ui.text(), /Linked Nov 14, 2026 · No agents yet Next: Agents → New agent → Black 4 hardware\./);
+  assert.match(ui.text(), /Linked Nov 14, 2026 · No agents yet Remove… Next: Agents → New agent → Black 4 hardware\./);
 });
 
 test("the hardware form offers the link in place while it is missing", async (t) => {
@@ -398,7 +400,7 @@ test("if registering the hardware type throws, MCP tools, Reviews and Agent acce
     assert.match(ui.wholeText(), /Status Connected/);
     assert.match(ui.wholeText(), /Black 4 hardware is unavailable in this Buzz: Agent types need an id, a title and defaults/);
     await ui.click("Link my agents");
-    assert.match(ui.text(), /^Agent access Linked/);
+    assert.match(ui.text(), /^Agent access Agents on Black 4 hardware Linked/);
     assert.doesNotMatch(ui.text(), /Next:/, "no pointer to a type that is not there");
     assert.ok(warn.mock.calls.length >= 1, "and it is logged, not swallowed");
     warn.mock.restore();
@@ -437,7 +439,7 @@ test("a pass refused because this Buzz's key is not linked says so and brings ba
   const black4 = server({ links: [link(VIEWER)] });
   const ui = await harness(t, black4, { agentctl: () => ({ ok: true, agents: [] }) });
   await settle();
-  assert.match(ui.text(), /^Agent access Linked/);
+  assert.match(ui.text(), /^Agent access Agents on Black 4 hardware Linked/);
   black4.links[0].revokedAt = "2026-11-15T12:00:00.000Z"; // removed elsewhere
   ui.mcp.ownerKeys = [];
   const { remote } = hardwareType(ui);
@@ -470,7 +472,7 @@ test("signing in with linking refused for want of a recent approval: Approve in 
   const approveButtons = (node) => { let n = 0; const walk = (x) => { if (!x || typeof x !== "object") return; if (x.type === "button" && texts(x).join("") === "Approve in browser") n++; (x.children ?? []).forEach(walk); }; walk(node); return n; };
   assert.equal(approveButtons(ui.whole()), 1, "one Approve in Settings, in Agent access");
   find(ui.view(), "Approve in browser").props.onClick();
-  await until(() => /^Agent access Linked/.test(ui.text()), { timeoutMs: 6000, what: "linked after approval" });
+  await until(() => /^Agent access Agents on Black 4 hardware Linked/.test(ui.text()), { timeoutMs: 6000, what: "linked after approval" });
   assert.equal(black4.calls.filter((call) => call.name === "link_agent_owner_key").length, 2, `refused once, then made once by itself: ${JSON.stringify(black4.calls.map((call) => call.name))}`);
   assert.deepEqual(black4.renew.calls[0], {}, "renew_signin started with no input");
   assert.equal(black4.links.length, 1);
@@ -492,7 +494,7 @@ test("Link my agents refused for want of a recent approval: the same Approve, th
   assert.ok(find(ui.view(), "Approve in browser"));
   black4.renew.polls = ["approved"];
   await ui.click("Approve in browser");
-  await until(() => /^Agent access Linked/.test(ui.text()), { timeoutMs: 6000, what: "linked" });
+  await until(() => /^Agent access Agents on Black 4 hardware Linked/.test(ui.text()), { timeoutMs: 6000, what: "linked" });
   assert.match(ui.wholeText(), /Status Connected/);
 });
 
@@ -559,5 +561,5 @@ test("an agent's own link succeeding while the plugin's link waits: the prompt c
   assert.match(ui.text(), /Linking waits for your approval/);
   black4.approvalRequired = false; // approved elsewhere
   await ui.agentTool("black4_link_agent_owner_key").call({}, {}, { ownerKey: OTHER, label: "An agent's own" });
-  await until(() => /^Agent access Linked/.test(ui.text()), { timeoutMs: 6000, what: "linked by itself" });
+  await until(() => /^Agent access Agents on Black 4 hardware Linked/.test(ui.text()), { timeoutMs: 6000, what: "linked by itself" });
 });

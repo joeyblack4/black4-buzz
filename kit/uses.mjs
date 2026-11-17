@@ -22,6 +22,9 @@ function drawingReact() {
   };
 }
 
+/** Buzz's own component classes (its design-system stylesheets), as against Tailwind utilities. */
+const COMPONENT = /^(buzz-|panel$|panel-header|navigation-item|inline-chip|notice$)/;
+
 function walk(node, visit) {
   if (!node || typeof node !== "object") return;
   if (typeof node.type === "function") return walk(node.type(node.props), visit);
@@ -50,14 +53,25 @@ export function collect() {
     for (const error of [undefined, "E"]) parts.push(h(ui.TextField, { label: "L", description: "D", error, optional: true, value: "", onChange: () => {} }));
     for (const gap of variants.Stack.gap) parts.push(h(ui.Stack, { gap }, "x"));
     parts.push(h(ui.Actions, null, "x"), ui.Note("n"), ui.ErrorLine("e"), h(ui.Spinner), ui.Status("s"), ui.Value("v"), ui.Alert("a"), ui.Code("c"));
+    for (const gap of variants.Column.gap) parts.push(h(ui.Column, { gap }, "x"));
+    for (const level of variants.Header.level) parts.push(h(ui.Header, { title: "T", subtitle: "S", eyebrow: "E", actions: "a", level }));
+    parts.push(h(ui.IconButton, { label: "L", glyph: "back", large: true, disabled: true }), h(ui.IconButton, { label: "L", glyph: "refresh" }));
+    parts.push(h(ui.PanelHeader, { title: "T", navigation: "n", actions: ["a"] }), h(ui.Page, { label: "P", header: "h" }, "x"), h(ui.Page, { label: "P", fill: true }, "x"),
+      h(ui.PanelBody, null, "x"), h(ui.Subview, { header: "h" }, "x"), h(ui.Fill, null, "x"), h(ui.Toolbar, null, "x"), h(ui.EmptyState, { glyph: "inbox", title: "T", description: "D", action: "a" }),
+      h(ui.EmptyState, { title: "T", frame: "none" }), h(ui.NavItem, { label: "L", trailing: "t", selected: true, multiline: true }), h(ui.NavItem, { label: "L" }),
+      h(ui.Tabs, { label: "L", value: "a", items: [{ value: "a", label: "A" }, { value: "b", label: "B" }], onChange() {} }),
+      h(ui.Disclosure, { title: "T", defaultOpen: true }, "x"), h(ui.Disclosure, { title: "T" }, "x"),
+      h(ui.CountBadge, { count: 3, label: "3" }), h(ui.Dot, { label: "L" }), h(ui.LinkChip, { label: "L" }),
+      h(ui.CodeColumn, null, h(ui.OneTimeCode, { code: "AB12" })), h(ui.Failure, { message: "m", retry() {} }), h(ui.Notice, { title: "T" }, "x"),
+      ui.Title("t"), ui.Heading("h"), ui.Paragraph("p"), ui.Caption("c"), ui.Strong("s"), ui.Lines("a", "b"), ui.Line("l", { role: "status" }), ui.Line("l", { danger: true }), ui.Pre("p"));
   }
   const classes = new Set(), utilities = new Set(), attributes = new Set();
   for (const part of parts) walk(part, (node) => {
     const own = String(node.props.className ?? "").split(/\s+/).filter(Boolean);
-    for (const name of own) (name.startsWith("buzz-") ? classes : utilities).add(name);
-    const owner = own.find((name) => name.startsWith("buzz-")) ?? node.type;
+    for (const name of own) (COMPONENT.test(name) ? classes : utilities).add(name);
+    const owner = own.find((name) => COMPONENT.test(name)) ?? node.type;
     for (const [key, value] of Object.entries(node.props)) {
-      if (!key.startsWith("data-") || value === undefined || value === false || key === "data-value") continue;
+      if (!key.startsWith("data-") || value === undefined || value === false || key === "data-value" || key === "data-tab-value") continue;
       attributes.add(value === "" || value === true ? `${owner}[${key}]` : `${owner}[${key}="${value}"]`);
     }
   });
@@ -66,7 +80,8 @@ export function collect() {
   for (const [, key] of kitSource().matchAll(/"(data-[\w-]+)"/g)) {
     if (!drawn.has(key) && key !== "data-value") attributes.add(`*[${key}]`);
   }
-  const customProperties = [...new Set([...kitSource().matchAll(/setProperty\("(--[\w-]+)"/g)].map((match) => match[1]))];
+  // Buzz's custom properties the kit sets (the popup's) or reads (tokens in its inline styles).
+  const customProperties = [...new Set([...kitSource().matchAll(/setProperty\("(--[\w-]+)"|var\((--[\w-]+)/g)].map((match) => match[1] ?? match[2]))];
   const sorted = (set) => [...set].sort();
   return { variants, classes: sorted(classes), utilities: sorted(utilities), attributes: sorted(attributes), customProperties: customProperties.sort() };
 }

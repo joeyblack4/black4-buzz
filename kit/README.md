@@ -20,9 +20,8 @@ is.
    `className` and no `style`, and draws no raw `button`, `input`, `select`,
    `textarea` or `<style>`. If a screen needs something the kit lacks, add it
    to the kit, copied from Buzz's component of the same name. Don't style it
-   in the plugin. `tests/kit.test.mjs` fails on any new homemade UI. Screens
-   built before the kit are counted in [`homemade.json`](homemade.json), and
-   each count only goes down.
+   in the plugin. `tests/kit.test.mjs` fails on any homemade UI in any
+   plugin.
 2. **Copy Buzz, don't approximate it.** A new part starts from Buzz's
    component source: the same element, classes, data attributes, nesting and
    accessible names, with its prop names. Use only Tailwind utilities that
@@ -55,11 +54,21 @@ is.
 | `Row` | `PreferenceRow` | Title, description, control on the right. |
 | `SwitchRow` / `Switch` | `SwitchPreferenceRow` / `Switch` | On and off. |
 | `Pill` | `Select` (compact) | A choice. Options: `{ id, label, detail?, unavailable? }`. |
-| `Button` | `Button` | `variant` prominent, subtle, outline or destructive; `size` sm or md; `shape` capsule or control; `loading`; `href` for links. |
+| `Button` | `Button` | `variant` prominent, subtle, outline, destructive, ghost or link; `size` sm, md or text; `shape` capsule or control; `loading`; `href` for links. |
 | `Input` | `Input` | Short text; `controlSize`, `width`. |
 | `TextField` | `Field` + `Textarea` | Long text with a label, description and error. |
 | `Stack`, `Actions` | Buzz's Settings layout | Space between sections (`gap` 4) or fields (`gap` 2), and a row of buttons. |
 | `Note`, `ErrorLine`, `Status`, `Spinner`, `Value`, `Alert`, `Code` | Buzz's own lines | A muted note, an error, progress, a read-only value, a broken state and a code. |
+| `Header` | `Header` | A settings card's or page's title, with eyebrow, subtitle and actions (GitHub's, Claude's cards). |
+| `Column` | Builderlab's sign-in | Lines and one button, left-aligned. |
+| `PanelHeader`, `IconButton` | `PanelHeader`, `IconButton` (ghost) | A page's or drill-in's bar: back, title, actions. Also a channel launcher. |
+| `Page`, `Subview`, `PanelBody`, `Toolbar`, `Fill` | `Panel` and Shared notes' page; `PanelSubview` | A dock page's surface; a drill-in whose bar stays put; a panel's inset body; a bar above a body; an embedded browser's space. |
+| `NavItem`, `CountBadge`, `Dot` | `NavigationItem`, `CountBadge`, Activity's unread dot | A row that opens something; a count; something waiting without a count. |
+| `EmptyState`, `Failure`, `Notice` | `EmptyState`, relay-staff's failure, `.notice` | Nothing here; something broke (with Retry); something needs a person. |
+| `Tabs`, `Disclosure` | `Tabs` (panel), `Accordion` (form) | Pick one of a few items; a section that opens. |
+| `OneTimeCode`, `CodeColumn` | Pairing's code | A code to confirm elsewhere, with its Copy button. |
+| `LinkChip` | `InlineChip` (link) | A link renderer's chip in a message. |
+| `Title`, `Heading`, `Paragraph`, `Caption`, `Strong`, `Lines`, `Line`, `Pre` | Buzz's type roles | Page title, section heading, body, muted small text, a row's emphasised line, stacked lines, a status or alert line, pre-formatted text. |
 
 A part takes only variants Buzz styles (`VARIANTS` in the kit). Anything else
 draws the default, never an unstyled control.

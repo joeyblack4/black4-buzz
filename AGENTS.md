@@ -9,7 +9,7 @@ releases work and the rule this repository keeps.
 
 - **Plugin screens:** draw them only with the Buzz UI kit and follow its
   rules ([kit/README.md](kit/README.md)). Write no `className`, `style` or
-  raw control in plugin code. `npm test` refuses new homemade UI. Check a
+  raw control in plugin code. `npm test` refuses homemade UI. Check a
   changed screen on screen next to Buzz's own Settings.
 - **Before you finish:** run `npm run check`. When a plugin starts using a new
   Buzz API, update `canary/contract.json` in the same commit.

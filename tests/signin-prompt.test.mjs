@@ -77,6 +77,8 @@ const find = (node, test) => {
   for (const child of node.children ?? []) { const found = find(child, test); if (found) return found; }
   return null;
 };
+/** The one-time code, drawn large as Buzz's Pairing draws its code. */
+const isCode = (n) => typeof n.props?.className === "string" && n.props.className.includes("tracking-widest");
 const button = (node, label) => find(node, (n) => n.type === "button" && texts(n).join("") === label);
 const text = (node) => texts(node).join(" ");
 
@@ -104,7 +106,7 @@ test("installed and enabled while signed out: Buzz opens Settings → Black 4 on
   const signIn = button(app.settings(), "Sign in to Black 4");
   assert.ok(signIn, "the card is the one action");
   assert.equal(signIn.props.autoFocus, true, "focused, so Return signs in");
-  assert.equal(signIn.props.className, "b4-go", "the primary button");
+  assert.deepEqual([signIn.props.className, signIn.props["data-variant"]], ["buzz-button", "prominent"], "Buzz's primary button");
   await app.communityChanged();
   assert.equal(app.opened.length, 1, "dismissed, it does not come back in this run");
 });
@@ -312,9 +314,9 @@ test("Sign in opens the browser at the link that carries the code, once, and sho
   app.settings(); app.panel(); app.preview(); app.workspace();
   assert.deepEqual(clicks, [{ tag: "a", href: `${AUTHKIT}/device?user_code=WDJB-MJHT`, target: "_blank", rel: "noopener noreferrer", attached: true }]);
   const view = app.settings();
-  const code = find(view, (n) => n.props?.className === "b4-code");
+  const code = find(view, isCode);
   assert.deepEqual(code.children, ["WDJB-MJHT"]);
-  assert.ok(button(view, "Copy"), "copy the code");
+  assert.ok(button(view, "Copy code"), "copy the code");
   const link = find(view, (n) => n.type === "a");
   assert.equal(link.props.href, `${AUTHKIT}/device?user_code=WDJB-MJHT`, "the page can be opened again");
   assert.equal(link.props.target, "_blank");
@@ -322,7 +324,7 @@ test("Sign in opens the browser at the link that carries the code, once, and sho
   assert.ok(button(view, "Cancel"));
   assert.equal(find(view, (n) => n.type === "form"), null, "never a form");
   await app.connected();
-  assert.equal(find(app.settings(), (n) => n.props?.className === "b4-code"), null, "the card turns signed in by itself");
+  assert.equal(find(app.settings(), isCode), null, "the card turns signed in by itself");
 });
 
 // ---- every surface, in every state ----
@@ -340,23 +342,25 @@ test("signed out: every surface offers the same one Sign in, never a sentence po
   app.click("Sign in to Black 4", app.preview());
   await until(() => /WDJB-MJHT/.test(text(app.preview())), { what: "the code in the preview" });
   assert.match(text(app.preview()), /Confirm\s+WDJB-MJHT\s+in your browser/, "compact: one line with the code");
-  assert.equal(find(app.preview(), (n) => n.props?.className === "b4-code"), null, "no large code in a preview");
+  assert.equal(find(app.preview(), isCode), null, "no large code in a preview");
   assert.match(text(app.settings()), /WDJB-MJHT/, "the same sign-in shows in Settings");
 });
 
 test("signed out with the embedded inbox: Sign in sits above it, and signing in keeps the inbox in place", async (t) => {
   const app = await harness(t);
   await settle();
+  // The page: its header, then the body: the sign-in bar (or nothing), then the inbox.
+  const body = (view) => view.children[0].children[1];
   let view = app.workspace();
-  assert.ok(button(view.children[0], "Sign in to Black 4"), "a bar above the inbox");
-  assert.equal(view.children[1].children[0].type, "browser-view");
+  assert.ok(button(body(view).children[0], "Sign in to Black 4"), "a bar above the inbox");
+  assert.ok(find(body(view).children[1], (n) => n.type === "browser-view"));
   app.click("Sign in to Black 4", view);
   await app.waitingForCode();
-  assert.match(text(app.workspace().children[0]), /Confirm\s+WDJB-MJHT\s+in your browser/);
+  assert.match(text(body(app.workspace()).children[0]), /Confirm\s+WDJB-MJHT\s+in your browser/);
   await app.connected();
   view = app.workspace();
-  assert.equal(view.children[0], null, "signed in: the bar is gone");
-  assert.equal(view.children[1].children[0].type, "browser-view", "the inbox kept its place");
+  assert.equal(body(view).children[0], null, "signed in: the bar is gone");
+  assert.ok(find(body(view).children[1], (n) => n.type === "browser-view"), "the inbox kept its place");
 });
 
 test("the Reviews dock entry carries a dot while signed out, and the count once signed in", async (t) => {
@@ -365,7 +369,7 @@ test("the Reviews dock entry carries a dot while signed out, and the count once 
   const dot = app.badge();
   assert.equal(dot.props["aria-label"], "Sign in to Black 4");
   assert.equal(dot.props.title, "Sign in to Black 4");
-  assert.deepEqual(dot.children, []);
+  assert.equal(text(dot), "", "a dot, no words");
   app.click("Sign in to Black 4");
   await app.waitingForCode();
   assert.equal(app.badge(), null, "signing in: no dot");
@@ -635,9 +639,9 @@ test("hardware: signin_approval_required (directly or through call_tool) offers 
   app.click("Approve in browser", hardwareForm(app));
   await until(() => /RNEW-CODE/.test(text(hardwareForm(app))), { timeoutMs: 6000, what: "the approval code" });
   assert.deepEqual(renewCalls(app)[0], {}, "renew_signin started with no input");
-  const big = find(hardwareForm(app), (n) => n.props?.className === "b4-code");
+  const big = find(hardwareForm(app), isCode);
   assert.deepEqual(big.children, ["RNEW-CODE"], "the code, large");
-  assert.ok(button(hardwareForm(app), "Copy"));
+  assert.ok(button(hardwareForm(app), "Copy code"));
   assert.equal(find(hardwareForm(app), (n) => n.type === "a").props.href, `${AUTHKIT}/device?user_code=RNEW-CODE`);
   await until(() => /Runs on/.test(text(hardwareForm(app))), { timeoutMs: 6000, what: "approved: the form is back" });
   assert.match(renewCalls(app)[1].approvalId, /^ssa_/, "polled with its approvalId");

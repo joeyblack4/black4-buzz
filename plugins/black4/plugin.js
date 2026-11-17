@@ -544,49 +544,16 @@ export function reviewReader(call) {
   };
 }
 
-// Native React composition, also mounted with synthetic data in the UI harness.
-// It is the review panel, the message preview and, without an embedded browser,
-// the Reviews page. Every color is a host token with a system-color fallback
-// (prominent fills pair CanvasText with Canvas text, never currentColor, which
-// would resolve against the element's own text color), and sizes are em-based,
-// so light, dark and interface size all hold.
+// Native React composition: the review panel, the message preview and,
+// without an embedded browser, the Reviews page. Drawn in Buzz's own parts
+// (buzzUi), so it reads as Buzz's Activity and panels in light and dark.
 // `useConnection` returns the connection status string or `{ status, detail, connect }`.
-const HOST_BORDER = "var(--border-standard,color-mix(in srgb,currentColor 14%,transparent))";
-const HOST_ACCENT = "var(--border-accent,var(--border-focus,currentColor))";
 /** `SignInPrompt` (optional) takes the place of the brief while signed out or
  * signing in: the same one action as every other Black 4 surface. */
 export function reviewSurface(React, read, HumanView, useConnection = () => "connected", SignInPrompt = null) {
   const h = React.createElement;
-  const styles = [
-    `.b4-review{color:var(--text-standard,var(--color-text-primary,inherit));font:inherit;line-height:1.5;overflow-wrap:anywhere;width:100%;min-width:0}`,
-    `.b4-review *{box-sizing:border-box}`,
-    `.b4-review h2{font-size:1.5em;line-height:1.22;letter-spacing:-.035em;margin:.6em 0 .75em}`,
-    `.b4-review h3{font-size:1em;margin:0 0 .5em}`,
-    `.b4-review p{margin:.4em 0 1em}`,
-    `.b4-review small,.b4-review .b4-muted{color:var(--text-subtle,color-mix(in srgb,currentColor 65%,transparent));font-size:.75em}`,
-    `.b4-review button,.b4-review a{font:inherit}`,
-    `.b4-review a{color:var(--text-link,var(--text-accent,inherit))}`,
-    `.b4-review button{cursor:pointer;min-height:2.5em;padding:.5em .75em;border:1px solid ${HOST_BORDER};border-radius:var(--radius-control,.5em);background:transparent;color:inherit;text-align:left}`,
-    `.b4-review button:hover{background:var(--affordance-subtle-hover,color-mix(in srgb,currentColor 7%,transparent))}`,
-    `.b4-review button:focus-visible,.b4-review a:focus-visible{outline:2px solid var(--border-focus,currentColor);outline-offset:3px}`,
-    `.b4-review .b4-primary{background:var(--affordance-prominent,CanvasText);color:var(--text-on-prominent,Canvas);border-color:transparent}`,
-    `.b4-review .b4-primary:hover{background:var(--affordance-prominent-hover,color-mix(in srgb,CanvasText 85%,Canvas))}`,
-    `.b4-review .b4-toolbar{display:flex;align-items:center;gap:.5em;flex-wrap:wrap}`,
-    `.b4-review .b4-section{padding:1.25em 0;border-top:1px solid ${HOST_BORDER}}`,
-    `.b4-review .b4-compare{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1.5em}`,
-    `.b4-review .b4-proposed{border-left:2px solid ${HOST_ACCENT};padding-left:1.125em}`,
-    `.b4-review .b4-row{display:block;width:100%;border:0;border-bottom:1px solid ${HOST_BORDER};border-radius:0;padding:1em 0}`,
-    `.b4-review .b4-row strong{display:block;margin:.3em 0}`,
-    `.b4-review .b4-tabs{display:flex;gap:.5em;overflow-x:auto;padding:.5em 0}`,
-    `.b4-review .b4-tabs button{flex-shrink:0}`,
-    `.b4-review [aria-pressed=true]{border-color:${HOST_ACCENT};color:var(--text-accent,inherit);background:var(--affordance-selected,color-mix(in srgb,currentColor 7%,transparent))}`,
-    `.b4-review details summary{cursor:pointer;padding:.6em 0}`,
-    `.b4-review pre{font:.75em/1.5 monospace;white-space:pre-wrap;max-height:300px;overflow:auto}`,
-    `.b4-review .b4-sticky{position:sticky;bottom:0;background:var(--surface-panel,Canvas);padding:1em 0 .25em;border-top:1px solid ${HOST_BORDER}}`,
-    `.b4-review .b4-enter{animation:b4-enter .16s ease-out}@keyframes b4-enter{from{opacity:.5;transform:translateY(4px)}to{opacity:1;transform:none}}`,
-    `@media(prefers-reduced-motion:reduce){.b4-review .b4-enter{animation:none}}`,
-    `@container(max-width:480px){.b4-review .b4-compare{grid-template-columns:1fr;gap:.5em}}`,
-  ].join("");
+  const { Group, Row, Button, IconButton, PanelHeader, Subview, PanelBody, Header, EmptyState, NavItem, Tabs, Disclosure, CountBadge, Notice, Failure,
+    Column, Actions, Stack, SectionTitle, Title, Paragraph, Caption, Strong, Lines, Line, Note, Pre, Status, Value } = buzzUi(React);
   const CONNECTION_TEXT = {
     starting: "Connecting to Black 4…",
     "signing-in": "Waiting for you to sign in to Black 4.",
@@ -594,8 +561,10 @@ export function reviewSurface(React, read, HumanView, useConnection = () => "con
     stopped: "Black 4 is stopped.",
     failed: "Black 4 is not connected.",
   };
-  const label = value => String(value ?? "Not recorded").replaceAll("_", " ");
-  const section = (title, content) => h("section", { className: "b4-section" }, h("h3", null, title), content);
+  /** A recorded value as words: "not_run" → "Not run". */
+  const label = value => { const text = String(value ?? "Not recorded").replaceAll("_", " "); return text.charAt(0).toUpperCase() + text.slice(1); };
+  /** A titled card of rows, as Buzz's Settings sections. */
+  const section = (title, ...rows) => h("div", { key: title }, h(SectionTitle, { title }), h(Group, null, ...rows));
   function Surface({ target, compact = false, open }) {
     const bridge = useConnection();
     const link = typeof bridge === "string" ? { status: bridge } : bridge ?? { status: "failed" };
@@ -614,55 +583,77 @@ export function reviewSurface(React, read, HumanView, useConnection = () => "con
       read(target).then(value => { if (active) { setResult(value); setLoaded(new Date()); } }, reason => { if (active) setError(reason.message); });
       return () => { active = false; };
     }, [target, revision, connection]);
-    const button = (text, onClick, primary = false) => h("button", { type: "button", className: primary ? "b4-primary" : undefined, onClick }, text);
-    const web = (url, text = "Open original review") => HumanView
-      ? button(text, () => showHuman(url))
-      : h("a", { href: reviewUrl(url), target: "_blank", rel: "noopener noreferrer" }, text);
-    const wrap = (...children) => h("div", { className: "b4-review", style: { padding: compact ? "1em 0" : "var(--space-panel-inset, 1.5rem)", containerType: "inline-size" } }, h("style", null, styles), ...children);
-    if (human) return h("div", { className: "b4-review", style: { display: "flex", flexDirection: "column", flex: 1, minHeight: 0, height: "100%" } }, h("style", null, styles), button("← Back to brief · refresh status", () => { showHuman(null); refresh(v => v + 1); }), h(HumanView, { url: human }));
+    const again = () => refresh(v => v + 1);
+    const reload = h(IconButton, { key: "refresh", label: "Refresh", glyph: "refresh", large: true, onClick: again });
+    const web = (url, text = "Open original review", variant = "subtle") => HumanView
+      ? h(Button, { key: "web", variant, onClick: () => showHuman(url) }, text)
+      : h(Button, { key: "web", variant, href: reviewUrl(url) }, text);
+    // The body of the panel (its host draws the title bar), or a line in a message.
+    const wrap = (...children) => compact ? h(Column, { gap: 2 }, ...children) : h(PanelBody, null, ...children);
+    if (human) return h(Subview, { header:
+      h(PanelHeader, { title: "Black 4 review", navigation: h(IconButton, { label: "Back to the brief", glyph: "back", large: true, onClick: () => { showHuman(null); again(); } }) }) },
+      h(HumanView, { url: human }));
     // Recovery happens where the person is. Connect only shows once nothing is
     // in progress, so a click never restarts a sign-in the browser is holding.
     if (SignInPrompt && ["signed-out", "signing-in", "idle"].includes(connection)) return wrap(h(SignInPrompt, { compact }));
-    if (connection !== "connected") return wrap(
-      h("p", { role: "status" }, CONNECTION_TEXT[connection] ?? `Black 4: ${connection}.`),
-      link.detail ? h("p", { className: "b4-muted" }, link.detail) : null,
+    if (connection !== "connected") return wrap(h(Column, null,
+      Line(CONNECTION_TEXT[connection] ?? `Black 4: ${connection}.`, { role: "status" }),
+      link.detail ? Line(link.detail) : null,
       link.connect && (connection === "failed" || connection === "stopped")
-        ? h("div", { className: "b4-toolbar" }, button("Connect Black 4", link.connect, true))
-        : null);
-    if (error) return wrap(h("p", { role: "alert" }, error), h("div", { className: "b4-toolbar" }, button("Try again", () => refresh(v => v + 1)), compact && open ? button("Inspect review", open) : web(target)));
-    if (!result) return wrap(h("p", { role: "status" }, "Loading your review…"));
-    if (result.kind === "black4_review_queue") return wrap(
-      h("small", null, "BLACK 4 / YOUR DECISIONS"), h("h2", null, result.total ? `${result.total} decisions waiting` : "Nothing waiting for your decision"),
-      result.stalledTotal ? section("Approved work needs follow-through", h("p", null, `${result.stalledTotal} approved items have no execution after 10 minutes. Approval is not completion.`)) : null,
-      h("div", { className: "b4-toolbar" }, button("Refresh", () => refresh(v => v + 1)), web(target, "Full queue & history")),
-      result.note ? h("p", null, result.note) : null,
-      ...(result.reviews ?? []).map(review => h("button", { key: review.assetId, type: "button", className: "b4-row", onClick: () => {
-        const url = new URL(review.reviewUrl); url.searchParams.set("business", review.businessId); open?.(url.href);
-      } }, h("small", null, review.businessName), h("strong", null, review.title), h("span", { className: "b4-muted" }, `${review.items.length} shown · ${review.items[0]?.age ?? "age unknown"} · Inspect →`))),
-      result.truncated ? h("p", { className: "b4-muted" }, `Showing ${result.listed} pending items. The full queue includes the rest.`) : null);
+        ? h(Button, { variant: "prominent", onClick: link.connect }, "Connect Black 4")
+        : null));
+    if (error) return wrap(h(Failure, { message: error, retry: again, retryLabel: "Try again" }), compact && open ? h(Button, { size: "sm", onClick: open }, "Inspect review") : web(target));
+    if (!result) return wrap(Status("Loading your review…"));
+    if (result.kind === "black4_review_queue") {
+      const reviews = result.reviews ?? [];
+      return wrap(
+        h(Header, { eyebrow: "Black 4", title: result.total ? `${result.total} decisions waiting` : "Your decisions",
+          actions: [reload, web(target, "Full queue and history", "ghost")] }),
+        result.stalledTotal ? h(Notice, { title: "Approved work needs follow-through" }, h("p", { key: "p" }, `${result.stalledTotal} approved items have no execution after 10 minutes. Approval is not completion.`)) : null,
+        result.note ? Note(result.note) : null,
+        reviews.length
+          ? h("div", { role: "list", "aria-label": "Reviews waiting" }, ...reviews.map(review => h("div", { key: review.assetId, role: "listitem" },
+              h(NavItem, { multiline: true, "aria-label": `Open ${review.title} for ${review.businessName}`,
+                onClick: () => { const url = new URL(review.reviewUrl); url.searchParams.set("business", review.businessId); open?.(url.href); },
+                label: Lines(Caption(review.businessName), Strong(review.title), Caption(`${review.items.length} shown · ${review.items[0]?.age ?? "age unknown"}`)),
+                trailing: h(CountBadge, { count: review.items.length, label: `${review.items.length} items` }) }))))
+          : result.total ? null : h(EmptyState, { glyph: "inbox", title: "Nothing waiting for your decision", description: "Reviews your agents raise for you appear here." }),
+        result.truncated ? Note(`Showing ${result.listed} pending items. The full queue includes the rest.`) : null);
+    }
     const items = result.items ?? [];
     const item = items.find(item => item.key === selected) ?? items.find(item => item.key === result.focusItemKey) ?? items[0];
-    if (!item) return wrap(h("p", null, "No visible items in this review."), web(target));
+    if (!item) return wrap(h(EmptyState, { glyph: "inbox", title: "No visible items in this review", action: web(target) }));
     const card = item.card ?? {};
     const brief = item.brief ?? {};
     const status = item.decision ? `${label(item.decision.verdict)} · ${label(item.decision.executionStatus)}` : label(item.status);
-    if (compact) return wrap(h("small", null, `${result.businessName} / ${status} / v${item.version}`), h("h3", null, card.question || item.title), h("p", null, item.action), button(`Inspect ${items.length > 1 ? `${items.length} items` : "review"} →`, open, true));
-    return wrap(
-      h("div", { className: "b4-toolbar" }, button("← Queue", () => open?.("https://app.black4.ai/reviews")), h("small", null, result.businessName), button("Refresh", () => refresh(v => v + 1))),
-      items.length > 1 ? h("nav", { className: "b4-tabs", "aria-label": "Review items" }, ...items.map((entry, index) => h("button", { key: entry.key, type: "button", title: entry.title, "aria-pressed": entry.key === item.key, onClick: () => select(entry.key) }, `${index + 1}. ${entry.title}`))) : null,
-      h("article", { key: item.key, className: "b4-enter" },
-        h("small", null, `${status} · Version ${item.version}`), h("h2", null, card.question || item.title),
-        h("p", null, item.action),
-        card.recommend ? h("p", { className: "b4-proposed" }, h("strong", null, `Recommendation: ${label(card.recommend.answer)}. `), card.recommend.why) : null,
-        section("What changes", h("div", { className: "b4-compare" }, h("div", null, h("small", null, "CURRENT"), h("p", null, brief.before || "Current state not supplied.")), h("div", { className: "b4-proposed" }, h("small", null, "PROPOSED"), h("p", null, brief.after || "Proposed state not supplied.")))),
-        card.ifYes || card.ifNo ? section("The choice", h("div", { className: "b4-compare" }, h("div", null, h("h3", null, "If approved"), h("p", null, card.ifYes || brief.expectedResult || "Impact not supplied.")), h("div", null, h("h3", null, "If left as is"), h("p", null, card.ifNo || "Impact not supplied.")))) : null,
-        card.tradeoff ? section("Tradeoff", h("p", null, card.tradeoff)) : null,
-        section("Why this work", h("div", null, h("p", null, brief.why || "Rationale not supplied."), brief.successMeasure ? h("p", null, h("strong", null, "Success looks like: "), brief.successMeasure) : null)),
-        item.decision ? section("Decision & follow-through", h("div", null, h("p", null, status), item.decision.feedback ? h("blockquote", null, item.decision.feedback) : null, h("small", null, `Decided ${item.decision.decidedAt ?? "date unknown"} · Completed ${item.decision.completedAt ?? "not recorded"}`))) : null,
-        h("details", { className: "b4-section" }, h("summary", null, "Evidence, provenance & exact request"), h("p", null, `Made by ${item.madeBy || "not recorded"}. Requested by ${item.requestedBy || "not recorded"}.`),
-          brief.baselineSource ? h("p", null, `${brief.baselineSource} · ${brief.baselineObservedAt || "date not recorded"}`) : null,
-          ...(card.facts ?? []).map((fact, index) => h("p", { key: index }, fact)), item.change ? h("pre", null, JSON.stringify(item.change, null, 2)) : h("p", null, "No provider request is pinned to this item.")),
-        h("footer", { className: "b4-sticky" }, h("div", { className: "b4-toolbar" }, web(item.reviewUrl, item.decidable ? "View work & decide →" : "View work & decision history →")), h("small", null, `Read ${loaded?.toLocaleTimeString() ?? "just now"}. Decisions save in your signed-in review. Return here to refresh.`))));
+    if (compact) return wrap(Caption(`${result.businessName} · ${status} · v${item.version}`), Strong(card.question || item.title),
+      item.action ? Line(item.action) : null, h(Button, { size: "sm", variant: "prominent", onClick: open }, `Inspect ${items.length > 1 ? `${items.length} items` : "review"}`));
+    const row = (title, text, fallback) => h(Row, { key: title, title, description: text || fallback });
+    return h(Subview, { header:
+      h(PanelHeader, { title: result.businessName,
+        navigation: h(IconButton, { label: "Back to the queue", glyph: "back", large: true, onClick: () => open?.("https://app.black4.ai/reviews") }),
+        actions: [reload] }) },
+      h(PanelBody, null,
+        items.length > 1 ? h(Tabs, { label: "Review items", value: item.key, onChange: select, items: items.map((entry, index) => ({ value: entry.key, label: `${index + 1}. ${entry.title}` })) }) : null,
+        h(Stack, { key: item.key, as: "article", gap: "section" },
+          h(Stack, { gap: 2 }, Caption(`${status} · Version ${item.version}`), Title(card.question || item.title), item.action ? Paragraph(item.action) : null),
+          card.recommend ? section("Recommendation", h(Row, { key: "r", title: label(card.recommend.answer), description: card.recommend.why })) : null,
+          section("What changes", row("Current", brief.before, "Current state not supplied."), row("Proposed", brief.after, "Proposed state not supplied.")),
+          card.ifYes || card.ifNo ? section("The choice", row("If approved", card.ifYes || brief.expectedResult, "Impact not supplied."), row("If left as is", card.ifNo, "Impact not supplied.")) : null,
+          card.tradeoff ? section("Tradeoff", row("Tradeoff", card.tradeoff)) : null,
+          section("Why this work", row("Why", brief.why, "Rationale not supplied."), brief.successMeasure ? row("Success looks like", brief.successMeasure) : null),
+          item.decision ? section("Decision and follow-through", h(Row, { key: "d", title: "Decision", trailing: Value(status) }),
+            item.decision.feedback ? row("Feedback", item.decision.feedback) : null,
+            row("Decided", item.decision.decidedAt, "Date unknown"), row("Completed", item.decision.completedAt, "Not recorded")) : null,
+          h(Disclosure, { title: "Evidence, provenance and exact request" },
+            h(Column, { gap: 2 },
+              Line(`Made by ${item.madeBy || "not recorded"}. Requested by ${item.requestedBy || "not recorded"}.`),
+              brief.baselineSource ? Line(`${brief.baselineSource} · ${brief.baselineObservedAt || "date not recorded"}`) : null,
+              ...(card.facts ?? []).map((fact) => Line(fact)),
+              item.change ? Pre(JSON.stringify(item.change, null, 2)) : Line("No provider request is pinned to this item."))),
+          h(Column, { gap: 2 },
+            web(item.reviewUrl, item.decidable ? "View work and decide" : "View work and decision history", "prominent"),
+            Caption(`Read ${loaded?.toLocaleTimeString() ?? "just now"}. Decisions save in your signed-in review. Return here to refresh.`)))));
   }
   return Surface;
 }
@@ -1439,6 +1430,8 @@ export function apply(ctx) {
     if (name === "review_queue" && attempt === generation && state.status === "connected") noteQueue(value);
     return value;
   });
+  // Every Black 4 screen draws in Buzz's own parts.
+  const ui = buzzUi(React);
   const NativeReview = reviewSurface(React, readReview,
     ctx.browser.available ? function HumanReview({ url }) {
       return h(ctx.browser.View, { url, storage: "black4-reviews", label: "Black 4: view work and decide" });
@@ -1463,38 +1456,20 @@ export function apply(ctx) {
     const current = useBridgeState();
     const out = ["signed-out", "signing-in", "idle"].includes(current.status);
     return ctx.browser.available
-      ? h("div", { style: { height: "100%", minHeight: 0, display: "flex", flexDirection: "column" } },
-          out ? h("div", { style: { padding: "var(--space-2) var(--space-panel-inset, 1.5rem)", borderBottom: `1px solid ${HOST_BORDER}` } }, h(SignInPrompt, { compact: true })) : null,
-          h("div", { style: { flex: 1, minHeight: 0, display: "flex" } },
-            h(ctx.browser.View, { url: "https://app.black4.ai/reviews?experience=buzz", storage: "black4-reviews", label: "Black 4 decision inbox" })))
-      : h("div", { style: { height: "100%", minHeight: 0, overflow: "auto", boxSizing: "border-box" } },
-          h(ReviewPanel, { target: "https://app.black4.ai/reviews" }));
+      ? h(ui.Page, { label: "Reviews", fill: true, header: h(ui.PanelHeader, { title: "Reviews" }) },
+          out ? h(ui.Toolbar, { key: "signin" }, h(SignInPrompt, { compact: true })) : null,
+          h(ui.Fill, { key: "view" }, h(ctx.browser.View, { url: "https://app.black4.ai/reviews?experience=buzz", storage: "black4-reviews", label: "Black 4 decision inbox" })))
+      : h(ui.Page, { label: "Reviews", fill: true }, h(ReviewPanel, { target: "https://app.black4.ai/reviews" }));
   }
 
-  // Shown beside the dock entry: decisions waiting on the connected account.
-  // Signed out, a dot: the same cue as a waiting count, with its reason on hover.
+  // Shown on the dock entry: decisions waiting on the connected account, as
+  // Buzz's count badge. Signed out, Buzz's unread dot, its reason on hover.
   function ReviewsBadge() {
     const current = useBridgeState();
-    if (current.status === "idle") return h("span", {
-      role: "img", "aria-label": "Approve your Black 4 sign-in in your browser", title: "Approve your Black 4 sign-in",
-      style: { display: "inline-block", width: ".5em", height: ".5em", borderRadius: "50%", background: "var(--affordance-prominent, CanvasText)" },
-    });
-    if (current.status === "signed-out") return h("span", {
-      role: "img", "aria-label": current.detail ? `Sign in to Black 4. ${current.detail}` : "Sign in to Black 4", title: "Sign in to Black 4",
-      style: { display: "inline-block", width: ".5em", height: ".5em", borderRadius: "50%", background: "var(--affordance-prominent, CanvasText)" },
-    });
+    if (current.status === "idle") return ui.Dot({ label: "Approve your Black 4 sign-in in your browser" });
+    if (current.status === "signed-out") return ui.Dot({ label: current.detail ? `Sign in to Black 4. ${current.detail}` : "Sign in to Black 4" });
     if (current.status !== "connected" || !current.waiting) return null;
-    const count = current.waiting > 99 ? "99+" : String(current.waiting);
-    return h("span", {
-      "aria-label": `${current.waiting} decisions waiting for the connected Black 4 account`,
-      title: `${current.waiting} decisions waiting for the connected Black 4 account`,
-      style: {
-        display: "inline-flex", alignItems: "center", justifyContent: "center",
-        minWidth: "1.25em", padding: "0 .4em", borderRadius: "var(--radius-pill, 999px)",
-        fontSize: ".75em", fontWeight: 600, lineHeight: 1.5, fontVariantNumeric: "tabular-nums",
-        background: "var(--affordance-prominent, CanvasText)", color: "var(--text-on-prominent, Canvas)",
-      },
-    }, count);
+    return ui.CountBadge({ count: current.waiting, label: `${current.waiting} decisions waiting for the connected Black 4 account` });
   }
 
   ctx.pages.register({ id: "reviews", title: "Reviews", primary: true, placement: "dock", layout: "workspace", badge: ReviewsBadge, component: ReviewsWorkspace });
@@ -1508,11 +1483,8 @@ export function apply(ctx) {
     channelPlacement: "side",
     channelLauncher: function ReviewsLauncher({ available, toggle, pressed }) {
       if (!available()) return null;
-      return h("button", {
-        type: "button", "aria-pressed": pressed,
-        title: "Open your Black 4 review queue",
-        onClick: () => toggle("https://app.black4.ai/reviews"),
-      }, "Reviews");
+      return ui.IconButton({ label: "Open your Black 4 review queue", glyph: "decisions", "aria-expanded": pressed, "data-channel-panel-toggle": "",
+        onClick: (event) => { event?.currentTarget?.focus?.(); toggle("https://app.black4.ai/reviews"); } });
     },
   });
 
@@ -1522,8 +1494,7 @@ export function apply(ctx) {
     id: "review-link", title: "Black 4 review", order: 0,
     matches: (url) => Boolean(reviewUrl(url)),
     component: function ReviewLink() {
-      return h("span", { style: { display: "inline-flex", alignItems: "center", gap: "var(--space-2)" } },
-        h("span", { "aria-hidden": true }, "◇"), "Black 4 review");
+      return h(ui.LinkChip, { label: "Black 4 review" });
     },
   });
 
@@ -1547,11 +1518,12 @@ export function apply(ctx) {
       return Number.isNaN(date.getTime()) ? "" : date.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
     };
     const action = (text, onClick, options = {}) =>
-      h("button", { type: "button", onClick, disabled: options.disabled, "aria-busy": options.busy || undefined, className: options.primary ? "b4-primary" : undefined }, text);
+      h(ui.Button, { key: text, size: "sm", variant: options.primary ? "prominent" : "subtle", onClick, disabled: options.disabled, loading: options.busy }, text);
     let text;
     let actions = [];
     let role = "status";
     let next = "";
+    let approval = false;
     if (!connected) text = "Sign in to Black 4 first.";
     else if (link.status === "no-key") text = "Open a community in Buzz first.";
     else if (link.status === "checking" || link.status === "idle") text = "Checking…";
@@ -1571,40 +1543,29 @@ export function apply(ctx) {
       // Black 4 wants a recent approval before it links: Approve here, and
       // the link is made by itself once approved.
       text = "Linking waits for your approval.";
-      actions = [h(SignInPrompt, { key: "approve", renewal: true })];
+      approval = true;
     } else if (link.status === "unavailable") text = link.message || LINK_UNAVAILABLE;
     else {
       role = "alert";
       text = link.message || "Black 4 could not check this link.";
       actions = [action("Try again", checkLink)];
     }
-    return h(
-      "section",
-      { className: "ui-card", "aria-label": "Agent access", "aria-busy": busy || undefined, style: { padding: "var(--space-panel-inset)", display: "flex", flexDirection: "column", gap: "var(--space-2)" } },
-      h("strong", null, "Agent access"),
-      h("span", { role }, text),
-      next && !link.confirming ? h("span", null, next) : null,
-      actions.length ? h("div", { style: { display: "flex", gap: "var(--space-2)" } }, ...actions) : null,
-    );
+    return h("section", { "aria-label": "Agent access", "aria-busy": busy || undefined },
+      h(ui.SectionTitle, { title: "Agent access" }),
+      h(ui.Stack, { gap: 2 },
+        h(ui.Group, null, h(ui.Row, { title: "Agents on Black 4 hardware",
+          description: role === "alert" ? ui.Alert(text) : h("span", { role }, text),
+          trailing: actions.length ? h(ui.Actions, null, ...actions) : null })),
+        approval ? h(SignInPrompt, { key: "approve", renewal: true }) : null,
+        next && !link.confirming ? ui.Note(next) : null));
   }
 
   // ---- Sign in: one action, the same on every surface -----------------------
-  // Signed out: one button. Signing in: the code, large and copyable, while the
-  // browser (opened by Sign in) asks the person to confirm it; the surface turns
-  // signed-in by itself once they do. `compact` is one line, for link previews
-  // and the bar above the inbox. Not a <form>: it sits inside Buzz's own forms.
-  const SIGNIN_STYLES = [
-    `.b4-signin{display:flex;flex-direction:column;align-items:flex-start;gap:var(--space-2,.5em);width:100%;min-width:0}`,
-    `.b4-signin .b4-bar{display:flex;align-items:center;gap:var(--space-2,.5em);flex-wrap:wrap}`,
-    `.b4-signin .b4-go{cursor:pointer;font:inherit;font-weight:600;min-height:2.5em;padding:.5em 1.1em;border:0;border-radius:var(--radius-control,.5em);background:var(--affordance-prominent,CanvasText);color:var(--text-on-prominent,Canvas)}`,
-    `.b4-signin .b4-go:hover{background:var(--affordance-prominent-hover,color-mix(in srgb,CanvasText 85%,Canvas))}`,
-    `.b4-signin .b4-go[disabled]{cursor:default;opacity:.75}`,
-    `.b4-signin button:focus-visible,.b4-signin a:focus-visible{outline:2px solid var(--border-focus,currentColor);outline-offset:3px}`,
-    `.b4-signin .b4-code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:1.75em;font-weight:600;line-height:1.2;letter-spacing:.12em;user-select:all}`,
-    `.b4-signin .b4-muted{color:var(--text-subtle,color-mix(in srgb,currentColor 65%,transparent))}`,
-    `.b4-signin .b4-spin{display:inline-block;flex-shrink:0;width:.8em;height:.8em;border-radius:50%;border:2px solid currentColor;border-right-color:transparent;animation:b4-spin .8s linear infinite}`,
-    `@keyframes b4-spin{to{transform:rotate(360deg)}}@media(prefers-reduced-motion:reduce){.b4-signin .b4-spin{animation:none}}`,
-  ].join("");
+  // Signed out: one button, as Buzz's own sign-ins (Builderlab). Signing in:
+  // the code, as Pairing shows its code, with Copy, while the browser (opened
+  // by Sign in) asks the person to confirm it; the surface turns signed-in by
+  // itself once they do. `compact` is one line, for link previews and the bar
+  // above the inbox. Not a <form>: it sits inside Buzz's own forms.
   // One component for every "approve in your browser" moment: signing in,
   // and approving the sign-in again (renew_signin), so both look the same.
   // `renewal`: also show a hardware renewal (the hardware views); an idle
@@ -1612,42 +1573,38 @@ export function apply(ctx) {
   function SignInPrompt({ compact = false, focus = false, renewal = false }) {
     const current = useBridgeState();
     const [copied, setCopied] = React.useState(false);
-    const wrap = (...children) => h("div", { className: "b4-signin" }, h("style", null, SIGNIN_STYLES), ...children);
-    const bar = (...children) => h("div", { className: "b4-bar" }, ...children);
-    const button = (text, onClick, props = {}) => h("button", { type: "button", onClick, ...props }, text);
-    const spinner = () => h("span", { className: "b4-spin", "aria-hidden": true });
-    const busy = (text, cancel) => wrap(bar(h("button", { type: "button", className: "b4-go", disabled: true, "aria-busy": true }, text), button("Cancel", cancel)));
-    // The code to confirm while the browser asks: large and copyable, or one line.
-    const waiting = (code, cancel) => {
-      const link = h("a", { href: code.url, target: "_blank", rel: "noopener noreferrer" }, "Open sign-in page");
-      const words = code.userCode
-        ? (compact ? ["Confirm ", h("code", { key: "code" }, code.userCode), " in your browser"] : ["Confirm it in your browser"])
-        : ["Approve it in your browser"];
-      const status = h("span", { role: "status", className: "b4-bar b4-muted" }, spinner(), ...words);
-      if (compact) return wrap(bar(status, link, button("Cancel", cancel)));
-      return wrap(
-        code.userCode ? bar(
-          h("span", { className: "b4-code", "aria-label": `Code ${code.userCode}` }, code.userCode),
-          button(copied ? "Copied" : "Copy", () => {
+    const size = compact ? "sm" : "md";
+    const cancel = (onClick) => h(ui.Button, { key: "cancel", size, variant: "outline", onClick }, "Cancel");
+    const busy = (text, onCancel) => compact
+      ? h(ui.Actions, null, ui.Status(text), cancel(onCancel))
+      : h(ui.Actions, null, h(ui.Button, { key: "busy", variant: "prominent", loading: true }, text), cancel(onCancel));
+    // The code to confirm while the browser asks, with Copy; or one line.
+    const waiting = (code, onCancel) => {
+      const open = h(ui.Button, { key: "open", size, variant: compact ? "subtle" : "outline", href: code.url }, "Open sign-in page");
+      const words = code.userCode ? (compact ? `Confirm ${code.userCode} in your browser` : "Confirm it in your browser") : "Approve it in your browser";
+      if (compact) return h(ui.Actions, null, ui.Status(words), open, cancel(onCancel));
+      return h(ui.Column, null,
+        code.userCode ? h(ui.CodeColumn, null,
+          h(ui.OneTimeCode, { code: code.userCode, label: "Sign-in code" }),
+          h(ui.Button, { onClick: () => {
             Promise.resolve(globalThis.navigator?.clipboard?.writeText?.(code.userCode))
               .then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }, () => {});
-          })) : null,
-        bar(status, link, button("Cancel", cancel)));
+          } }, copied ? "Copied" : "Copy code")) : null,
+        ui.Status(words),
+        h(ui.Actions, null, open, cancel(onCancel)));
     };
     const renewing = current.status === "idle" || (renewal && current.status === "connected") ? current.renewal : null;
     if (renewing) {
       if (renewing.status === "starting" || (renewing.status === "waiting" && !renewing.code)) return busy("Approving…", cancelApproval);
       if (renewing.status === "waiting") return waiting(renewing.code, cancelApproval);
-      return wrap(
-        renewing.detail ? h("span", { className: "b4-muted" }, renewing.detail) : null,
-        button("Approve in browser", () => void approve(), {
-          className: "b4-go", autoFocus: focus || undefined,
+      return h(ui.Column, { gap: compact ? 2 : 4 },
+        renewing.detail ? ui.Line(renewing.detail) : null,
+        h(ui.Button, { variant: "prominent", size, autoFocus: focus || undefined, onClick: () => void approve(),
           title: renewing.reason === "idle"
             ? "Black 4 asks you to approve this sign-in again after a while unused. You stay signed in."
             : renewing.reason === "hardware" ? "Black 4 hardware asks for a recent approval of this sign-in. You stay signed in."
               : renewing.reason === "link" ? "Linking your agents asks for a recent approval of this sign-in. You stay signed in."
-                : "Black 4 asks for a recent approval of this sign-in. You stay signed in.",
-        }));
+                : "Black 4 asks for a recent approval of this sign-in. You stay signed in." }, "Approve in browser"));
     }
     if (current.status === "signing-in") return current.signIn ? waiting(current.signIn, cancelSignIn) : busy("Signing in…", cancelSignIn);
     if (current.status !== "signed-out") return null;
@@ -1655,61 +1612,45 @@ export function apply(ctx) {
     // sign-in that ended opens, its button focused and described by it), not
     // as an alert from every surface showing Sign in.
     const described = focus && current.detail ? "b4-signin-detail" : undefined;
-    return wrap(
-      current.detail ? h("span", { id: described, className: "b4-muted" }, current.detail) : null,
-      button("Sign in to Black 4", () => void signIn(), {
-        className: "b4-go", autoFocus: focus || undefined, "aria-describedby": described,
-        title: "Gives every agent in Buzz the Black 4 tools, as you",
-      }));
+    return h(ui.Column, { gap: compact ? 2 : 4 },
+      current.detail ? ui.Line(current.detail, { id: described }) : null,
+      h(ui.Button, { variant: "prominent", size, autoFocus: focus || undefined, "aria-describedby": described,
+        title: "Gives every agent in Buzz the Black 4 tools, as you", onClick: () => void signIn() }, "Sign in to Black 4"));
   }
   /** The hardware views' prompt: also shows a hardware renewal. */
   function ApprovalPrompt(props) { return h(SignInPrompt, { ...props, renewal: true }); }
 
+  // The Settings card, as Buzz's own (GitHub, Claude): a title and subtitle,
+  // then sections of cards.
   function Black4Settings() {
     const current = useBridgeState();
-    const row = (label, value) =>
-      h(
-        "div",
-        { style: { display: "flex", gap: "var(--space-2)", flexWrap: "wrap" } },
-        h("strong", { style: { minWidth: "9em" } }, label),
-        h("span", null, value),
-      );
-    const bar = (...children) => h("div", { style: { display: "flex", gap: "var(--space-2)", flexWrap: "wrap", alignItems: "center" } }, ...children);
-    const button = (text, onClick) => h("button", { type: "button", onClick }, text);
-    const card = (...children) => h("section", { className: "ui-card", style: { padding: "var(--space-panel-inset)", display: "flex", flexDirection: "column", gap: "var(--space-2)" } }, ...children);
     const out = ["signed-out", "signing-in", "idle"].includes(current.status);
-    return h(
-      "div",
-      { style: { display: "flex", flexDirection: "column", gap: "var(--space-2)", width: "100%" } },
-      out
-        // Signed out, the card is the one thing to do; Buzz opens it here.
-        ? card(h(SignInPrompt, { focus: true }),
-          current.status === "idle" ? bar(button("Sign out", () => void signOut())) : null)
-        : card(
-          row("Status", STATUS_TEXT[current.status] ?? current.status),
-          current.detail ? h("span", { role: current.status === "connected" ? "status" : "alert" }, current.detail) : null,
-          current.account && current.status === "connected"
-            ? row("Signed in as", `${current.account.email ?? "unknown"}${current.account.kind ? ` (${current.account.kind})` : ""}`)
-            : null,
-          current.status === "connected" ? row("Agent tools", String(current.tools)) : null,
-          // Black 4 asked for a recent approval (an agent's call, or hardware):
-          // Approve here too. The link step shows its own.
-          current.status === "connected" && current.renewal && current.agentLink?.status !== "approval" ? h(SignInPrompt, { renewal: true }) : null,
-          current.status === "stopped" ? null : bar(
-            button(current.status === "connected" ? "Reconnect" : "Try again", reconnect),
-            button("Sign out", () => void signOut())),
-        ),
-      current.status === "connected" ? h(AgentAccess, { link: current.agentLink, connected: true, hardware: current.hardware === "offered" }) : null,
-      current.hardwareError ? h("p", { role: "alert" }, current.hardwareError) : null,
-      current.log.length
-        ? h(
-            "details",
-            null,
-            h("summary", null, "Connection log"),
-            h("pre", { style: { whiteSpace: "pre-wrap", fontSize: "0.85em" } }, current.log.join("\n")),
-          )
-        : null,
-    );
+    const connected = current.status === "connected";
+    return h("section", { "aria-labelledby": "b4-settings-title" },
+      h(ui.Header, { id: "b4-settings-title", title: "Black 4", subtitle: "Gives every agent in Buzz the Black 4 tools, as you." }),
+      h(ui.Stack, { gap: "section" },
+        out
+          // Signed out, the card is the one thing to do; Buzz opens it here.
+          ? h(ui.Column, null, h(SignInPrompt, { focus: true }),
+            current.status === "idle" ? h(ui.Button, { variant: "outline", onClick: () => void signOut() }, "Sign out") : null)
+          : h("div", null,
+            h(ui.SectionTitle, { title: "Connection" }),
+            h(ui.Stack, { gap: 2 },
+              h(ui.Group, null,
+                h(ui.Row, { title: "Status",
+                  description: current.detail ? (connected ? h("span", { role: "status" }, current.detail) : ui.Alert(current.detail)) : undefined,
+                  trailing: h(ui.Actions, null, ui.Value(STATUS_TEXT[current.status] ?? current.status),
+                    current.status === "stopped" ? null : h(ui.Button, { size: "sm", onClick: reconnect }, connected ? "Reconnect" : "Try again")) }),
+                h(ui.Row, { title: "Signed in as",
+                  description: current.account && connected ? `${current.account.email ?? "unknown"}${current.account.kind ? ` (${current.account.kind})` : ""}` : undefined,
+                  trailing: current.status === "stopped" ? null : h(ui.Button, { size: "sm", variant: "outline", onClick: () => void signOut() }, "Sign out") }),
+                connected ? h(ui.Row, { title: "Agent tools", trailing: ui.Value(String(current.tools)) }) : null),
+              // Black 4 asked for a recent approval (an agent's call, or hardware):
+              // Approve here too. The link step shows its own.
+              connected && current.renewal && current.agentLink?.status !== "approval" ? h(SignInPrompt, { renewal: true }) : null)),
+        connected ? h(AgentAccess, { link: current.agentLink, connected: true, hardware: current.hardware === "offered" }) : null,
+        current.hardwareError ? ui.ErrorLine(current.hardwareError) : null,
+        current.log.length ? h(ui.Disclosure, { title: "Connection log" }, ui.Pre(current.log.join("\n"))) : null));
   }
 
   ctx.settingsCards.register({ id: "connection", title: "Black 4", component: Black4Settings });
@@ -2499,21 +2440,29 @@ export const NATIVE_SELECT = false;
  * menu opens) instead of Buzz's popup. */
 function buzzUi(React, { nativeSelect = false } = {}) {
   // Tabler icons 3.46 (chevron-down, check, loader-2): Buzz's CaretDownIcon, CheckIcon and CircleNotchIcon.
-  const ICON = { chevron: "M6 9l6 6l6 -6", check: "M5 12l5 5l10 -10", loader: "M12 3a9 9 0 1 0 9 9" };
+  // Tabler icons 3.46 (Buzz draws the same shapes with its own icon set).
+  const ICON = { chevron: "M6 9l6 6l6 -6", check: "M5 12l5 5l10 -10", loader: "M12 3a9 9 0 1 0 9 9",
+    back: ["M5 12l14 0", "M5 12l6 6", "M5 12l6 -6"],
+    refresh: ["M20 11a8.1 8.1 0 0 0 -15.5 -2m-.5 -4v4h4", "M4 13a8.1 8.1 0 0 0 15.5 2m.5 4v-4h-4"],
+    decisions: ["M3.5 5.5l1.5 1.5l2.5 -2.5", "M3.5 11.5l1.5 1.5l2.5 -2.5", "M3.5 17.5l1.5 1.5l2.5 -2.5", "M11 6l9 0", "M11 12l9 0", "M11 18l9 0"],
+    inbox: ["M4 6a2 2 0 0 1 2 -2h12a2 2 0 0 1 2 2v12a2 2 0 0 1 -2 2h-12a2 2 0 0 1 -2 -2z", "M4 13h3l3 3h4l3 -3h3"],
+    link: ["M9 15l6 -6", "M11 6l.463 -.536a5 5 0 0 1 7.071 7.072l-.534 .464", "M13 18l-.397 .534a5.068 5.068 0 0 1 -7.127 0a4.972 4.972 0 0 1 0 -7.071l.524 -.463"] };
   const h = React.createElement;
   const Fragment = React.Fragment;
   /** The variants each part takes, all ones Buzz styles (kit/uses.json
    * lists the same; the canary checks them). Anything else draws the first. */
   const VARIANTS = {
     Group: { layout: ["rows"] },
-    Button: { variant: ["subtle", "prominent", "outline", "destructive"], size: ["md", "sm"], shape: ["capsule", "control"] },
+    Button: { variant: ["subtle", "prominent", "outline", "destructive", "ghost", "link"], size: ["md", "sm", "text"], shape: ["capsule", "control"] },
+    Header: { level: [2, 3, 4] },
     Input: { controlSize: ["md", "sm"] },
-    Stack: { gap: [4, 2] },
+    Stack: { gap: [4, 2, "section"] },
+    Column: { gap: [4, 2] },
   };
   const one = (list, value) => (list.includes(value) ? value : list[0]);
   const icon = (path, size, props = {}) => h("svg", { xmlns: "http://www.w3.org/2000/svg", width: `${size / 16}rem`, height: `${size / 16}rem`,
     viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": true, ...props },
-    h("path", { d: path }));
+    ...(Array.isArray(path) ? path : [path]).map((d) => h("path", { key: d, d })));
 
   /** Header.tsx `InlineHeader`: a section's title above its card. */
   const SectionTitle = ({ title, subtitle, id }) =>
@@ -2713,14 +2662,193 @@ function buzzUi(React, { nativeSelect = false } = {}) {
 
   // Layout, in the spacing Buzz's Settings screens use (Tailwind utilities
   // Buzz itself uses, so its stylesheet has them).
-  const GAPS = { 2: "grid gap-2", 4: "grid gap-4" };
+  const GAPS = { 2: "grid gap-2", 4: "grid gap-4", section: "grid gap-section-gap" };
   const each = (children) => (Array.isArray(children) ? children : [children]);
   /** A column of sections, cards or fields. `as: "form"` makes it the form
    * (with `onSubmit`); gap 4 between sections, 2 within a field. */
   const Stack = ({ as = "div", gap, onSubmit, children }) =>
     h(as, { className: GAPS[one(VARIANTS.Stack.gap, gap)], onSubmit }, ...each(children));
+  /** Builderlab's sign-in column: lines and a button, left-aligned. */
+  const Column = ({ gap, children }) =>
+    h("div", { "data-buzz-ui": "", className: one(VARIANTS.Column.gap, gap) === 2 ? "flex flex-col items-start gap-2" : "flex flex-col items-start gap-4" }, ...each(children));
   /** A row of buttons that wraps. */
   const Actions = ({ children }) => h("div", { className: "flex flex-wrap items-center gap-3" }, ...each(children));
+
+  // ---- Cards, pages and panels ------------------------------------------------
+
+  /** Header.tsx (not inline): a settings card's or page's title, with an
+   * optional eyebrow, subtitle and actions. In Settings it reads as Buzz's own
+   * card titles (GitHub, Claude). */
+  const Header = ({ title, subtitle, eyebrow, actions, id, level }) =>
+    h("div", { "data-buzz-ui": "", className: "buzz-content-header" },
+      h("div", { className: "buzz-content-header-copy" },
+        eyebrow ? h("p", { className: "buzz-content-header-eyebrow" }, eyebrow) : null,
+        h(`h${one(VARIANTS.Header.level, level)}`, { id, className: "buzz-content-header-title" }, title),
+        subtitle ? h("p", { className: "buzz-content-header-subtitle" }, subtitle) : null),
+      actions ? h("div", { className: "buzz-content-header-actions" }, ...each(actions)) : null);
+
+  /** IconButton.tsx: a ghost icon button. `glyph` is an ICON name; `large`
+   * draws the 18px artwork Buzz uses in a panel header (16px elsewhere).
+   * Name it with `label`. */
+  const IconButton = ({ label, glyph, large = false, disabled, onClick, ...props }) =>
+    h("button", { type: "button", ...props, "aria-label": label, title: props.title ?? label, disabled,
+        "data-buzz-ui": "", className: "buzz-button", "data-variant": "ghost", "data-size": "sm", "data-button-shape": "capsule",
+        "data-icon-variant": "ghost", "data-icon-size": "sm", "data-icon-shape": "control", "data-disabled": disabled ? "" : undefined,
+        onClick: (event) => { if (!disabled) onClick?.(event); } },
+      h("span", { className: "buzz-button-label" }, icon(ICON[glyph] ?? ICON.check, large ? 18 : 16)));
+
+  /** PanelHeader.tsx: a page's or drill-in's bar: `navigation` (a back
+   * IconButton) first, the title, then `actions`. */
+  const PanelHeader = ({ title, navigation, actions }) =>
+    h("header", { "data-buzz-ui": "", className: "panel-header", "data-variant": "default" },
+      navigation ?? null,
+      h("div", { className: "panel-header-title" }, h("h2", { className: "text-label text-primary" }, title)),
+      actions ? h("div", { className: "panel-header-actions" }, ...each(actions)) : null);
+
+  /** A dock page's surface (Panel.tsx, laid out as Shared notes' page):
+   * `header` (a PanelHeader) above a scrolling body. `fill`: the body has no
+   * inset (an embedded browser fills it). */
+  const Page = ({ label, header, fill = false, children }) =>
+    h("section", { className: "panel", "data-buzz-surface": "", "data-shape": "panel", "aria-label": label },
+      h("div", { "data-buzz-ui": "", style: { display: "flex", flexDirection: "column", height: "100%", minHeight: 0, containerType: "inline-size" } },
+        header ?? null,
+        h("div", { style: fill ? { display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }
+            : { overflow: "auto", padding: "var(--space-4)", display: "flex", flexDirection: "column", gap: "var(--space-4)", minHeight: 0, flex: 1 } },
+          ...each(children))));
+
+  /** A drill-in inside a panel (PanelSubview): its bar stays put while the body scrolls. */
+  const Subview = ({ header, children }) =>
+    h("div", { "data-buzz-ui": "", style: { display: "flex", flexDirection: "column", height: "100%", minHeight: 0 } }, header, ...each(children));
+  /** A side panel's body: Buzz leaves the inset to the panel (as GitHub's). */
+  const PanelBody = ({ children }) =>
+    h("div", { "data-buzz-ui": "", style: { padding: "var(--space-panel-inset)", overflowY: "auto", minHeight: 0, flex: 1, display: "flex", flexDirection: "column", gap: "var(--space-4)", color: "var(--text-standard)" } },
+      ...each(children));
+
+  /** A child that fills the rest of a `fill` page (an embedded browser). */
+  const Fill = ({ children }) => h("div", { style: { flex: 1, minHeight: 0, display: "flex" } }, ...each(children));
+  /** A bar above a page's body (Activity's toolbar). */
+  const Toolbar = ({ children }) =>
+    h("div", { "data-buzz-ui": "", style: { display: "flex", flex: "0 0 auto", minHeight: "var(--size-panel-header)", flexWrap: "wrap", alignItems: "center",
+      gap: "var(--space-2)", padding: "var(--space-2) calc(var(--space-1) + var(--space-2))", borderBottom: "1px solid var(--border-standard)" } }, ...each(children));
+
+  /** EmptyState.tsx. `frame` "none" drops the card border. */
+  const EmptyState = ({ glyph, title, description, action, frame }) =>
+    h("div", { "data-buzz-ui": "", className: "buzz-empty-state", "data-frame": frame === "none" ? "none" : undefined },
+      h("div", { className: "buzz-empty-state-content" },
+        glyph ? h("span", { className: "buzz-empty-state-icon", "aria-hidden": true }, icon(ICON[glyph], 32)) : null,
+        h("div", { className: "buzz-empty-state-copy" },
+          h("h3", { className: "buzz-empty-state-title" }, title),
+          description ? h("p", { className: "buzz-empty-state-description" }, description) : null),
+        action ? h("div", { className: "buzz-empty-state-action" }, action) : null));
+
+  /** NavigationItem.tsx (variant row): a list row that opens something.
+   * `multiline` lets the label wrap. */
+  const NavItem = ({ label, trailing, selected = false, multiline = false, onClick, ...props }) =>
+    h("button", { type: "button", ...props, "data-buzz-ui": "", className: "navigation-item", "data-variant": "row",
+        "data-selected": selected ? "" : undefined, "aria-current": selected ? "page" : undefined, "data-multiline": multiline ? "" : undefined, onClick },
+      h("span", { className: "navigation-item-label" }, label),
+      trailing == null ? null : h("span", { className: "navigation-item-trailing" }, trailing));
+
+  /** Tabs.tsx, variant "panel" size "sm": pick one of a few items. The
+   * indicator is measured from the selected tab, as Base UI does. */
+  const Tabs = ({ label, value, items, onChange }) => {
+    const list = React.useRef(null);
+    const bar = React.useRef(null);
+    React.useLayoutEffect(() => {
+      const place = () => {
+        const tab = list.current?.querySelector?.('[role="tab"][aria-selected="true"]');
+        if (!tab || !bar.current) return;
+        bar.current.style.setProperty("--active-tab-left", `${tab.offsetLeft}px`);
+        bar.current.style.setProperty("--active-tab-width", `${tab.offsetWidth}px`);
+        bar.current.hidden = false;
+      };
+      place();
+      const watch = typeof ResizeObserver === "function" && list.current ? new ResizeObserver(place) : null;
+      watch?.observe(list.current);
+      return () => watch?.disconnect();
+    }, [value, items.length]);
+    const keys = (event) => {
+      const at = items.findIndex((item) => item.value === value);
+      const step = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
+      if (!step || at < 0) return;
+      event.preventDefault();
+      const next = items[(at + step + items.length) % items.length];
+      onChange(next.value);
+      requestAnimationFrame?.(() => list.current?.querySelector?.('[role="tab"][aria-selected="true"]')?.focus());
+    };
+    return h("div", { "data-buzz-ui": "", className: "buzz-tabs", "data-variant": "panel", "data-size": "sm", "data-orientation": "horizontal" },
+      h("div", { ref: list, role: "tablist", "aria-label": label, "aria-orientation": "horizontal", className: "buzz-tabs-list", "data-orientation": "horizontal", onKeyDown: keys },
+        h("span", { ref: bar, className: "buzz-tabs-indicator", hidden: true }),
+        ...items.map((item) => {
+          const selected = item.value === value;
+          return h("span", { key: item.value, className: "buzz-tabs-item" },
+            h("button", { type: "button", role: "tab", className: "buzz-tabs-tab", title: item.label, "aria-selected": selected, tabIndex: selected ? 0 : -1,
+                "data-selected": selected ? "" : undefined, "data-orientation": "horizontal", "data-tab-value": item.value, onClick: () => onChange(item.value) },
+              h("span", null, item.label)));
+        })));
+  };
+
+  /** Accordion.tsx, variant "form", one item: a section that opens. */
+  const Disclosure = ({ title, children, defaultOpen = false }) => {
+    const id = React.useId();
+    const [open, setOpen] = React.useState(defaultOpen);
+    return h("div", { "data-buzz-ui": "", className: "buzz-accordion", "data-variant": "form" },
+      h("div", { className: "buzz-accordion-item" },
+        h("h3", { className: "buzz-accordion-heading" },
+          h("button", { type: "button", id: `${id}-trigger`, className: "buzz-accordion-trigger text-body", "aria-expanded": open, "aria-controls": `${id}-panel`,
+              onClick: () => setOpen(!open) },
+            h("span", null, title), icon(ICON.chevron, 14))),
+        h("div", { id: `${id}-panel`, role: "region", "aria-labelledby": `${id}-trigger`, className: "buzz-accordion-panel", hidden: !open },
+          open ? children : null)));
+  };
+
+  /** CountBadge.tsx: a count (99+ above 99); nothing at 0. `label` says it in words. */
+  const CountBadge = ({ count, label }) => count > 0
+    ? h("span", { "data-buzz-ui": "", className: "buzz-count-badge", role: "img", "aria-label": label }, count > 99 ? "99+" : String(count))
+    : null;
+  /** The unread dot Buzz's rows use: something waits on you, without a count. */
+  const Dot = ({ label }) =>
+    h("span", { role: "img", "aria-label": label, title: label, style: { display: "grid", placeItems: "center", width: "var(--space-2)", height: "var(--space-2)" } },
+      h("span", { style: { width: "var(--space-2)", height: "var(--space-2)", borderRadius: "var(--radius-pill)", background: "var(--text-navigation-unread)" } }));
+
+  /** InlineChip.tsx, an inert link chip (what a link renderer shows in a message). */
+  const LinkChip = ({ label }) =>
+    h("span", { "data-buzz-ui": "", className: "inline-chip", "data-kind": "link", "data-state": "resolved", role: "img", "aria-label": `Link ${label}` },
+      icon(ICON.link, 16, { className: "inline-chip-icon" }),
+      h("span", { className: "inline-chip-label" }, label));
+
+  /** A one-time code to confirm elsewhere, as Pairing shows its code. */
+  const OneTimeCode = ({ code, label = "Code" }) =>
+    h("fieldset", { className: "m-0 w-full whitespace-nowrap rounded-xl border border-shell-edge bg-surface px-4 py-4" },
+      h("legend", { className: "sr-only" }, label),
+      h("span", { className: "sr-only" }, String(code).split("").join(" ")),
+      h("span", { "aria-hidden": true, className: "font-mono text-title font-semibold tracking-widest" }, code));
+  /** Pairing's code column: the code above its buttons. */
+  const CodeColumn = ({ children }) => h("div", { className: "flex w-64 max-w-full shrink-0 flex-col gap-3" }, ...each(children));
+
+  /** A failure with its retry (relay-staff's Failure). */
+  const Failure = ({ message, retry, retryLabel = "Retry" }) =>
+    h("div", { className: "flex flex-wrap items-center gap-2" },
+      h("p", { role: "alert", className: "text-body-sm text-danger" }, message),
+      retry ? h(Button, { size: "sm", onClick: retry }, retryLabel) : null);
+  /** `.notice`: something that needs a person, not broken (a warning). */
+  const Notice = ({ title, children }) =>
+    h("div", { role: "status", className: "notice" }, title ? h("h3", null, title) : null, ...each(children));
+
+  // Text, in the roles Buzz's pages write.
+  const Title = (text, props = {}) => h("h2", { ...props, className: "text-heading" }, text);
+  const Heading = (text) => h("h3", { className: "text-label" }, text);
+  const Paragraph = (text) => h("p", { className: "m-0 text-body" }, text);
+  const Caption = (text) => h("span", { className: "text-caption text-subtle" }, text);
+  /** A row's emphasised line (Activity's sender). */
+  const Strong = (text) => h("span", { className: "text-label-sm text-standard" }, text);
+  /** Lines stacked inside a row's label. */
+  const Lines = (...lines) => h("span", { className: "grid gap-1" }, ...lines);
+  /** A status or alert line, as Builderlab's sign-in writes it. */
+  const Line = (text, { role, id, danger = false } = {}) => h("p", { role, id, className: danger ? "m-0 text-body-sm text-danger" : "m-0 text-body-sm text-secondary" }, text);
+  /** Pre-formatted text (the file viewer's). */
+  const Pre = (text) => h("pre", { style: { margin: 0, fontFamily: "var(--font-mono)", fontSize: "var(--text-mono)", lineHeight: "var(--text-mono--line-height)",
+    whiteSpace: "pre-wrap", overflowWrap: "anywhere", maxHeight: "18rem", overflow: "auto" } }, text);
 
   // Lines Buzz writes around its cards.
   const Note = (text) => h("p", { className: "m-0 text-body-sm text-secondary" }, text);
@@ -2734,7 +2862,9 @@ function buzzUi(React, { nativeSelect = false } = {}) {
   const Alert = (text) => h("span", { role: "alert", className: "text-danger" }, text);
   const Code = (text) => h("code", { className: "text-body tabular-nums", style: { letterSpacing: "0.08em" } }, text);
 
-  return { VARIANTS, SectionTitle, Group, Row, Button, Input, Switch, SwitchRow, Pill, Popup, Native, TextField, Stack, Actions, Note, ErrorLine, Spinner, Status, Value, Alert, Code };
+  return { VARIANTS, SectionTitle, Group, Row, Button, Input, Switch, SwitchRow, Pill, Popup, Native, TextField, Stack, Column, Actions, Note, ErrorLine, Spinner, Status, Value, Alert, Code,
+    Header, IconButton, PanelHeader, Page, Subview, PanelBody, Fill, Toolbar, EmptyState, NavItem, Tabs, Disclosure, CountBadge, Dot, LinkChip, OneTimeCode, CodeColumn, Failure, Notice,
+    Title, Heading, Paragraph, Caption, Strong, Lines, Line, Pre, ICON };
 }
 // ---- end buzz-ui kit ----
 export { buzzUi };

@@ -9,7 +9,6 @@ import { collect, loadKit } from "../kit/uses.mjs";
 
 const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
 const uses = JSON.parse(read("kit/uses.json"));
-const ceilings = JSON.parse(read("kit/homemade.json"));
 /** A className or style, or a raw control or <style>, drawn outside the kit. */
 const HOMEMADE = /\bclassName\s*:|\bstyle\s*:|\b(?:h|createElement)\(\s*["'](?:button|input|select|textarea|style)["']/g;
 /** Plugins built from subscriptions/src: their sources are what people edit. */
@@ -55,11 +54,13 @@ test("kit: each part draws with Buzz's classes, and Pill draws Buzz's popup or t
   const React = { Fragment: "f", createElement: (type, props, ...children) => ({ type, props: { ...(props ?? {}), children: children.flat() } }),
     useState: (v) => [v, () => {}], useRef: (current) => ({ current }), useId: () => "id", useEffect() {}, useLayoutEffect() {} };
   const ui = loadKit()(React);
-  assert.deepEqual(Object.keys(ui).sort(), ["Actions", "Alert", "Button", "Code", "ErrorLine", "Group", "Input", "Native", "Note", "Pill", "Popup",
-    "Row", "SectionTitle", "Spinner", "Stack", "Status", "Switch", "SwitchRow", "TextField", "VARIANTS", "Value"]);
+  assert.deepEqual(Object.keys(ui).sort(), ["Actions", "Alert", "Button", "Caption", "Code", "CodeColumn", "Column", "CountBadge", "Disclosure", "Dot", "EmptyState",
+    "ErrorLine", "Failure", "Fill", "Group", "Header", "Heading", "ICON", "IconButton", "Input", "Line", "Lines", "LinkChip", "Native", "NavItem", "Note", "Notice",
+    "OneTimeCode", "Page", "PanelBody", "PanelHeader", "Paragraph", "Pill", "Popup", "Pre", "Row", "SectionTitle", "Spinner", "Stack", "Status", "Strong", "Subview",
+    "Switch", "SwitchRow", "Tabs", "TextField", "Title", "Toolbar", "VARIANTS", "Value"]);
   // A variant Buzz does not style draws the default, never an unstyled control.
-  assert.equal(ui.Button({ variant: "ghost", size: "xl", shape: "round", children: "B" }).props["data-variant"], "subtle");
-  assert.equal(ui.Button({ variant: "ghost", size: "xl", shape: "round", children: "B" }).props["data-size"], "md");
+  assert.equal(ui.Button({ variant: "glassy", size: "xl", shape: "round", children: "B" }).props["data-variant"], "subtle");
+  assert.equal(ui.Button({ variant: "glassy", size: "xl", shape: "round", children: "B" }).props["data-size"], "md");
   assert.equal(ui.Group({ layout: "grid" }).props["data-layout"], "rows");
   assert.equal(ui.Stack({ gap: 9, children: ["a"] }).props.className, "grid gap-4");
   assert.equal(ui.Pill, ui.Popup);
@@ -68,15 +69,13 @@ test("kit: each part draws with Buzz's classes, and Pill draws Buzz's popup or t
   assert.equal(ui.Stack({ as: "form", gap: 2, children: ["a"] }).type, "form");
 });
 
-test("kit: no plugin draws more of its own UI than before; new screens use the kit", () => {
+test("kit: no plugin draws UI of its own; every screen uses the kit", () => {
   for (const file of sources()) {
     const found = (outsideKit(read(file)).match(HOMEMADE) ?? []).length;
-    const ceiling = ceilings[file] ?? 0;
-    assert.ok(found <= ceiling, `${file} draws ${found} things of its own (a className, a style, or a raw button, input, select, textarea or <style>); at most ${ceiling} may remain from before the kit. Draw with the Buzz UI kit (kit/README.md) instead.`);
-    assert.ok(found === ceiling, `${file} now draws only ${found} things of its own: lower its number in kit/homemade.json to ${found}, so it cannot grow back.`);
+    assert.equal(found, 0, `${file} draws ${found} things of its own (a className, a style, or a raw button, input, select, textarea or <style>). Draw with the Buzz UI kit (kit/README.md) instead.`);
   }
-  for (const file of Object.keys(ceilings)) if (!file.startsWith("$")) assert.ok(sources().includes(file), `kit/homemade.json lists ${file}, which is gone`);
 });
+
 
 test("kit: Black 4 hardware, after the kit, draws nothing of its own", () => {
   const text = read("plugins/black4/plugin.js");

@@ -161,7 +161,8 @@ listed as unavailable, with the reason.
 
 The form and the agent's tabs are Buzz's own rows. **Identity** holds
 Harness, Model, Thinking, Compact at and Instructions. **Settings** holds the
-machine (Runs on, Runs, Pays with, Sign-in, Status with Restart, Answers), the
+machine (Runs on and Runs, fixed for an agent's life; Pays with, Sign-in, Status
+with Restart, Answers), the
 Heartbeat (on or off, how often it wakes, and what it does each time) and
 **Conversations**: buzz-acp's own levers for this agent (Parallel work, Session
 per, New message while working, Fresh session after, Max turn length, Context

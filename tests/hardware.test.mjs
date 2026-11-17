@@ -588,7 +588,7 @@ test("render: Settings shows how the agent pays and its levers, and a change goe
   const { type, React, settle, asked } = hardwareOn(qwenFleet);
   const tree = await settle(React.createElement(type.tabs[0].component, { agent: { pubkey: PUBKEY } }));
   const pills = pillsIn(tree);
-  assert.deepEqual(pills.map((entry) => [entry.title, entry.value]), [["Model", "qwen3.7-plus"], ["Compact at", "250000"], ["Pays with", "key"],
+  assert.deepEqual(pills.map((entry) => [entry.title, entry.value]), [["Model", "qwen3.7-plus"], ["Compact at", "250000"], ["Pays with", "key"], ["Answers", "anyone"],
     ["Parallel work", ""], ["Session per", "thread"], ["New message while working", ""], ["Fresh session after", ""], ["Max turn length", ""], ["Context for replies", "20"]]);
   assert.deepEqual(pills[0].options, ["qwen4-max", "qwen3.7-plus"], "the key's listing");
   const sent = async () => { await new Promise((resolve) => setTimeout(resolve, 10)); const request = asked.find((entry) => entry.op === "settings.set"); asked.length = 0; return request; };
@@ -605,6 +605,11 @@ test("render: Settings shows how the agent pays and its levers, and a change goe
   const more = await settle(React.createElement(type.tabs[0].component, { agent: { pubkey: PUBKEY } }));
   pillsIn(more).find((entry) => entry.title === "Max turn length").pick("3600");
   assert.deepEqual(await sent(), { op: "settings.set", pubkey: PUBKEY, maxTurnDuration: 3600 });
+  const answers = await settle(React.createElement(type.tabs[0].component, { agent: { pubkey: PUBKEY } }));
+  const pill = pillsIn(answers).find((entry) => entry.title === "Answers");
+  assert.deepEqual(pill.options, ["anyone", "owner-only"]);
+  pill.pick("owner-only");
+  assert.deepEqual(await sent(), { op: "settings.set", pubkey: PUBKEY, respondTo: "owner-only" }, "whom it answers is a setting too");
 });
 
 test("render: a lever the machine refuses says so under its card, on the tab where it was picked", async () => {
@@ -646,7 +651,7 @@ test("render: Settings shows what an agent with no choice was started with, and 
       modelChosen: false, effortChosen: false, modelProblem: "Claude Code does not offer the model x on this machine. Choose another model for this agent." }
     : fleet(request)));
   const tree = await settle(React.createElement(type.tabs[0].component, { agent: { pubkey: PUBKEY } }));
-  assert.deepEqual(pillsIn(tree).map((entry) => [entry.title, entry.value]), [["Model", "opus"], ["Thinking", "medium"]]);
+  assert.deepEqual(pillsIn(tree).map((entry) => [entry.title, entry.value]), [["Model", "opus"], ["Thinking", "medium"], ["Answers", "anyone"]]);
   assert.match(textIn(find(tree, (node) => has(node, "buzz-field-error"))), /does not offer the model x on this machine/);
   assert.deepEqual(rowsIn(tree).find((row) => row.title === "Status") && textIn(find(tree, (node) => node.props.children?.includes?.("Stopped"))).trim(), "Stopped");
 });
@@ -655,12 +660,12 @@ test("render: Settings shows the agent's own model and effort, and a change is s
   const { type, React, settle, asked } = hardwareOn(fleet);
   const tree = await settle(React.createElement(type.tabs[0].component, { agent: { pubkey: PUBKEY } }));
   const pills = pillsIn(tree);
-  assert.deepEqual(pills.map((entry) => [entry.title, entry.value]), [["Model", "opus"], ["Thinking", "max"]]);
+  assert.deepEqual(pills.map((entry) => [entry.title, entry.value]), [["Model", "opus"], ["Thinking", "max"], ["Answers", "anyone"]]);
   pills[0].pick("claude-fable-5-2");
   await new Promise((resolve) => setTimeout(resolve, 10));
   assert.deepEqual(asked.find((request) => request.op === "settings.set"), { op: "settings.set", pubkey: PUBKEY, model: "", effort: "max" });
-  assert.equal(pillsIn(tree).length, 2, "no Conversations card: this machine lists no levers");
-  assert.deepEqual(buttonsIn(tree).map((button) => button.label), ["Opus 5.5", "Max", "Restart"], "the pills (showing their value), and Restart; Save shows once the instructions change");
+  assert.equal(pillsIn(tree).length, 3, "Model, Thinking, Answers; no Conversations card: this machine lists no levers");
+  assert.deepEqual(buttonsIn(tree).map((button) => button.label), ["Opus 5.5", "Max", "Restart", "Everyone in the community"], "the pills (showing their value), and Restart; Save shows once the instructions change");
 });
 
 test("render: the heartbeat is a switch row, its interval a choice, and a change is sent to its machine", async () => {

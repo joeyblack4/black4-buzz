@@ -1403,6 +1403,7 @@ def heartbeat_view(s):
 # agent keeps at least two parallel processes, so a person can still talk to
 # it while a scheduled run is going.
 
+RESPOND_TO = ("anyone", "owner-only")  # whom an agent answers (BUZZ_ACP_RESPOND_TO)
 CONTROLS = {  # setting -> (buzz-acp's environment variable, int bounds or the allowed values, buzz-acp's default)
     "agents": ("BUZZ_ACP_AGENTS", (1, 8), 1),
     "sessionPolicy": ("BUZZ_ACP_SESSION_POLICY", ("channel", "thread"), "channel"),
@@ -3208,10 +3209,15 @@ def handle(req):
     if op == "settings.set":
         # The agent's model and effort ("" is the harness's default here), how
         # it pays ("subscription" or "key"; "" settles the machine's default
-        # now) and compactAt (tokens; null for the harness's default). A field
-        # left out stays as it was; a new way of paying drops a
-        # model and effort not sent with it, since the other sign-in offers its
-        # own. An activated agent restarts on them.
+        # now), compactAt (tokens; null for the harness's default), whom it
+        # answers (respondTo "anyone" or "owner-only", and allow: the public
+        # keys it also answers) and buzz-acp's levers. A field left out stays
+        # as it was; a new way of paying drops a model and effort not sent with
+        # it, since the other sign-in offers its own. An activated agent
+        # restarts on them.
+        if "respondTo" in req and req["respondTo"] not in RESPOND_TO: fail("respondTo is anyone or owner-only")
+        if "allow" in req and (not isinstance(req["allow"], list) or any(not HEX64.match(str(k)) for k in req["allow"])):
+            fail("allow is a list of public keys (64 hex characters each)")
         with agent_lock(d):
             s = read_settings(d)
             harness = s.get("harness") or "claude"
@@ -3224,9 +3230,11 @@ def handle(req):
             if "compactAt" in req: s["compactAt"] = checked_compact(harness, req["compactAt"], s["model"] or choice(harness, s).get("model"))
             for name in CONTROLS:
                 if name in req: s[name] = checked_control(name, req[name])
+            if "respondTo" in req: s["respondTo"] = req["respondTo"]
+            if "allow" in req: s["allow"] = list(dict.fromkeys(str(k) for k in req["allow"]))
             write_settings(d, s)
             if s.get("auth"): defer_apply(d) if me else _start(d)
-        return {"ok": True, "pays": pays, **model_fields(s, d=d), **later}
+        return {"ok": True, "pays": pays, "respondTo": s.get("respondTo"), "allow": s.get("allow") or [], **model_fields(s, d=d), **later}
 
     if op == "start":
         if me:
@@ -3237,7 +3245,7 @@ def handle(req):
     if op == "status":
         r = restarts(d)
         return {"ok": True, "running": bool(running(d)), "activated": bool(s.get("auth")),
-                "name": s.get("name"), "harness": s.get("harness"), "pays": pays_of(s), "respondTo": s.get("respondTo"),
+                "name": s.get("name"), "harness": s.get("harness"), "pays": pays_of(s), "respondTo": s.get("respondTo"), "allow": s.get("allow") or [],
                 "keepsStopping": keeps_stopping(d), "restarts": r.get("count", 0), **model_fields(s, d=d),
                 **({"nextRestart": int(r["next"])} if r.get("next") and not running(d) else {}),
                 "log": log_tail(d, 1500)}

@@ -18,6 +18,7 @@ from pathlib import Path
 AGENTCTL = Path(__file__).resolve().parent.parent / "agentctl"
 PY = sys.executable
 GOOD_CODE = "good-code-123456#state"
+OWNER = "pat@example.com"  # a fictional staff member
 FAKE_TOKEN = "sk-ant-oat01-" + "T" * 40  # what the fake prints; not a real credential
 
 
@@ -299,6 +300,10 @@ class Base(unittest.TestCase):
         os.environ.update({"HOME": str(self.home), "AGENTCTL_NO_CRON": "1"})
         self.a = load()
         self.a.set_root(self.home)
+        # Requests come from one staff member, whose sign-ins every test uses
+        # unless it says otherwise (sign-ins are each person's own).
+        self.a.CALLER = OWNER
+        self.a.use_account(OWNER)
         self.a.START_GRACE = 0.3
         self.a.SELF = AGENTCTL
         bin_ = self.a.BIN
@@ -464,7 +469,7 @@ class MachineStatus(Base):
         claude = self.req(op="machine.status")["harnesses"][0]
         self.assertFalse(claude["signedIn"])
         self.sign_in()
-        (self.a.RUN / "claude-check.json").unlink()  # force a real check
+        (self.a.CRED_RUN / "claude-check.json").unlink()  # force a real check
         self.assertTrue(self.req(op="machine.status")["harnesses"][0]["signedIn"])
 
 
@@ -600,6 +605,7 @@ class Callers(Base):
     def test_the_owners_agents_are_closed_to_callers(self):
         # Made with the machine owner's own key (no label), or before creators
         # were recorded: a teammate reads them but cannot change them.
+        self.a.CALLER = None
         d = self.make_agent(activate=False)
         self.assertIsNone(self.req(op="list")["agents"][0]["createdBy"])
         self.as_caller("lee")
@@ -632,23 +638,53 @@ class Callers(Base):
         r2 = self.req(op="provision", name="A", community="wss://r.example.com", requestId="q1")
         self.assertNotEqual(r1["pubkey"], r2["pubkey"])
 
-    def test_a_caller_signs_in_only_a_signed_out_harness(self):
+    def test_each_person_signs_in_their_own_account(self):
+        self.sign_in()  # pat's Claude sign-in
+        self.assertTrue(self.a.slot_ok("claude"))
         self.as_caller("sam")
+        self.a.use_account("sam")
+        self.assertFalse(self.a.slot_ok("claude"), "pat's sign-in is not sam's")
+        rows = {h["id"]: h for h in self.req(op="machine.status")["harnesses"]}
+        self.assertNotEqual(rows["claude"]["signedIn"], True)
         r = self.req(op="login.start", harness="claude")
-        self.assertTrue(r["ok"], "signed out: a teammate may sign it in")
+        self.assertTrue(r["ok"], "sam signs in their own")
         self.req(op="login.cancel", loginId=r["loginId"])
-        self.sign_in()
-        self.assertEqual(self.req(op="login.start", harness="claude"),
-                         {"ok": False, "error": "Claude Code is already signed in on this machine. Only a Black 4 admin can switch it to another account."})
-        self.a.CALLER = None
-        r = self.req(op="login.start", harness="claude")
-        self.assertTrue(r["ok"], "the admin may switch it")
-        self.req(op="login.cancel", loginId=r["loginId"])
+        self.assertTrue(self.req(op="logout", harness="claude")["ok"], "sam signs out only their own")
+        self.a.use_account(OWNER)
+        self.assertTrue(self.a.slot_ok("claude"), "pat's sign-in is untouched")
 
-    def test_only_the_admin_signs_the_machine_out(self):
+    def test_an_agent_runs_only_on_its_creators_sign_in(self):
+        self.sign_in()  # pat's
         self.as_caller("sam")
-        self.assertEqual(self.req(op="logout", harness="claude"),
-                         {"ok": False, "error": "Only a Black 4 admin can sign this machine out."})
+        agent = self.make_agent("claude")
+        r = self.req(op="start", pubkey=agent.name)
+        self.assertFalse(r["ok"])
+        self.assertIn("not signed in for sam", r["error"])
+        self.a.CALLER = OWNER  # pat asking changes nothing: sam's agent stays on sam's sign-in
+        self.assertFalse(self.a.slot_ok("claude") and self.req(op="status", pubkey=agent.name)["running"])
+
+    def test_the_admin_has_no_sign_in_and_unowned_agents_do_not_start(self):
+        self.sign_in()
+        self.a.CALLER = None
+        self.assertFalse(self.req(op="login.start", harness="claude")["ok"])
+        self.assertFalse(self.req(op="logout", harness="claude")["ok"])
+        agent = self.make_agent("claude")
+        r = self.req(op="start", pubkey=agent.name)
+        self.assertIn("no creator", r["error"])
+
+    def test_adopt_signins_moves_the_old_machine_sign_in_to_one_person(self):
+        self.a.CALLER = None
+        self.a.use_account(None)
+        legacy = self.a.private_dir(self.a.ROOT / "secrets")
+        (legacy / "claude").write_text(FAKE_TOKEN + "\n")
+        agent = self.make_agent("claude", activate=False)
+        with contextlib.redirect_stdout(io.StringIO()) as out: self.a.adopt_signins("jo@example.com")
+        self.assertEqual(json.loads(out.getvalue())["agents"], [agent.name])
+        self.assertFalse(legacy.exists())
+        self.assertEqual(self.a.read_settings(agent)["createdBy"], "jo@example.com")
+        self.a.use_account("jo@example.com")
+        self.assertEqual(self.a.claude_token(), FAKE_TOKEN)
+        with self.assertRaises(self.a.Fail): self.a.adopt_signins("jo@example.com")
 
     def run_main(self, *argv, request='{"op": "list"}'):
         env = dict(os.environ, HOME=str(self.home), AGENTCTL_HOME=str(self.home))
@@ -688,6 +724,7 @@ class SelfChange(Base):
         self.sign_in()
         agent = self.make_agent("claude")
         self.assertTrue(self.req(op="start", pubkey=agent.name)["ok"])
+        self.a.CALLER = None  # from here, requests come from the agent's own shell
         return agent, self.a.running(agent)
 
     def as_agent(self, pid):
@@ -881,6 +918,7 @@ class SelfChange(Base):
 
     def test_a_second_runner_names_its_root_in_the_note_and_the_agents_environment(self):
         self.a.set_root(self.home, "workforce-dev")
+        self.a.use_account(OWNER)
         bin_ = self.a.BIN; bin_.mkdir(parents=True)
         for name in ("claude", "claude-agent-acp", "buzz-acp", "buzz"): shutil.copy(self.home / "workforce" / "bin" / name, bin_ / name)
         self.a.agent_path = lambda: f"{bin_}:/usr/bin:/bin"
@@ -1255,7 +1293,7 @@ class DeviceStatusAndStart(DeviceBase):
         self.a.STATUS_WAIT = 0.3
         self.assertTrue(self.rows()["grok"]["signedIn"])
         self.assertEqual(spawned, [], "a fresh check is not repeated")
-        cache = self.a.RUN / "grok-check.json"
+        cache = self.a.CRED_RUN / "grok-check.json"
         old = json.loads(cache.read_text()); old["at"] -= 3600
         cache.write_text(json.dumps(old))
         t = time.time()
@@ -1264,17 +1302,17 @@ class DeviceStatusAndStart(DeviceBase):
         self.assertEqual(spawned, ["grok"])
         # Single flight: a check that finds the lock held returns at once.
         import fcntl
-        held = open(self.a.RUN / "grok-check.lock", "a"); fcntl.flock(held, fcntl.LOCK_EX)
+        held = open(self.a.CRED_RUN / "grok-check.lock", "a"); fcntl.flock(held, fcntl.LOCK_EX)
         self.a.DEVICE_CHECK["grok"] = lambda: self.fail("a second check ran")
         self.a.run_check("grok")
         held.close()
 
     def test_the_check_command_runs_detached(self):
         self.sign_in_device("grok")
-        (self.a.RUN / "grok-check.json").unlink()
-        env = dict(os.environ, HOME=str(self.home), AGENTCTL_HOME=str(self.home))
+        (self.a.CRED_RUN / "grok-check.json").unlink()
+        env = dict(os.environ, HOME=str(self.home), AGENTCTL_HOME=str(self.home), AGENTCTL_ACCOUNT=OWNER)
         subprocess.run([PY, str(AGENTCTL), "check", "grok"], env=env, timeout=60, check=True)
-        self.assertTrue(json.loads((self.a.RUN / "grok-check.json").read_text())["ok"])
+        self.assertTrue(json.loads((self.a.CRED_RUN / "grok-check.json").read_text())["ok"])
         out = subprocess.run([PY, str(AGENTCTL), "--caller", "sam", "check", "grok"], input="", env=env, capture_output=True, text=True, timeout=60)
         self.assertFalse(json.loads(out.stdout)["ok"], "not open to a teammate's key")
 
@@ -1285,7 +1323,7 @@ class DeviceStatusAndStart(DeviceBase):
         self.a.spawn_check = spawned.append
         self.assertTrue(self.a.known_bad("grok"))
         self.assertEqual(spawned, [])
-        cache = self.a.RUN / "grok-check.json"
+        cache = self.a.CRED_RUN / "grok-check.json"
         old = json.loads(cache.read_text()); old["at"] -= self.a.KNOWN_BAD_TTL + 1
         cache.write_text(json.dumps(old))
         self.assertTrue(self.a.known_bad("grok"), "stands until the new check answers")
@@ -1304,7 +1342,7 @@ class DeviceStatusAndStart(DeviceBase):
         for harness, label in (("codex", "Codex"), ("grok", "Grok Build")):
             agent = self.make_agent(harness)
             self.assertEqual(self.req(op="start", pubkey=agent.name)["error"],
-                             f"{label} is not signed in on this machine. Sign in to {label} from Buzz first.")
+                             f"{label} is not signed in for pat@example.com on this machine. pat@example.com signs in to {label} from Buzz first.")
 
     def test_start_passes_the_private_home_and_the_buzz_preset(self):
         self.sign_in_device("grok")
@@ -1489,7 +1527,7 @@ class KeyLogin(DeviceBase):
     def test_a_key_agent_cannot_start_without_a_key(self):
         agent = self.make_agent("qwen", pays="key")
         self.assertEqual(self.req(op="start", pubkey=agent.name)["error"],
-                         "Qwen Code has no working API key on this machine. Add a QwenCloud API key from Buzz first, or set this agent to pay by subscription.")
+                         "Qwen Code has no working API key for pat@example.com on this machine. pat@example.com adds a QwenCloud API key from Buzz first, or sets this agent to pay by subscription.")
         self.a.supervise_pass()
         self.assertIsNone(self.a.running(agent), "the supervisor waits for the key")
         self.sign_in_member()
@@ -1502,7 +1540,7 @@ class KeyLogin(DeviceBase):
         self.assertTrue(self.wait_running(key_agent) and self.wait_running(member_agent))
         self.assertEqual(self.req(op="logout", harness="qwen", pays="key"), {"ok": True})
         for name in ("qwen-key", "qwen-key.json"): self.assertFalse((self.a.SECRETS / name).exists())
-        self.assertFalse((self.a.RUN / "qwen-key-models.json").exists())
+        self.assertFalse((self.a.CRED_RUN / "qwen-key-models.json").exists())
         self.assertIsNone(self.a.running(key_agent))
         self.assertTrue(self.a.running(member_agent), "the membership agents keep running")
         rows = {h["id"]: h for h in self.req(op="machine.status")["harnesses"]}
@@ -1511,9 +1549,9 @@ class KeyLogin(DeviceBase):
 
     def test_a_key_qwencloud_no_longer_takes_shows_in_the_check_and_blocks_start(self):
         self.assertTrue(self.sign_in_key()["signedIn"])
-        self.assertTrue(json.loads((self.a.RUN / "qwen-key-check.json").read_text())["ok"])
+        self.assertTrue(json.loads((self.a.CRED_RUN / "qwen-key-check.json").read_text())["ok"])
         (self.home / "qwen-revoked.txt").write_text("x")
-        (self.a.RUN / "qwen-key-check.json").unlink()
+        (self.a.CRED_RUN / "qwen-key-check.json").unlink()
         rows = {h["id"]: h for h in self.req(op="machine.status")["harnesses"]}
         self.assertFalse(rows["qwen"]["key"]["signedIn"])
         self.assertTrue(self.a.known_bad("qwen-key"))
@@ -1524,9 +1562,8 @@ class KeyLogin(DeviceBase):
     def test_a_teammate_may_add_a_key_while_none_works_only(self):
         self.a.CALLER = "sam"
         self.assertTrue(self.sign_in_key()["signedIn"])
-        self.assertIn("already signed in", self.req(op="login.start", harness="qwen", pays="key", flows=["key"])["error"])
         self.assertTrue(self.req(op="login.start", harness="qwen", pays="subscription", flows=["device"])["ok"], "the membership is another sign-in")
-        self.assertEqual(self.req(op="logout", harness="qwen", pays="key")["error"], "Only a Black 4 admin can sign this machine out.")
+        self.assertTrue(self.req(op="logout", harness="qwen", pays="key")["ok"], "their own key, so they may remove it")
 
 
 class MemberLogin(DeviceBase):
@@ -1610,11 +1647,11 @@ class MemberLogin(DeviceBase):
         self.assertTrue(self.sign_in_member()["signedIn"])
         cred = self.a.HOMES / "qwen" / "subscription_credentials.json"
         data = json.loads(cred.read_text()); data["tokens"]["access_token"] = FAKE_CRED + "-revoked"; cred.write_text(json.dumps(data))
-        (self.a.RUN / "qwen-check.json").unlink()
+        (self.a.CRED_RUN / "qwen-check.json").unlink()
         rows = {h["id"]: h for h in self.req(op="machine.status")["harnesses"]}
         self.assertFalse(rows["qwen"]["signedIn"])
         agent = self.make_agent("qwen")
-        self.assertEqual(self.req(op="start", pubkey=agent.name)["error"], "Qwen Code is not signed in on this machine. Sign in to Qwen Code from Buzz first.")
+        self.assertEqual(self.req(op="start", pubkey=agent.name)["error"], "Qwen Code is not signed in for pat@example.com on this machine. pat@example.com signs in to Qwen Code from Buzz first.")
         calls = (self.home / "qwen-account-calls.txt").read_text()
         self.assertNotIn("models " + str(self.a.HOMES / "qwen-key"), calls)
         self.assertTrue(all(line.split(" ", 1)[1] != str(self.a.HOMES / "qwen-key") for line in calls.strip().split("\n")), "never against the key home")
@@ -1822,7 +1859,7 @@ class HarnessKeys(DeviceBase):
             with self.subTest(harness=harness):
                 agent = self.make_agent(harness, pays="key")
                 self.assertEqual(self.req(op="start", pubkey=agent.name)["error"],
-                                 f"{label} has no working API key on this machine. Add {service} API key from Buzz first, or set this agent to pay by subscription.")
+                                 f"{label} has no working API key for pat@example.com on this machine. pat@example.com adds {service} API key from Buzz first, or sets this agent to pay by subscription.")
                 self.assertEqual(self.pays_of(agent), "key")
                 self.assertEqual(self.pays_of(self.make_agent(harness)), "subscription", "the default follows the signed-in subscription")
 
@@ -2233,7 +2270,10 @@ class SecondRoot(unittest.TestCase):
     def test_paths_and_cron_mark_follow_the_root(self):
         self.a.set_root("/Users/m", "workforce-dev")
         self.assertEqual(self.a.ROOT, Path("/Users/m/workforce-dev"))
-        self.assertEqual(self.a.HOMES, Path("/Users/m/workforce-dev/homes"))
+        self.a.use_account("pat@example.com")
+        self.assertEqual(self.a.HOMES, Path("/Users/m/workforce-dev/accounts/pat@example.com/homes"))
+        self.assertEqual(self.a.root_env(), {"BLACK4_WORKFORCE_ROOT": "/Users/m/workforce-dev", "AGENTCTL_ACCOUNT": "pat@example.com"})
+        self.a.use_account(None)
         self.assertEqual(self.a.root_env(), {"BLACK4_WORKFORCE_ROOT": "/Users/m/workforce-dev"})
         lines = self.a.cron_lines()
         self.assertTrue(all("BLACK4_WORKFORCE_ROOT=/Users/m/workforce-dev " in line for line in lines))
@@ -2373,14 +2413,14 @@ class ModelAndEffort(DeviceBase):
     def test_a_key_listing_that_fails_keeps_the_last_one_and_the_default_still_applies(self):
         self.assertTrue(self.sign_in_key()["signedIn"])
         self.assertEqual([m["id"] for m in self.a.offered("qwen-key")][:1], ["qwen4-max"])
-        (self.a.RUN / "qwen-key-models.json").unlink()
+        (self.a.CRED_RUN / "qwen-key-models.json").unlink()
         (self.home / "qwen-revoked.txt").write_text("x")  # the service says no for a while
         self.a.refresh_models("qwen-key", wait=True)
         self.assertIsNone(self.a.offered("qwen-key"))
-        cache = json.loads((self.a.RUN / "qwen-key-models.json").read_text())
+        cache = json.loads((self.a.CRED_RUN / "qwen-key-models.json").read_text())
         self.assertEqual(cache["fails"], 1)
         self.assertGreater(cache["retryAt"], time.time())
-        (self.a.RUN / "qwen-key-check.json").write_text(json.dumps({"hash": self.a.credential("qwen-key"), "ok": True, "at": time.time()}))
+        (self.a.CRED_RUN / "qwen-key-check.json").write_text(json.dumps({"hash": self.a.credential("qwen-key"), "ok": True, "at": time.time()}))
         env = self.env_of(self.make_agent("qwen", pays="key"))
         self.assertEqual(env["OPENAI_MODEL"], "qwen4-max", "unchecked: the first default still starts")
         self.assertIn("does not offer the model qwen4-max-preview",
@@ -2509,28 +2549,28 @@ class ModelAndEffort(DeviceBase):
 
     def test_a_failed_listing_keeps_the_last_good_one_and_backs_off(self):
         self.listed()
-        cache = json.loads((self.a.RUN / "claude-models.json").read_text())
+        cache = json.loads((self.a.CRED_RUN / "claude-models.json").read_text())
         cache["at"] -= self.a.CLAUDE_MODELS_TTL + 1  # due again
-        (self.a.RUN / "claude-models.json").write_text(json.dumps(cache))
+        (self.a.CRED_RUN / "claude-models.json").write_text(json.dumps(cache))
         (self.home / "busy-claude-fable-5-2").write_text("x")
         self.a.refresh_claude_models(wait=True)
         self.assertEqual(self.a.offered("claude")[0]["id"], "claude-fable-5-2", "the last good listing stands")
         calls = len(self.claude_calls())
         for _ in range(3): self.a.refresh_claude_models(wait=True)
         self.assertEqual(len(self.claude_calls()), calls, "no paid call again until the back-off is over")
-        cache = json.loads((self.a.RUN / "claude-models.json").read_text())
+        cache = json.loads((self.a.CRED_RUN / "claude-models.json").read_text())
         self.assertEqual(cache["fails"], 1)
         self.assertAlmostEqual(cache["retryAt"] - cache["failedAt"], self.a.CLAUDE_MODELS_FAIL_TTL, delta=1)
         cache["retryAt"] = time.time() - 1
-        (self.a.RUN / "claude-models.json").write_text(json.dumps(cache))
+        (self.a.CRED_RUN / "claude-models.json").write_text(json.dumps(cache))
         self.a.refresh_claude_models(wait=True)
-        cache = json.loads((self.a.RUN / "claude-models.json").read_text())
+        cache = json.loads((self.a.CRED_RUN / "claude-models.json").read_text())
         self.assertEqual(cache["retryAt"] - cache["failedAt"], 2 * self.a.CLAUDE_MODELS_FAIL_TTL, "doubling")
         (self.home / "busy-claude-fable-5-2").unlink()
         cache["retryAt"] = time.time() - 1
-        (self.a.RUN / "claude-models.json").write_text(json.dumps(cache))
+        (self.a.CRED_RUN / "claude-models.json").write_text(json.dumps(cache))
         self.a.refresh_claude_models(wait=True)
-        self.assertNotIn("retryAt", json.loads((self.a.RUN / "claude-models.json").read_text()))
+        self.assertNotIn("retryAt", json.loads((self.a.CRED_RUN / "claude-models.json").read_text()))
 
     def test_a_start_with_no_listing_yet_makes_it_first(self):
         self.a.spawn_models_refresh = lambda harness="claude": None  # as after a deploy: nothing out of band has run

@@ -4,7 +4,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  askMachine, hardwareProvider, hardwareDefaults, HEARTBEAT_MINUTES, beatFrom, heartbeatRemote, MACHINES, machineOf, statusReader, harnessOptions, signInState, readyToCreate, takesKey, defaultPays, PAYS,
+  askMachine, hardwareProvider, hardwareDefaults, HEARTBEAT_MINUTES, HEARTBEAT_CHOICES, heartbeatChoices, beatFrom, heartbeatRemote, MACHINES, machineOf, statusReader, harnessOptions, signInState, readyToCreate, takesKey, defaultPays, PAYS,
   createLogin, agentDirectory, summaryOf, signInOf, doorTransport, bodySha256, createSession, createMcp, readAnswer, memoryStore,
   modelsReader, modelChoices, applyPick, setModel, applyHardware,
 } from "../plugins/black4/plugin.js";
@@ -76,6 +76,19 @@ test("a retried creation asks for the same agent, and activation carries the att
   assert.deepEqual(box.seen[2].request, { op: "activate", pubkey: PUBKEY, community: input.community, auth: AUTH });
   await remote.provision(input);
   assert.equal(box.seen[3].request.requestId, "request-2");
+});
+
+test("the heartbeat interval is a choice from 5 minutes to a day, keeping one set some other way", () => {
+  assert.ok(HEARTBEAT_CHOICES.includes(HEARTBEAT_MINUTES));
+  assert.ok(HEARTBEAT_CHOICES.every((m) => m >= 5 && m <= 1440), "agentctl takes 5 to 1440 minutes");
+  assert.deepEqual(heartbeatChoices(15).map((c) => c.label).slice(0, 5),
+    ["every 5 minutes", "every 10 minutes", "every 15 minutes", "every 30 minutes", "every hour"]);
+  assert.equal(heartbeatChoices(15).at(-1).label, "every 24 hours");
+  const odd = heartbeatChoices(45);
+  assert.deepEqual(odd.map((c) => c.value).slice(3, 6), [30, 45, 60]);
+  assert.equal(odd.find((c) => c.value === 45).label, "every 45 minutes");
+  assert.equal(heartbeatChoices(90).find((c) => c.value === 90).label, "every 90 minutes");
+  assert.equal(heartbeatChoices(0).length, HEARTBEAT_CHOICES.length);
 });
 
 test("the heartbeat is read and set on the agent's machine, sending only what changed", async () => {
@@ -434,6 +447,26 @@ test("render: Settings shows the agent's own model and effort, and a change is s
   select.props.onChange({ target: { value: "claude-fable-5-2" } });
   await new Promise((resolve) => setTimeout(resolve, 10));
   assert.deepEqual(asked.find((request) => request.op === "settings.set"), { op: "settings.set", pubkey: PUBKEY, model: "", effort: "max" });
+});
+
+test("render: Settings shows the heartbeat interval as a choice, and a change is sent to its machine", async () => {
+  const { type, React, settle, asked } = hardwareOn((request) => (request.op === "heartbeat.get"
+    ? { ok: true, heartbeat: 15, prompt: "Standard", custom: false, defaultPrompt: "Standard" }
+    : request.op === "heartbeat.set" ? { ok: true, heartbeat: request.minutes, prompt: "Standard", custom: false, defaultPrompt: "Standard" }
+    : fleet(request)));
+  const tree = await settle(React.createElement(type.tabs[0].component, { agent: { pubkey: PUBKEY } }));
+  const interval = (function find(node) {
+    if (!node || typeof node !== "object") return null;
+    if (node.type === "select" && node.props["aria-label"] === "Heartbeat interval") return node;
+    for (const child of node.props?.children ?? []) { const hit = find(child); if (hit) return hit; }
+    return null;
+  })(tree);
+  assert.ok(interval, "a heartbeat that is on shows its interval as a select");
+  assert.equal(interval.props.value, "15");
+  assert.deepEqual(interval.props.children.map((option) => option.props.value), HEARTBEAT_CHOICES.map(String));
+  interval.props.onChange({ target: { value: "60" } });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(asked.find((request) => request.op === "heartbeat.set"), { op: "heartbeat.set", pubkey: PUBKEY, minutes: 60 });
 });
 
 test("harness choices follow what the machine has installed", () => {

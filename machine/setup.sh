@@ -139,6 +139,13 @@ JSON
   echo "$want_qwen" > "$QWEN_DIR/.installed"
 fi
 ln -sfn "$QWEN_DIR/node_modules/.bin/qwen" "$BIN/qwen"
+# The Qwen membership sign-in, check and model list, through Qwen Code's own
+# QwenSubscriptionSession (machine/qwen-account.mjs); agentctl runs it with node.
+if [ -f "$SRC/machine/qwen-account.mjs" ]; then
+  cp "$SRC/machine/qwen-account.mjs" "$BIN/qwen-account.mjs.tmp"
+  chmod 644 "$BIN/qwen-account.mjs.tmp"
+  mv "$BIN/qwen-account.mjs.tmp" "$BIN/qwen-account.mjs"
+fi
 
 # The Black 4 connector: every agent's MCP server (agentctl passes mcp/black4 to
 # buzz-acp). Its one dependency, @noble/curves, is pinned with integrity hashes

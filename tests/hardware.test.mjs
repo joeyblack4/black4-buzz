@@ -4,7 +4,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  askMachine, hardwareProvider, hardwareDefaults, HEARTBEAT_MINUTES, beatFrom, heartbeatRemote, MACHINES, machineOf, statusReader, harnessOptions, signInState, readyToCreate,
+  askMachine, hardwareProvider, hardwareDefaults, HEARTBEAT_MINUTES, beatFrom, heartbeatRemote, MACHINES, machineOf, statusReader, harnessOptions, signInState, readyToCreate, takesKey, defaultPays, PAYS,
   createLogin, agentDirectory, summaryOf, signInOf, doorTransport, bodySha256, createSession, createMcp, readAnswer, memoryStore,
   modelsReader, modelChoices, applyPick, setModel, applyHardware,
 } from "../plugins/black4/plugin.js";
@@ -358,6 +358,54 @@ test("render: the Create agent form shows Model and Effort from the machine, at 
   assert.deepEqual(selectsIn(plain).map((entry) => entry.label), ["Runs on", "Runs", "Answers"], "an older machine: no Model or Effort");
 });
 
+const qwenFleet = (request) => {
+  if (request.op === "machine.status") return { ok: true, machine: "commerce", harnesses: deviceRows({ qwen: true, qwenKey: true }) };
+  if (request.op === "models") return { ok: true, harnesses: [
+    { id: "qwen", label: "Qwen Code", checked: true, model: "qwen4-max", effort: null, models: [{ id: "qwen4-max", label: "qwen4-max", efforts: [] }, { id: "qwen3.8-max", label: "qwen3.8-max", efforts: [] }],
+      key: { checked: true, model: "qwen4-max", effort: null, models: [{ id: "qwen4-max", label: "qwen4-max", efforts: [] }, { id: "qwen3.7-plus", label: "qwen3.7-plus", efforts: [] }] } },
+  ] };
+  if (request.op === "list") return { ok: true, agents: [] };
+  if (request.op === "status") return { ok: true, running: true, activated: true, harness: "qwen", pays: "key", respondTo: "anyone",
+    model: "qwen3.7-plus", effort: null, modelChosen: true, effortChosen: false };
+  if (request.op === "instructions.get") return { ok: true, instructions: "" };
+  return { ok: true };
+};
+
+test("render: a harness that takes an API key gets Pays with, and the model list follows it", async () => {
+  const { type, React, settle } = hardwareOn(qwenFleet);
+  const changes = [];
+  const tree = await settle(React.createElement(type.CreateConfiguration, {
+    config: { ...hardwareDefaults(), harness: "qwen" }, onChange: (next) => changes.push(next), disabled: false }));
+  const selects = selectsIn(tree);
+  assert.deepEqual(selects.map((entry) => entry.label), ["Runs on", "Runs", "Pays with", "Model", "Answers"]);
+  assert.deepEqual(selects[2], { label: "Pays with", value: "subscription", options: ["subscription", "key"] });
+  assert.deepEqual(selects[3].options, ["qwen4-max", "qwen3.8-max"]);
+  const byKey = await settle(React.createElement(type.CreateConfiguration, {
+    config: { ...hardwareDefaults(), harness: "qwen", pays: "key" }, onChange: () => {}, disabled: false }));
+  assert.deepEqual(selectsIn(byKey)[3].options, ["qwen4-max", "qwen3.7-plus"], "the key's listing");
+  assert.match(textIn(byKey), /has an API key|Signed in/);
+  const claude = await settle(React.createElement(type.CreateConfiguration, {
+    config: { ...hardwareDefaults(), harness: "claude" }, onChange: () => {}, disabled: false }));
+  assert.ok(!selectsIn(claude).some((entry) => entry.label === "Pays with"), "no key on this machine for Claude Code yet: no choice");
+});
+
+test("render: Settings shows how the agent pays, and a change goes to its machine as settings.set with pays", async () => {
+  const { type, React, settle, asked } = hardwareOn(qwenFleet);
+  const tree = await settle(React.createElement(type.tabs[0].component, { agent: { pubkey: PUBKEY } }));
+  const selects = selectsIn(tree);
+  assert.deepEqual(selects.map((entry) => [entry.label, entry.value]), [["Pays with", "key"], ["Model", "qwen3.7-plus"]]);
+  assert.deepEqual(selects[1].options, ["qwen4-max", "qwen3.7-plus"], "the key's listing");
+  const select = (function find(node) {
+    if (!node || typeof node !== "object") return null;
+    if (node.type === "select" && node.props.value === "key") return node;
+    for (const child of node.props?.children ?? []) { const hit = find(child); if (hit) return hit; }
+    return null;
+  })(tree);
+  select.props.onChange({ target: { value: "subscription" } });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(asked.find((request) => request.op === "settings.set"), { op: "settings.set", pubkey: PUBKEY, model: "", effort: "", pays: "subscription" });
+});
+
 test("render: Settings shows what an agent with no choice was started with, and its problem", async () => {
   const { type, React, settle } = hardwareOn((request) => (request.op === "status"
     ? { ok: true, running: false, activated: true, harness: "claude", respondTo: "anyone", model: "opus", effort: "medium",
@@ -414,11 +462,12 @@ test("readiness for each sign-in state", () => {
 });
 
 // What a runner with Codex, Grok and Qwen Code sign-in reports (machine/agentctl machine.status).
-const deviceRows = ({ codex = false, grok = false, qwen = false } = {}) => [
+const deviceRows = ({ codex = false, grok = false, qwen = false, qwenKey = false } = {}) => [
   { id: "claude", label: "Claude Code", installed: true, signedIn: true, account: null, signIn: "code" },
   { id: "codex", label: "Codex", installed: true, signedIn: codex, account: codex ? "owner@example.com" : null, signIn: "device" },
   { id: "grok", label: "Grok Build", installed: true, signedIn: grok, account: null, signIn: "device" },
-  { id: "qwen", label: "Qwen Code", installed: true, signedIn: qwen, account: null, signIn: "key" },
+  { id: "qwen", label: "Qwen Code", installed: true, signedIn: qwen, account: qwen ? "owner@example.com" : null, signIn: "device",
+    key: { signIn: "key", signedIn: qwenKey, account: null, plan: qwenKey ? "pay-as-you-go" : null } },
   { id: "goose", label: "Goose", installed: true, signedIn: null, account: null, signIn: null,
     note: "Goose takes its model settings from the machine itself; Buzz cannot sign it in." },
 ];
@@ -472,7 +521,7 @@ test("sign-in: a device sign-in shows the link and code, then waits by itself un
   await login.start();
   assert.deepEqual(states.find((state) => state.step === "waiting"),
     { step: "waiting", url: "https://auth.openai.com/codex/device", needsCode: false, userCode: "ABCD-12EFG" });
-  assert.deepEqual(box.seen[0].request, { op: "login.start", harness: "codex", flows: ["code", "device", "key"] });
+  assert.deepEqual(box.seen[0].request, { op: "login.start", harness: "codex", pays: "subscription", flows: ["code", "device", "key"] });
   for (let i = 0; i < 50 && login.state.step !== "idle"; i++) await new Promise((resolve) => setTimeout(resolve, 5));
   assert.deepEqual(login.state, { step: "idle" });
   assert.deepEqual(box.ops(), ["login.start", "login.finish", "login.finish", "login.finish", "machine.status"]);
@@ -640,6 +689,40 @@ test("sign-in: an empty code is not sent", async () => {
   assert.deepEqual(box.ops(), ["login.start"]);
 });
 
+test("a harness pays by subscription or by API key: each has its own sign-in state, and the machine's rule picks the default", () => {
+  const none = { kind: "ok", harnesses: deviceRows() };
+  assert.equal(takesKey(none, "qwen"), true);
+  assert.equal(takesKey(none, "codex"), false, "no key on this machine yet");
+  assert.equal(takesKey(undefined, "qwen"), false);
+  assert.deepEqual(signInState(none, "qwen"), { kind: "signed-out" });
+  assert.deepEqual(signInState(none, "qwen", "key"), { kind: "signed-out" });
+  assert.deepEqual(signInState(none, "codex", "key"), { kind: "unavailable", reason: "Codex takes no API key on this machine." });
+  assert.equal(defaultPays(none, "qwen"), "subscription", "nothing signed in: by subscription");
+  const keyOnly = { kind: "ok", harnesses: deviceRows({ qwenKey: true }) };
+  assert.deepEqual(signInState(keyOnly, "qwen", "key"), { kind: "signed-in", account: null });
+  assert.equal(readyToCreate(signInState(keyOnly, "qwen", "key")), true);
+  assert.equal(readyToCreate(signInState(keyOnly, "qwen")), false);
+  assert.equal(defaultPays(keyOnly, "qwen"), "key", "only the key works: by key");
+  const both = { kind: "ok", harnesses: deviceRows({ qwen: true, qwenKey: true }) };
+  assert.equal(defaultPays(both, "qwen"), "subscription");
+  assert.deepEqual(signInState(both, "qwen"), { kind: "signed-in", account: "owner@example.com" });
+  assert.deepEqual(PAYS.map((entry) => entry.id), ["subscription", "key"]);
+  assert.equal(hardwareDefaults().pays, "", "the machine settles it unless one is picked");
+});
+
+test("an agent paying by key picks from the key's model listing", () => {
+  const listed = { kind: "ok", harnesses: [
+    { id: "qwen", label: "Qwen Code", checked: true, model: "qwen4-max", effort: null, models: [
+      { id: "qwen4-max", label: "qwen4-max", efforts: [] }, { id: "qwen3.8-max", label: "qwen3.8-max", efforts: [] }],
+      key: { checked: true, model: "qwen4-max", effort: null, models: [
+        { id: "qwen4-max", label: "qwen4-max", efforts: [] }, { id: "qwen3.7-plus", label: "qwen3.7-plus", efforts: [] }] } },
+  ] };
+  assert.deepEqual(modelChoices(listed, "qwen", { model: "", effort: "" }).models.map((entry) => entry.id), ["qwen4-max", "qwen3.8-max"]);
+  assert.deepEqual(modelChoices(listed, "qwen", { model: "", effort: "", pays: "key" }).models.map((entry) => entry.id), ["qwen4-max", "qwen3.7-plus"]);
+  assert.equal(modelChoices(listed, "qwen", { model: "", effort: "", pays: "key" }).efforts.length, 0, "no effort lever");
+  assert.deepEqual(modelChoices(listed, "qwen", { model: "", effort: "", pays: "subscription" }).models.map((entry) => entry.id), ["qwen4-max", "qwen3.8-max"]);
+});
+
 const KEY_URL = "https://docs.qwencloud.com/developer-guides/administration/api-keys";
 const FAKE_KEY = "sk-fictional-qwencloud-key-0000000000000000";
 
@@ -648,19 +731,20 @@ test("sign-in: a key sign-in shows the key page, takes the key once, and signs i
   const box = machine((request) => {
     if (request.op === "login.start") return { ok: true, loginId: "K1", url: KEY_URL, needsCode: true, flow: "key", expiresAt: 1 };
     if (request.op === "login.finish") { saved = request.code === FAKE_KEY; return saved ? { ok: true, signedIn: true, account: null } : { ok: false, error: "QwenCloud did not accept that key. Check it and paste it again." }; }
-    if (request.op === "machine.status") return { ok: true, harnesses: deviceRows({ qwen: saved }) };
+    if (request.op === "machine.status") return { ok: true, harnesses: deviceRows({ qwenKey: saved }) };
     return { ok: true };
   });
   const reader = statusReader(box.ask);
   const states = [];
   const said = await console_(async () => {
     const login = createLogin(box.ask, "commerce", "qwen", {
+      pays: "key",
       onChange: (state) => states.push(state),
       onSignedIn: () => reader.read("commerce", { force: true }),
     });
     await login.start();
     assert.deepEqual(login.state, { step: "waiting", url: KEY_URL, needsCode: true, flow: "key" });
-    assert.deepEqual(box.seen[0].request, { op: "login.start", harness: "qwen", flows: ["code", "device", "key"] });
+    assert.deepEqual(box.seen[0].request, { op: "login.start", harness: "qwen", pays: "key", flows: ["code", "device", "key"] });
     await login.finish("   ");
     assert.equal(login.state.error, "Paste the API key first.");
     await login.finish(`  ${FAKE_KEY}\n`);
@@ -668,7 +752,8 @@ test("sign-in: a key sign-in shows the key page, takes the key once, and signs i
   });
   assert.deepEqual(box.ops(), ["login.start", "login.finish", "machine.status"], "an empty paste is not sent");
   assert.equal(box.seen[1].request.code, FAKE_KEY, "the key is trimmed and sent as the code");
-  assert.deepEqual(signInState(reader.peek("commerce"), "qwen"), { kind: "signed-in", account: null });
+  assert.deepEqual(signInState(reader.peek("commerce"), "qwen", "key"), { kind: "signed-in", account: null });
+  assert.deepEqual(signInState(reader.peek("commerce"), "qwen"), { kind: "signed-out" }, "the membership is another sign-in");
   assert.ok(states.some((state) => state.step === "finishing" && state.flow === "key"));
   assert.ok(!JSON.stringify(states).includes(FAKE_KEY), "the key is never kept in state");
   assert.ok(!said.join("\n").includes(FAKE_KEY), "the key is never logged");
@@ -683,7 +768,7 @@ test("sign-in: a refused key keeps the same sign-in open to paste again, with no
       : { ok: true, signedIn: true, account: null };
     return { ok: true };
   });
-  const login = createLogin(box.ask, "commerce", "qwen");
+  const login = createLogin(box.ask, "commerce", "qwen", { pays: "key" });
   await login.start();
   await login.finish("sk-wrong-key-00000000000000000000");
   assert.deepEqual(login.state, { step: "waiting", url: KEY_URL, needsCode: true, flow: "key", error: "QwenCloud did not accept that key. Check it and paste it again." });
@@ -700,7 +785,7 @@ test("sign-in: an expired key sign-in goes back to Sign in, and Cancel cancels i
     if (request.op === "login.finish") return { ok: false, error: "This sign-in has expired or was cancelled. Start the sign-in again." };
     return { ok: true };
   });
-  const login = createLogin(box.ask, "commerce", "qwen");
+  const login = createLogin(box.ask, "commerce", "qwen", { pays: "key" });
   await login.start();
   await login.finish(FAKE_KEY);
   assert.deepEqual(login.state, { step: "idle", error: "This sign-in has expired or was cancelled. Start the sign-in again." });

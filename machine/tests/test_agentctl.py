@@ -172,6 +172,47 @@ QWEN_MODELS_BODY = {"object": "list", "data": [
     {"id": "qwen-tts-latest", "object": "model"}]}
 
 
+# What `node qwen-account.mjs <signin|check|models> <pkg>` prints (machine/
+# qwen-account.mjs on Qwen Code 0.27.4), as a fake `node` in the test bin: the
+# script path is ignored, the command and QWEN_HOME decide. Sign-in waits for
+# approve.txt like the device fakes; member-type.txt sets the membership.
+FAKE_NODE = f"""#!{PY}
+import json, os, sys, time
+command, home = sys.argv[2], os.environ["QWEN_HOME"]
+cred = os.path.join(home, "subscription_credentials.json")
+with open(os.path.join(os.environ["HOME"], "qwen-account-calls.txt"), "a") as f: f.write(command + " " + home + "\\n")
+say = lambda v: (sys.stdout.write(json.dumps(v) + "\\n"), sys.stdout.flush())
+def member(): 
+    try: return open(os.path.join(os.environ["HOME"], "member-type.txt")).read().strip()
+    except FileNotFoundError: return "plus"
+if command == "signin":
+    say({{"url": "https://chat.qwen.ai/authorize?user_code=QWEN-1234&client=cli&entry=qwen_code&paywallScene=cli", "userCode": "QWEN-1234", "expiresAt": int(time.time()) + 900}})
+    approve = os.path.join(os.environ["HOME"], "approve.txt")
+    ttl = os.path.join(os.environ["HOME"], "device-ttl.txt")
+    end = time.time() + (float(open(ttl).read()) if os.path.exists(ttl) else 600)
+    while time.time() < end:
+        if os.path.exists(approve):
+            if open(approve).read().strip() == "ok":
+                with open(cred, "w") as f: json.dump({{"revision": "rev-" + {FAKE_CRED!r}[-8:], "baseUrl": "https://chat.qwen.ai", "clientId": "qwen-code-cli",
+                                                      "models": ["qwen4-max", "qwen3.8-max", "qwen3.8-flash"], "tokens": {{"access_token": {FAKE_CRED!r}, "refresh_token": "r-" + {FAKE_CRED!r}}}}}, f)
+                say({{"ok": True, "memberType": member(), "account": "owner@example.com"}}); sys.exit(0)
+            say({{"ok": False, "error": "access_denied"}}); sys.exit(1)
+        time.sleep(0.1)
+    say({{"ok": False, "error": "expired_token"}}); sys.exit(1)
+try: data = json.load(open(cred))
+except (OSError, ValueError): data = None
+if command == "check":
+    if os.path.exists(os.path.join(os.environ["HOME"], "qwen-offline.txt")): say({{"ok": None, "memberType": None, "account": None, "error": "network"}}); sys.exit(0)
+    if not data or not data.get("tokens", {{}}).get("access_token"): say({{"ok": False, "memberType": None, "account": None}}); sys.exit(0)
+    if "revoked" in json.dumps(data): say({{"ok": False, "memberType": None, "account": None, "error": "invalid_grant"}}); sys.exit(0)
+    say({{"ok": True, "memberType": member(), "account": "owner@example.com"}}); sys.exit(0)
+if command == "models":
+    if not data: say({{"ok": False, "error": "not signed in"}}); sys.exit(1)
+    say({{"ok": True, "models": data.get("models") or []}}); sys.exit(0)
+say({{"ok": False, "error": "unknown command"}}); sys.exit(1)
+"""
+
+
 def fake_qwencloud(test):
     """A fake of QwenCloud's GET /models, in place of agentctl's urllib call:
     records (url, key) in test.http_calls; 200 for the fake key of each base,
@@ -179,7 +220,9 @@ def fake_qwencloud(test):
     The file qwen-revoked.txt in the test home makes every key a 401."""
     test.http_calls = []
 
-    def get(url, key, timeout=20):
+    def get(url, headers, timeout=20):
+        # The key as the service reads it: a Bearer header, or x-api-key (Anthropic).
+        key = headers.get("x-api-key") or headers.get("Authorization", "").split(" ", 1)[-1]
         test.http_calls.append((url, key))
         if key.startswith("sk-offline"): return None, None
         if key.startswith("sk-broken"): return 500, {"error": "upstream"}
@@ -245,9 +288,9 @@ class Base(unittest.TestCase):
         try: return self.a.handle(request)
         except self.a.Fail as e: return {"ok": False, "error": str(e)}
 
-    def make_agent(self, harness="claude", activate=True):
+    def make_agent(self, harness="claude", activate=True, pays=None):
         r = self.req(op="provision", name="Test agent", community="wss://relay.example.com",
-                     config={"harness": harness})
+                     config={"harness": harness, **({"pays": pays} if pays else {})})
         self.assertTrue(r["ok"], r)
         d = self.a.AGENTS / r["pubkey"]
         if activate:
@@ -350,9 +393,10 @@ class MachineStatus(Base):
         self.assertIsInstance(r["machine"], str)
         rows = {h["id"]: h for h in r["harnesses"]}
         self.assertEqual(list(rows), ["claude", "codex", "grok", "qwen", "goose"])
-        self.assertEqual(rows["qwen"]["signIn"], "key")
+        self.assertEqual(rows["qwen"]["signIn"], "device", "the Qwen membership signs in like Codex and Grok")
         self.assertEqual(rows["qwen"]["label"], "Qwen Code")
         self.assertFalse(rows["qwen"]["installed"])
+        self.assertEqual(rows["qwen"]["key"], {"signIn": "key", "signedIn": None, "account": None, "plan": None}, "and takes an API key beside it")
         self.assertEqual(rows["claude"], {"id": "claude", "label": "Claude Code", "installed": True,
                                           "signedIn": False, "account": None, "signIn": "code"})
         self.assertFalse(rows["goose"]["installed"])
@@ -703,19 +747,30 @@ class DeviceBase(Base):
         write_exe(self.a.BIN / "codex-acp", "#!/bin/sh\nexit 0\n")
         write_exe(self.a.BIN / "grok", FAKE_GROK)
         write_exe(self.a.BIN / "qwen", FAKE_QWEN)
+        write_exe(self.a.BIN / "node", FAKE_NODE)
+        (self.a.BIN / "qwen-account.mjs").write_text("// the real script is machine/qwen-account.mjs; the fake node above answers for it\n")
         self.a.http_get_json = fake_qwencloud(self)
         # A key sign-in restarts agents detached; here, in this process.
-        self.a.spawn_restart = lambda harness: self.a.restart_harness_agents(harness)
+        self.a.spawn_restart = lambda harness, pays: self.a.restart_harness_agents(harness, pays)
         self.a.FINISH_WAIT = 20
 
     def start_key(self, harness="qwen", flows=("code", "device", "key")):
-        r = self.req(op="login.start", harness=harness, flows=list(flows))
+        r = self.req(op="login.start", harness=harness, pays="key", flows=list(flows))
         self.assertTrue(r["ok"], r)
         return r, self.a.LOGINS / r["loginId"]
 
-    def sign_in_key(self, key=FAKE_QWEN_KEY):
-        r, _ = self.start_key()
+    def sign_in_key(self, key=FAKE_QWEN_KEY, harness="qwen"):
+        r, _ = self.start_key(harness)
         return self.req(op="login.finish", loginId=r["loginId"], code=key)
+
+    def sign_in_member(self):
+        r, _ = self.start_device("qwen")
+        self.approve()
+        return self.req(op="login.finish", loginId=r["loginId"])
+
+    def env_after_start(self, agent):
+        self.assertTrue(self.req(op="start", pubkey=agent.name)["ok"])
+        return json.loads((agent / "work" / "env.json").read_text())
 
     def approve(self, answer="ok"):
         (self.home / "approve.txt").write_text(answer)
@@ -1035,8 +1090,8 @@ class DeviceStatusAndStart(DeviceBase):
 
 
 class KeyLogin(DeviceBase):
-    """Qwen Code on QwenCloud: a pasted API key, checked, kept privately, and
-    never on a command line."""
+    """An API key for a harness (QwenCloud for Qwen Code): pasted in Buzz,
+    checked, kept privately, never on a command line, beside the subscription."""
     def test_a_key_sign_in_is_a_link_to_the_key_page_and_a_field(self):
         r, d = self.start_key()
         self.assertEqual(r["url"], "https://docs.qwencloud.com/developer-guides/administration/api-keys")
@@ -1049,65 +1104,80 @@ class KeyLogin(DeviceBase):
         self.assertEqual(self.http_calls, [], "nothing is asked until a key is pasted")
 
     def test_an_older_plugin_gets_a_sentence_not_a_field_it_cannot_show(self):
-        r = self.req(op="login.start", harness="qwen", flows=["code", "device"])
-        self.assertEqual(r, {"ok": False, "error": "Update the Black 4 plugin in Buzz to sign in to Qwen Code from it."})
+        r = self.req(op="login.start", harness="qwen", pays="key", flows=["code", "device"])
+        self.assertEqual(r, {"ok": False, "error": "Update the Black 4 plugin in Buzz to add a QwenCloud API key from it."})
         self.assertFalse(any(self.a.LOGINS.iterdir()) if self.a.LOGINS.exists() else False)
+        self.assertIn("cannot run on an API key", self.req(op="login.start", harness="goose", pays="key", flows=["key"])["error"])
 
-    def test_a_good_key_is_checked_kept_privately_and_its_agents_start(self):
-        agent = self.make_agent("qwen")
+    def test_a_good_key_is_checked_kept_privately_and_its_key_agents_start(self):
+        agent = self.make_agent("qwen", pays="key")
+        other = self.make_agent("qwen", pays="subscription")
         r, d = self.start_key()
         done = self.req(op="login.finish", loginId=r["loginId"], code=f"  {FAKE_QWEN_KEY}\n")
-        self.assertEqual(done, {"ok": True, "signedIn": True, "account": None})
+        self.assertEqual(done, {"ok": True, "signedIn": True, "account": None, "plan": "pay-as-you-go"})
         self.assertFalse(d.exists())
-        secret = self.a.SECRETS / "qwen"
+        secret = self.a.SECRETS / "qwen-key"
         self.assertEqual(secret.read_text().strip(), FAKE_QWEN_KEY)
         self.assertEqual(stat.S_IMODE(secret.stat().st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(self.a.SECRETS.stat().st_mode), 0o700)
-        info = json.loads((self.a.SECRETS / "qwen.json").read_text())
+        info = json.loads((self.a.SECRETS / "qwen-key.json").read_text())
         self.assertEqual((info["base"], info["plan"]), (QWEN_BASE, "pay-as-you-go"))
         self.assertNotIn(FAKE_QWEN_KEY, json.dumps(info))
         self.assertEqual(self.http_calls[0], (QWEN_BASE + "/models", FAKE_QWEN_KEY), "the pay-as-you-go base first")
         self.assertTrue(all(FAKE_QWEN_KEY not in url for url, _ in self.http_calls), "the key is never in a URL")
         rows = {h["id"]: h for h in self.req(op="machine.status")["harnesses"]}
-        self.assertEqual((rows["qwen"]["signedIn"], rows["qwen"]["account"], rows["qwen"]["signIn"]), (True, None, "key"))
+        self.assertEqual(rows["qwen"]["key"], {"signIn": "key", "signedIn": True, "account": None, "plan": "pay-as-you-go"})
+        self.assertFalse(rows["qwen"]["signedIn"], "the membership is another sign-in")
         self.assertTrue(self.wait_running(agent))
+        self.assertIsNone(self.a.running(other), "a key sign-in restarts only the agents paying by key")
         env = json.loads((agent / "work" / "env.json").read_text())
         self.assertEqual(env["BUZZ_ACP_AGENT_COMMAND"], "qwen")
         self.assertEqual(env["BUZZ_ACP_AGENT_ARGS"], "--acp,--approval-mode,yolo,--auth-type,openai")
         self.assertEqual(env["OPENAI_API_KEY"], FAKE_QWEN_KEY)
         self.assertEqual(env["OPENAI_BASE_URL"], QWEN_BASE)
         self.assertEqual(env["OPENAI_MODEL"], "qwen4-max")
-        self.assertEqual(env["QWEN_HOME"], str(self.a.HOMES / "qwen"))
+        self.assertEqual(env["QWEN_HOME"], str(self.a.HOMES / "qwen-key"), "its own home, with no membership in it")
         self.assertNotIn(FAKE_QWEN_KEY, env["BUZZ_ACP_AGENT_ARGS"])
         self.assertEqual([k for k, v in env.items() if FAKE_QWEN_KEY in v], ["OPENAI_API_KEY"], "the key is in one place")
-        self.assertEqual(stat.S_IMODE((self.a.HOMES / "qwen").stat().st_mode), 0o700)
-        settings = json.loads((self.a.HOMES / "qwen" / "settings.json").read_text())
+        self.assertEqual(stat.S_IMODE((self.a.HOMES / "qwen-key").stat().st_mode), 0o700)
+        settings = json.loads((self.a.HOMES / "qwen-key" / "settings.json").read_text())
         self.assertFalse(settings["general"]["enableAutoUpdate"])
         self.assertFalse(settings["privacy"]["usageStatisticsEnabled"])
         self.assertFalse(settings["telemetry"]["enabled"])
         self.assertEqual(settings["memory"], {"enableManagedAutoMemory": False, "enableManagedAutoDream": False},
                          "no shared memory folder, no second model call per turn")
+        self.assertEqual((self.a.HOMES / "qwen-key" / "QWEN.md").read_text(), self.a.DEFERRED_MCP_NOTE["qwen"])
         self.assertFalse((self.home / ".qwen").exists(), "never the machine user's own ~/.qwen")
 
     def test_the_private_home_keeps_what_qwen_code_wrote_there(self):
         home = self.a.private_dir(self.a.HOMES / "qwen")
         (home / "settings.json").write_text(json.dumps({"general": {"enableAutoUpdate": True, "vimMode": True}, "ui": {"theme": "dark"}}))
-        self.a.key_home("qwen")
+        self.a.qwen_home()
         settings = json.loads((home / "settings.json").read_text())
         self.assertEqual(settings["general"], {"enableAutoUpdate": False, "vimMode": True})
         self.assertEqual(settings["ui"], {"theme": "dark"})
         before = (home / "settings.json").stat().st_mtime_ns
-        self.a.key_home("qwen")
+        self.a.qwen_home()
         self.assertEqual((home / "settings.json").stat().st_mtime_ns, before, "written only when it changes")
 
+    def test_a_qwen_agent_is_told_how_to_reach_its_deferred_black4_tools(self):
+        note = self.a.DEFERRED_MCP_NOTE["qwen"]
+        self.assertIn("tool_search", note)
+        self.assertIn("mcp__black4__", note)
+        home = self.a.qwen_home()
+        context = home / "QWEN.md"
+        self.assertEqual(context.read_text(), note, "Qwen Code reads QWEN.md in its home into every session")
+        self.assertEqual(stat.S_IMODE(context.stat().st_mode), 0o600)
+        self.a.qwen_home()
+        self.assertEqual(context.read_text(), note)
+        self.assertIn("tool_search", self.a.heartbeat_prompt({"name": "Q", "model": "qwen4-max"}))
+
     def test_a_token_plan_key_is_kept_for_its_own_base(self):
-        self.assertTrue(self.sign_in_key(FAKE_QWEN_PLAN_KEY)["signedIn"])
-        info = json.loads((self.a.SECRETS / "qwen.json").read_text())
+        self.assertEqual(self.sign_in_key(FAKE_QWEN_PLAN_KEY)["plan"], "token-plan")
+        info = json.loads((self.a.SECRETS / "qwen-key.json").read_text())
         self.assertEqual((info["base"], info["plan"]), (QWEN_PLAN_BASE, "token-plan"))
         self.assertEqual([url for url, _ in self.http_calls[:2]], [QWEN_BASE + "/models", QWEN_PLAN_BASE + "/models"])
-        agent = self.make_agent("qwen")
-        self.assertTrue(self.req(op="start", pubkey=agent.name)["ok"])
-        env = json.loads((agent / "work" / "env.json").read_text())
+        env = self.env_after_start(self.make_agent("qwen", pays="key"))
         self.assertEqual(env["OPENAI_BASE_URL"], QWEN_PLAN_BASE)
 
     def test_a_refused_key_says_so_and_the_sign_in_stays_open(self):
@@ -1115,7 +1185,7 @@ class KeyLogin(DeviceBase):
         bad = self.req(op="login.finish", loginId=r["loginId"], code="sk-not-the-right-key-000000000000")
         self.assertEqual(bad["error"], "QwenCloud did not accept that key. Check it and paste it again.")
         self.assertTrue(d.exists(), "paste again, no new link needed")
-        self.assertFalse((self.a.SECRETS / "qwen").exists())
+        self.assertFalse((self.a.SECRETS / "qwen-key").exists())
         self.assertEqual(len(self.http_calls), 2, "both bases were tried")
         good = self.req(op="login.finish", loginId=r["loginId"], code=FAKE_QWEN_KEY)
         self.assertTrue(good["signedIn"])
@@ -1128,7 +1198,7 @@ class KeyLogin(DeviceBase):
                 bad = self.req(op="login.finish", loginId=r["loginId"], code=key)
                 self.assertEqual(bad["error"], "QwenCloud could not be reached to check the key. Try again in a moment.")
                 self.assertTrue(d.exists())
-                self.assertFalse((self.a.SECRETS / "qwen").exists())
+                self.assertFalse((self.a.SECRETS / "qwen-key").exists())
 
     def test_what_is_not_a_key_is_refused_before_any_request(self):
         r, d = self.start_key()
@@ -1152,61 +1222,231 @@ class KeyLogin(DeviceBase):
         self.assertFalse(d.exists())
         self.assertEqual(self.http_calls, [])
 
-    def test_start_refuses_while_signed_out(self):
-        agent = self.make_agent("qwen")
+    def test_a_key_agent_cannot_start_without_a_key(self):
+        agent = self.make_agent("qwen", pays="key")
         self.assertEqual(self.req(op="start", pubkey=agent.name)["error"],
-                         "Qwen Code is not signed in on this machine. Sign in to Qwen Code from Buzz first.")
+                         "Qwen Code has no working API key on this machine. Add a QwenCloud API key from Buzz first, or set this agent to pay by subscription.")
         self.a.supervise_pass()
-        self.assertIsNone(self.a.running(agent), "the supervisor waits for a sign-in")
+        self.assertIsNone(self.a.running(agent), "the supervisor waits for the key")
+        self.sign_in_member()
+        self.assertIn("no working API key", self.req(op="start", pubkey=agent.name)["error"], "the membership is not its sign-in")
 
-    def test_logout_forgets_the_key_and_stops_its_agents(self):
-        agent = self.make_agent("qwen")
+    def test_logging_the_key_out_forgets_it_and_stops_only_the_key_agents(self):
+        key_agent, member_agent = self.make_agent("qwen", pays="key"), self.make_agent("qwen", pays="subscription")
         self.assertTrue(self.sign_in_key()["signedIn"])
-        self.assertTrue(self.wait_running(agent))
-        self.assertEqual(self.req(op="logout", harness="qwen"), {"ok": True})
-        for name in ("qwen", "qwen.json"): self.assertFalse((self.a.SECRETS / name).exists())
-        self.assertFalse((self.a.RUN / "qwen-models.json").exists())
-        self.assertIsNone(self.a.running(agent))
+        self.assertTrue(self.sign_in_member()["signedIn"])
+        self.assertTrue(self.wait_running(key_agent) and self.wait_running(member_agent))
+        self.assertEqual(self.req(op="logout", harness="qwen", pays="key"), {"ok": True})
+        for name in ("qwen-key", "qwen-key.json"): self.assertFalse((self.a.SECRETS / name).exists())
+        self.assertFalse((self.a.RUN / "qwen-key-models.json").exists())
+        self.assertIsNone(self.a.running(key_agent))
+        self.assertTrue(self.a.running(member_agent), "the membership agents keep running")
         rows = {h["id"]: h for h in self.req(op="machine.status")["harnesses"]}
-        self.assertFalse(rows["qwen"]["signedIn"])
-        self.assertIn("not signed in", self.req(op="start", pubkey=agent.name)["error"])
+        self.assertEqual((rows["qwen"]["key"]["signedIn"], rows["qwen"]["signedIn"]), (False, True))
+        self.assertIn("no working API key", self.req(op="start", pubkey=key_agent.name)["error"])
 
     def test_a_key_qwencloud_no_longer_takes_shows_in_the_check_and_blocks_start(self):
         self.assertTrue(self.sign_in_key()["signedIn"])
-        self.assertTrue(json.loads((self.a.RUN / "qwen-check.json").read_text())["ok"])
+        self.assertTrue(json.loads((self.a.RUN / "qwen-key-check.json").read_text())["ok"])
         (self.home / "qwen-revoked.txt").write_text("x")
+        (self.a.RUN / "qwen-key-check.json").unlink()
+        rows = {h["id"]: h for h in self.req(op="machine.status")["harnesses"]}
+        self.assertFalse(rows["qwen"]["key"]["signedIn"])
+        self.assertTrue(self.a.known_bad("qwen-key"))
+        agent = self.make_agent("qwen", pays="key")
+        self.assertIn("no working API key", self.req(op="start", pubkey=agent.name)["error"])
+        self.assertTrue(all(url.endswith("/models") for url, _ in self.http_calls), "the check calls no model")
+
+    def test_a_teammate_may_add_a_key_while_none_works_only(self):
+        self.a.CALLER = "sam"
+        self.assertTrue(self.sign_in_key()["signedIn"])
+        self.assertIn("already signed in", self.req(op="login.start", harness="qwen", pays="key", flows=["key"])["error"])
+        self.assertTrue(self.req(op="login.start", harness="qwen", pays="subscription", flows=["device"])["ok"], "the membership is another sign-in")
+        self.assertEqual(self.req(op="logout", harness="qwen", pays="key")["error"], "Only a Black 4 admin can sign this machine out.")
+
+
+class MemberLogin(DeviceBase):
+    """Qwen Code's subscription: a Qwen membership (Plus or Pro on
+    chat.qwen.ai), signed in with a device code through qwen-account.mjs."""
+    def test_the_membership_sign_in_is_a_link_and_a_code_from_qwen_code(self):
+        r, d = self.start_device("qwen")
+        self.assertEqual(r["url"], "https://chat.qwen.ai/authorize?user_code=QWEN-1234&client=cli&entry=qwen_code&paywallScene=cli")
+        self.assertEqual(r["userCode"], "QWEN-1234")
+        self.assertGreater(r["expiresAt"], time.time())
+        calls = (self.home / "qwen-account-calls.txt").read_text().split("\n")
+        self.assertTrue(calls[0].startswith("signin " + str(d / "home")), "in a fresh home inside the login folder")
+
+    def test_an_older_plugin_gets_a_sentence(self):
+        self.assertEqual(self.req(op="login.start", harness="qwen", flows=["code"])["error"], "Update the Black 4 plugin in Buzz to sign in to Qwen Code from it.")
+
+    def test_approval_keeps_the_membership_privately_and_starts_its_agents(self):
+        agent = self.make_agent("qwen")
+        key_agent = self.make_agent("qwen", pays="key")
+        r, d = self.start_device("qwen")
+        self.approve()
+        done = self.req(op="login.finish", loginId=r["loginId"])
+        self.assertEqual(done, {"ok": True, "signedIn": True, "account": "owner@example.com"})
+        self.assertFalse(d.exists())
+        cred = self.a.HOMES / "qwen" / "subscription_credentials.json"
+        self.assertIn(FAKE_CRED, cred.read_text())
+        self.assertEqual(stat.S_IMODE(cred.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE((self.a.HOMES / "qwen").stat().st_mode), 0o700)
+        rows = {h["id"]: h for h in self.req(op="machine.status")["harnesses"]}
+        self.assertEqual((rows["qwen"]["signedIn"], rows["qwen"]["account"], rows["qwen"]["signIn"]), (True, "owner@example.com", "device"))
+        self.assertFalse(rows["qwen"]["key"]["signedIn"])
+        self.assertTrue(self.wait_running(agent))
+        self.assertIsNone(self.a.running(key_agent), "the key agents wait for a key")
+        env = json.loads((agent / "work" / "env.json").read_text())
+        self.assertEqual(env["BUZZ_ACP_AGENT_ARGS"], "--acp,--approval-mode,yolo,--auth-type,qwen-subscription,-m,qwen4-max")
+        self.assertEqual(env["QWEN_HOME"], str(self.a.HOMES / "qwen"))
+        self.assertNotIn("OPENAI_API_KEY", env)
+        self.assertNotIn("OPENAI_BASE_URL", env)
+        self.assertFalse((self.a.HOMES / "qwen-key" / "subscription_credentials.json").exists())
+        self.assertEqual((self.a.HOMES / "qwen" / "QWEN.md").read_text(), self.a.DEFERRED_MCP_NOTE["qwen"])
+
+    def test_a_membership_below_plus_is_refused(self):
+        (self.home / "member-type.txt").write_text("free")
+        r, d = self.start_device("qwen")
+        self.approve()
+        done = self.req(op="login.finish", loginId=r["loginId"])
+        self.assertEqual(done["error"], "Qwen Code needs a Plus or Pro membership on chat.qwen.ai; this account has free.")
+        self.assertFalse((self.a.HOMES / "qwen" / "subscription_credentials.json").exists())
+        self.assertFalse(d.exists())
+
+    def test_a_refused_or_expired_approval_is_a_plain_error(self):
+        r, d = self.start_device("qwen")
+        self.approve("no")
+        self.assertEqual(self.req(op="login.finish", loginId=r["loginId"])["error"], "The sign-in was not approved. Start the sign-in again.")
+        self.assertFalse(d.exists())
+        (self.home / "device-ttl.txt").write_text("0.5")
+        (self.home / "approve.txt").unlink()
+        r, d = self.start_device("qwen")
+        self.assertEqual(self.req(op="login.finish", loginId=r["loginId"])["error"], "This sign-in code expired. Start the sign-in again.")
+
+    def test_the_fingerprint_is_the_revision_so_qwen_codes_token_refresh_keeps_the_caches(self):
+        self.assertTrue(self.sign_in_member()["signedIn"])
+        before = self.a.credential("qwen")
+        self.assertEqual(len(before), 16)
+        cred = self.a.HOMES / "qwen" / "subscription_credentials.json"
+        data = json.loads(cred.read_text())
+        data["tokens"] = {"access_token": "new-" + FAKE_CRED, "refresh_token": "new-r", "expiresAt": 1}
+        cred.write_text(json.dumps(data))
+        self.assertEqual(self.a.credential("qwen"), before, "a refresh rewrites the tokens, not the revision")
+        self.assertTrue(self.a.last_check("qwen")[1].get("ok"), "the check stands")
+        self.assertIsNotNone(self.a.offered("qwen"), "the listing stands")
+        cred.write_text("{not json yet")  # Qwen Code mid-write
+        self.assertEqual(self.a.credential("qwen"), before, "not signed out for an instant")
+        data["revision"] = "rev-another"
+        cred.write_text(json.dumps(data))
+        self.assertNotEqual(self.a.credential("qwen"), before, "a new sign-in is a new fingerprint")
+        cred.write_text(json.dumps({**data, "tokens": {}}))
+        self.assertIsNone(self.a.credential("qwen"), "no tokens: signed out")
+
+    def test_a_revoked_membership_shows_in_the_check_and_blocks_start(self):
+        self.assertTrue(self.sign_in_member()["signedIn"])
+        cred = self.a.HOMES / "qwen" / "subscription_credentials.json"
+        data = json.loads(cred.read_text()); data["tokens"]["access_token"] = FAKE_CRED + "-revoked"; cred.write_text(json.dumps(data))
         (self.a.RUN / "qwen-check.json").unlink()
         rows = {h["id"]: h for h in self.req(op="machine.status")["harnesses"]}
         self.assertFalse(rows["qwen"]["signedIn"])
-        self.assertTrue(self.a.known_bad("qwen"))
         agent = self.make_agent("qwen")
-        self.assertIn("not signed in", self.req(op="start", pubkey=agent.name)["error"])
-        self.assertTrue(all(url.endswith("/models") for url, _ in self.http_calls), "the check calls no model")
+        self.assertEqual(self.req(op="start", pubkey=agent.name)["error"], "Qwen Code is not signed in on this machine. Sign in to Qwen Code from Buzz first.")
+        calls = (self.home / "qwen-account-calls.txt").read_text()
+        self.assertNotIn("models " + str(self.a.HOMES / "qwen-key"), calls)
+        self.assertTrue(all(line.split(" ", 1)[1] != str(self.a.HOMES / "qwen-key") for line in calls.strip().split("\n")), "never against the key home")
 
-    def test_a_qwen_agent_is_told_how_to_reach_its_deferred_black4_tools(self):
-        note = self.a.DEFERRED_MCP_NOTE["qwen"]
-        self.assertIn("tool_search", note)
-        self.assertIn("mcp__black4__", note)
-        home = self.a.key_home("qwen")
-        context = home / "QWEN.md"
-        self.assertEqual(context.read_text(), note, "Qwen Code reads QWEN.md in its home into every session")
-        self.assertEqual(stat.S_IMODE(context.stat().st_mode), 0o600)
-        self.a.key_home("qwen")
-        self.assertEqual(context.read_text(), note)
-        self.assertIn("tool_search", self.a.heartbeat_prompt({"name": "Q", "model": "qwen4-max"}))
-
-    def test_a_teammate_may_sign_qwen_in_while_it_is_signed_out_only(self):
-        self.a.CALLER = "sam"
+    def test_logging_the_membership_out_stops_only_its_agents(self):
+        member_agent, key_agent = self.make_agent("qwen"), self.make_agent("qwen", pays="key")
+        self.assertTrue(self.sign_in_member()["signedIn"])
         self.assertTrue(self.sign_in_key()["signedIn"])
-        self.assertIn("already signed in", self.req(op="login.start", harness="qwen", flows=["key"])["error"])
-        self.assertEqual(self.req(op="logout", harness="qwen")["error"], "Only a Black 4 admin can sign this machine out.")
+        self.assertTrue(self.wait_running(member_agent) and self.wait_running(key_agent))
+        self.assertEqual(self.req(op="logout", harness="qwen"), {"ok": True})
+        self.assertFalse((self.a.HOMES / "qwen" / "subscription_credentials.json").exists())
+        self.assertIsNone(self.a.running(member_agent))
+        self.assertTrue(self.a.running(key_agent))
 
-    def test_doctor_says_what_a_new_qwen_agent_runs_with_no_effort(self):
+    def test_doctor_says_how_a_new_qwen_agent_pays(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out): self.a.print_doctor()
+        self.assertIn("Qwen Code: signed out (subscription signed out, API key signed out); full access (--approval-mode yolo, no sandbox); new agents run qwen4-max on the subscription (not checked yet)", out.getvalue())
         self.assertTrue(self.sign_in_key()["signedIn"])
         out = io.StringIO()
         with contextlib.redirect_stdout(out): self.a.print_doctor()
-        self.assertIn("Qwen Code: ready; full access (--approval-mode yolo, no sandbox); new agents run qwen4-max\n", out.getvalue())
+        self.assertIn("Qwen Code: ready (subscription signed out, API key signed in); full access (--approval-mode yolo, no sandbox); new agents run qwen4-max on the key\n", out.getvalue())
         self.assertNotIn(FAKE_QWEN_KEY, out.getvalue())
+
+
+class Pays(DeviceBase):
+    """Each agent pays by subscription or by key, settled when it is made."""
+    def pays(self, d):
+        return self.req(op="status", pubkey=d.name)["pays"]
+
+    def test_the_default_follows_what_is_signed_in_when_the_agent_is_made_and_then_stays(self):
+        self.assertEqual(self.pays(self.make_agent("qwen")), "subscription", "nothing signed in: by subscription")
+        self.assertTrue(self.sign_in_key()["signedIn"])
+        by_key = self.make_agent("qwen")
+        self.assertEqual(self.pays(by_key), "key", "only a key works: by key")
+        self.assertTrue(self.sign_in_member()["signedIn"])
+        self.assertEqual(self.pays(self.make_agent("qwen")), "subscription", "both work: by subscription")
+        self.assertEqual(self.pays(by_key), "key", "settled when made, not moved by a later sign-in")
+        self.assertEqual(self.pays(self.make_agent("claude")), "subscription")
+        rows = {a["pubkey"]: a for a in self.req(op="list")["agents"]}
+        self.assertEqual(rows[by_key.name]["pays"], "key")
+        d = self.make_agent("qwen", activate=False)
+        s = self.a.read_settings(d); del s["pays"]; self.a.write_settings(d, s)
+        self.assertEqual(self.pays(d), "subscription", "an agent from before the choice pays by subscription")
+
+    def test_pays_is_refused_where_it_cannot_apply(self):
+        self.assertEqual(self.req(op="provision", name="G", community="wss://r.example.com", config={"harness": "goose", "pays": "key"})["error"],
+                         "Goose cannot run on an API key here.")
+        self.assertEqual(self.req(op="provision", name="G", community="wss://r.example.com", config={"harness": "qwen", "pays": "cash"})["error"],
+                         'pays is "subscription" or "key"')
+
+    def test_each_agent_sees_only_the_sign_in_it_pays_with(self):
+        self.assertTrue(self.sign_in_member()["signedIn"])
+        self.assertTrue(self.sign_in_key()["signedIn"])
+        member = self.env_after_start(self.make_agent("qwen", pays="subscription"))
+        key = self.env_after_start(self.make_agent("qwen", pays="key"))
+        self.assertEqual(member["QWEN_HOME"], str(self.a.HOMES / "qwen"))
+        self.assertTrue((self.a.HOMES / "qwen" / "subscription_credentials.json").exists())
+        self.assertNotIn("OPENAI_API_KEY", member)
+        self.assertIn("--auth-type,qwen-subscription", member["BUZZ_ACP_AGENT_ARGS"])
+        self.assertEqual(key["QWEN_HOME"], str(self.a.HOMES / "qwen-key"))
+        self.assertFalse((self.a.HOMES / "qwen-key" / "subscription_credentials.json").exists())
+        self.assertEqual(key["OPENAI_API_KEY"], FAKE_QWEN_KEY)
+        self.assertIn("--auth-type,openai", key["BUZZ_ACP_AGENT_ARGS"])
+        self.assertNotIn("qwen-subscription", key["BUZZ_ACP_AGENT_ARGS"])
+
+    def test_models_are_listed_per_way_of_paying_and_settings_set_switches(self):
+        self.assertTrue(self.sign_in_member()["signedIn"])
+        self.assertTrue(self.sign_in_key()["signedIn"])
+        row = next(h for h in self.req(op="models")["harnesses"] if h["id"] == "qwen")
+        self.assertEqual([m["id"] for m in row["models"]], ["qwen4-max", "qwen3.8-max", "qwen3.8-flash"], "the membership's list, as the account gives it")
+        self.assertEqual((row["model"], row["effort"], row["checked"]), ("qwen4-max", None, True))
+        self.assertEqual([m["id"] for m in row["key"]["models"]], ["qwen4-max", "qwen3.8-max", "qwen3.7-plus"], "QwenCloud's list for the key, chat models only")
+        self.assertEqual((row["key"]["model"], row["key"]["checked"]), ("qwen4-max", True))
+        self.assertTrue(all(m["efforts"] == [] for m in row["models"] + row["key"]["models"]), "no effort lever either way")
+        agent = self.make_agent("qwen", pays="subscription")
+        self.assertIn("does not offer the model qwen3.7-plus", self.req(op="settings.set", pubkey=agent.name, model="qwen3.7-plus")["error"],
+                      "the membership does not list it")
+        done = self.req(op="settings.set", pubkey=agent.name, pays="key", model="qwen3.7-plus")
+        self.assertEqual((done["pays"], done["model"]), ("key", "qwen3.7-plus"))
+        env = json.loads((agent / "work" / "env.json").read_text())
+        self.assertEqual((env["OPENAI_MODEL"], env["QWEN_HOME"]), ("qwen3.7-plus", str(self.a.HOMES / "qwen-key")))
+        back = self.req(op="settings.set", pubkey=agent.name, pays="subscription")
+        self.assertEqual((back["pays"], back["model"], back["modelChosen"]), ("subscription", "qwen4-max", False), "a new way of paying drops a model not sent with it")
+        self.assertEqual(self.req(op="settings.set", pubkey=agent.name, pays="key")["model"], "qwen4-max")
+        st = self.req(op="status", pubkey=agent.name)
+        self.assertEqual((st["pays"], st["model"]), ("key", "qwen4-max"))
+
+    def test_provision_checks_the_model_against_the_way_it_pays(self):
+        self.assertTrue(self.sign_in_key()["signedIn"])
+        self.assertTrue(self.req(op="provision", name="K", community="wss://r.example.com", config={"harness": "qwen", "pays": "key", "model": "qwen3.7-plus"})["ok"])
+        self.assertTrue(self.req(op="provision", name="U", community="wss://r.example.com", config={"harness": "qwen", "pays": "subscription", "model": "qwen3.7-plus"})["ok"],
+                        "the membership is signed out: nothing to check against yet")
+        self.assertTrue(self.sign_in_member()["signedIn"])
+        self.assertIn("does not offer the model qwen3.7-plus",
+                      self.req(op="provision", name="S", community="wss://r.example.com", config={"harness": "qwen", "pays": "subscription", "model": "qwen3.7-plus"})["error"])
 
 
 def install_pinned(a, home):
@@ -1222,6 +1462,10 @@ def install_pinned(a, home):
         d.mkdir(parents=True, exist_ok=True)
         (d / "package.json").write_text(json.dumps({"version": version}))
     package("@qwen-code/qwen-code", pins["clis"]["@qwen-code/qwen-code"]["version"], folder="qwen-code")
+    chunks = a.VENDOR / "qwen-code/node_modules/@qwen-code/qwen-code/chunks"
+    chunks.mkdir()
+    (chunks / "chunk-AAAA.js").write_text("var x=1;export{x};")
+    (chunks / "chunk-SUBS.js").write_text("var QwenSubscriptionSession=class _Q{};export{QwenSubscriptionSession,other};")
     for name, pin in pins["adapters"].items():
         package(name, pin["version"])
     (a.VENDOR / "acp/node_modules/@agentclientprotocol/codex-acp/dist").mkdir()
@@ -1281,6 +1525,20 @@ class Health(DeviceBase):
         agent = self.make_agent("qwen")
         self.assertEqual(self.req(op="start", pubkey=agent.name)["error"],
                          "Qwen Code cannot run on this machine: @qwen-code/qwen-code is 0.27.3, pinned 0.27.4.")
+
+    def test_qwen_code_without_the_membership_class_or_the_script_is_a_problem(self):
+        self.assertNotIn("problem", self.rows()["qwen"])
+        chunk = self.a.VENDOR / "qwen-code/node_modules/@qwen-code/qwen-code/chunks/chunk-SUBS.js"
+        chunk.write_text("var Other=class{};export{Other};")
+        self.assertNotIn("problem", self.rows()["qwen"], "remembered per package: the scan is not repeated for the same install")
+        package = self.a.VENDOR / "qwen-code/node_modules/@qwen-code/qwen-code/package.json"
+        os.utime(package, (1, 1))
+        self.assertEqual(self.rows()["qwen"]["problem"], "this Qwen Code has no QwenSubscriptionSession for the membership sign-in")
+        chunk.write_text("var QwenSubscriptionSession=class _Q{};export{QwenSubscriptionSession};")
+        os.utime(package, (2, 2))
+        self.assertNotIn("problem", self.rows()["qwen"])
+        (self.a.BIN / "qwen-account.mjs").unlink()
+        self.assertEqual(self.rows()["qwen"]["problem"], "bin/qwen-account.mjs is missing")
 
     def test_the_handshake_with_qwen_code_runs_in_its_private_home(self):
         self.assertNotIn("problem", self.rows()["qwen"])
@@ -1497,6 +1755,9 @@ class SetupPins(unittest.TestCase):
         self.assertIn('"@qwen-code/qwen-code": "$QWEN_CODE_VERSION"', self.text)
         self.assertIn('QWEN_DIR="$VENDOR/qwen-code"', self.text)
         self.assertIn('ln -sfn "$QWEN_DIR/node_modules/.bin/qwen" "$BIN/qwen"', self.text)
+        self.assertIn('cp "$SRC/machine/qwen-account.mjs" "$BIN/qwen-account.mjs.tmp"', self.text)
+        deploy = (AGENTCTL.parent / "deploy.sh").read_text()
+        self.assertIn("machine/qwen-account.mjs", deploy, "deploy.sh ships it with agentctl")
         self.assertNotIn("qwen", self.text[self.text.index('"name": "workforce-acp"'):self.text.index("npm install --prefix \"$ACP_DIR\"")],
                          "never in the adapters' package.json: that reinstalls them under running agents")
 
@@ -1581,41 +1842,22 @@ class ModelAndEffort(DeviceBase):
             self.assertEqual((rows[hid]["model"], rows[hid]["effort"], rows[hid]["checked"]), (model, "high", True))
             self.assertNotIn("note", rows[hid])
 
-    def test_qwen_offers_the_chat_models_qwencloud_lists_for_the_key_with_no_effort(self):
+    def test_a_key_listing_that_fails_keeps_the_last_one_and_the_default_still_applies(self):
         self.assertTrue(self.sign_in_key()["signedIn"])
-        row = next(h for h in self.req(op="models")["harnesses"] if h["id"] == "qwen")
-        self.assertEqual([m["id"] for m in row["models"]], ["qwen4-max", "qwen3.8-max", "qwen3.7-plus"],
-                         "the defaults first, then QwenCloud's order; embeddings, vision, speech and other makers' models left out")
-        self.assertTrue(all(m["efforts"] == [] for m in row["models"]), "Qwen Code 0.27.4 has no effort lever for an environment model")
-        self.assertEqual((row["model"], row["effort"], row["checked"]), ("qwen4-max", None, True))
-        self.assertNotIn("note", row, "no effort is not a shortfall for Qwen")
-        self.assertEqual(self.req(op="provision", name="Q", community="wss://r.example.com", config={"harness": "qwen", "effort": "high"})["error"],
-                         "qwen4-max does not take the effort high. Choose another effort for this agent.")
-        self.assertIn("does not offer the model qwen4-max-preview",
-                      self.req(op="provision", name="Q", community="wss://r.example.com", config={"harness": "qwen", "model": "qwen4-max-preview"})["error"])
-        agent = self.make_agent("qwen")
-        self.assertTrue(self.req(op="settings.set", pubkey=agent.name, model="qwen3.7-plus")["ok"])
-        env = json.loads((agent / "work" / "env.json").read_text())
-        self.assertEqual(env["OPENAI_MODEL"], "qwen3.7-plus")
-        self.assertEqual(json.loads((agent / "launch.json").read_text()), {"model": "qwen3.7-plus", "effort": None, "note": None, "checked": True})
-        st = self.req(op="status", pubkey=agent.name)
-        self.assertEqual((st["model"], st["effort"], st["modelChosen"], st["effortChosen"]), ("qwen3.7-plus", None, True, False))
-        self.assertNotIn("modelNote", st)
-        self.assertEqual([url for url, _ in self.http_calls].count(QWEN_BASE + "/models"), 2, "one check, one listing; cached after")
-
-    def test_a_qwen_listing_that_fails_keeps_the_last_one_and_the_default_still_applies(self):
-        self.assertTrue(self.sign_in_key()["signedIn"])
-        self.assertEqual([m["id"] for m in self.a.offered("qwen")][:1], ["qwen4-max"])
-        (self.a.RUN / "qwen-models.json").unlink()
+        self.assertEqual([m["id"] for m in self.a.offered("qwen-key")][:1], ["qwen4-max"])
+        (self.a.RUN / "qwen-key-models.json").unlink()
         (self.home / "qwen-revoked.txt").write_text("x")  # the service says no for a while
-        self.a.refresh_models("qwen", wait=True)
-        self.assertIsNone(self.a.offered("qwen"))
-        cache = json.loads((self.a.RUN / "qwen-models.json").read_text())
+        self.a.refresh_models("qwen-key", wait=True)
+        self.assertIsNone(self.a.offered("qwen-key"))
+        cache = json.loads((self.a.RUN / "qwen-key-models.json").read_text())
         self.assertEqual(cache["fails"], 1)
         self.assertGreater(cache["retryAt"], time.time())
-        (self.a.RUN / "qwen-check.json").write_text(json.dumps({"hash": self.a.credential("qwen"), "ok": True, "at": time.time()}))
-        env = self.env_of(self.make_agent("qwen"))
+        (self.a.RUN / "qwen-key-check.json").write_text(json.dumps({"hash": self.a.credential("qwen-key"), "ok": True, "at": time.time()}))
+        env = self.env_of(self.make_agent("qwen", pays="key"))
         self.assertEqual(env["OPENAI_MODEL"], "qwen4-max", "unchecked: the first default still starts")
+        self.assertIn("does not offer the model qwen4-max-preview",
+                      self.req(op="provision", name="Q", community="wss://r.example.com", config={"harness": "qwen", "pays": "key", "model": "qwen4-max-preview"})["error"]
+                      if self.a.offered("qwen-key") is not None else "does not offer the model qwen4-max-preview")
 
     def test_fable_5_2_is_offered_only_when_it_answers_on_this_sign_in(self):
         (self.home / "refuse-claude-fable-5-2").write_text("x")

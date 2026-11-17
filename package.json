@@ -7,7 +7,7 @@
   },
   "scripts": {
     "test": "node --test tests/*.test.mjs",
-    "check": "node --check plugins/black4/plugin.js && node --check bridge/black4-agent-mcp/black4-agent-mcp.mjs && sh -n machine/setup.sh && sh -n machine/deploy.sh && sh -n machine/teammates.sh && sh -n install.sh && node scripts/check-build-folder.mjs && node scripts/check-machine-pins.mjs && node --check canary/check.mjs && node --check canary/load.mjs && node subscriptions/build.mjs --check && python3 -m unittest discover -s machine/tests && npm test",
+    "check": "node --check plugins/black4/plugin.js && node --check bridge/black4-agent-mcp/black4-agent-mcp.mjs && node --check machine/qwen-account.mjs && node --check machine/door.mjs && sh -n machine/setup.sh && sh -n machine/deploy.sh && sh -n machine/teammates.sh && sh -n install.sh && node scripts/check-build-folder.mjs && node scripts/check-machine-pins.mjs && node --check canary/check.mjs && node --check canary/load.mjs && node subscriptions/build.mjs --check && python3 -m unittest discover -s machine/tests && npm test",
     "test:subscriptions": "npm ci --prefix subscriptions --no-fund --no-audit && npm test --prefix subscriptions",
     "setup": "npm ci --prefix bridge/black4-agent-mcp --no-fund --no-audit",
     "canary": "node canary/check.mjs",

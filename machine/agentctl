@@ -975,11 +975,32 @@ HEARTBEAT_PROMPT_MAX = 8000
 
 DEFAULT_HEARTBEAT_PROMPT = """Black 4 heartbeat: run whatever standing job is due for you.
 
-1. Call the Black 4 tool start_next_standing_run with agent "{name}" and model {model}. If your tool list does not show it, call it through the Black 4 call_tool (name and arguments). If due is false, end your turn and post nothing.
+1. Call the Black 4 tool start_next_standing_run with agent "{name}" and model {model}. If your tool list does not show it, find it with your tool search (for example tool_search "select:mcp__black4__start_next_standing_run") and run it through your tool caller, or call it through the Black 4 call_tool (name and arguments). If due is false, end your turn and post nothing.
 2. Otherwise do the run completely, exactly as its instructions say, for every business marked run: read its skills and goals, do the work, and publish what it asks for. Post in Buzz only where the instructions say (buzz messages send).
 3. Finish with finish_standing_run (the same way): runId, agent "{name}", model {model}, and businesses: one entry per business marked run, each with businessId, outcome (done, no_action or failed), a one-line summary and its reviewIds. Use failed only when you truly cannot do the work, and say why.
 4. Call start_next_standing_run again and repeat. Do not start another run after 30 minutes of work, but never close a run undone to move on.
 """
+
+
+# Qwen Code lists no MCP tool by name at startup: every tool of the Black 4
+# connector is a deferred tool, reached only through its own tool_search and
+# tool_call (proven on 0.27.4: tool_search "probe" returned
+# mcp__probe__probe_ping, tool_call ran it on the MCP server). Without this
+# note a Qwen agent does not know the Black 4 tools exist.
+DEFERRED_MCP_NOTE = {
+    "qwen": ("Your Black 4 tools (the black4 MCP server: whoami, list_businesses, get_business_context, "
+             "start_next_standing_run and the rest) are not in your tool list. Find one with tool_search "
+             "(\"select:mcp__black4__<tool>\" or a keyword) and run it with tool_call.\n"),
+}
+
+
+def system_prompt(harness, s, has_mcp):
+    """The agent's system prompt file: the harness's note on reaching the Black 4
+    tools (only when the connector is there), then the owner's instructions."""
+    note = DEFERRED_MCP_NOTE.get(harness, "") if has_mcp else ""
+    own = s.get("instructions") or ""
+    if not own.strip(): return note
+    return note + "\n" + own if note else own
 
 
 def heartbeat_prompt(s):
@@ -1444,8 +1465,9 @@ def _start(d):
     # buzz CLI, so the slot is free for Black 4. Missing connector: no MCP.
     if os.access(BLACK4_MCP, os.X_OK): env["BUZZ_ACP_MCP_COMMAND"] = str(BLACK4_MCP)
     if s.get("allow"): env["BUZZ_ACP_RESPOND_TO_ALLOWLIST"] = ",".join(s["allow"])
-    if (s.get("instructions") or "").strip():
-        (d / "instructions.md").write_text(s["instructions"])
+    system = system_prompt(harness, s, "BUZZ_ACP_MCP_COMMAND" in env)
+    if system:
+        (d / "instructions.md").write_text(system)
         env["BUZZ_ACP_SYSTEM_PROMPT_FILE"] = str(d / "instructions.md")
     # Never BUZZ_ACP_MODEL: see "model and effort" above.
     env.update(model_env)

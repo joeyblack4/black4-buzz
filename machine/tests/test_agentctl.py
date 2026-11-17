@@ -1183,6 +1183,17 @@ class KeyLogin(DeviceBase):
         self.assertIn("not signed in", self.req(op="start", pubkey=agent.name)["error"])
         self.assertTrue(all(url.endswith("/models") for url, _ in self.http_calls), "the check calls no model")
 
+    def test_a_qwen_agent_is_told_how_to_reach_its_deferred_black4_tools(self):
+        note = self.a.DEFERRED_MCP_NOTE["qwen"]
+        self.assertIn("tool_search", note)
+        self.assertIn("mcp__black4__", note)
+        self.assertEqual(self.a.system_prompt("qwen", {}, True), note)
+        self.assertEqual(self.a.system_prompt("qwen", {"instructions": "Be brief."}, True), note + "\nBe brief.")
+        self.assertEqual(self.a.system_prompt("qwen", {"instructions": "Be brief."}, False), "Be brief.", "no connector, no note")
+        self.assertEqual(self.a.system_prompt("claude", {"instructions": "Be brief."}, True), "Be brief.", "other harnesses list the tools themselves")
+        self.assertEqual(self.a.system_prompt("claude", {"instructions": "  "}, True), "")
+        self.assertIn("tool_search", self.a.heartbeat_prompt({"name": "Q", "model": "qwen4-max"}))
+
     def test_a_teammate_may_sign_qwen_in_while_it_is_signed_out_only(self):
         self.a.CALLER = "sam"
         self.assertTrue(self.sign_in_key()["signedIn"])

@@ -46,8 +46,10 @@ homes/grok/auth.json (each CLI's own file, in a private home passed as
 CODEX_HOME / GROK_HOME) and homes/qwen/subscription_credentials.json (Qwen
 Code's own membership file, in QWEN_HOME); and each harness's API key in
 secrets/<harness>-key (secrets/<harness>-key.json says which plan and base URL
-it is for, never the key). None is ever printed, logged or put in a reply,
-and none goes into a command line.
+it is for, never the key); Codex also keeps its own copy of its key in
+homes/codex-key/auth.json, written by `codex login --with-api-key`, and the
+two go together. None is ever printed, logged or put in a reply, and none
+goes into a command line.
 
 Root: ~/workforce, or BLACK4_WORKFORCE_ROOT for a second runner beside it (its
 own agents, sign-ins and cron lines).
@@ -449,16 +451,17 @@ def toml_with(text, section, key, value):
     return "\n".join(lines) + "\n"
 
 
-def cli_home(harness, base=None):
-    """A private config home for this harness. Its config.toml gets our one
-    setting and keeps whatever the CLI wrote there; it is written only when that
-    changes it."""
+def cli_home(harness, base=None, extra=()):
+    """A private config home for this harness. Its config.toml gets our
+    setting (and `extra` ones: (section, key, value) each) and keeps whatever
+    the CLI wrote there; it is written only when that changes it."""
     home = private_dir(base or HOMES / harness)
     private_dir(home.parent)
     path = home / "config.toml"
     try: old = path.read_text()
     except FileNotFoundError: old = ""
-    new = toml_with(old, *DEVICE[harness]["setting"])
+    new = old
+    for setting in (DEVICE[harness]["setting"], *extra): new = toml_with(new, *setting)
     if new != old: write_private(path, new)
     return home
 
@@ -567,6 +570,10 @@ DEVICE_CHECK = {"codex": run_codex_check, "grok": run_grok_check}
 PAYS = ("subscription", "key")
 
 
+def article(word):
+    return "an" if word[:1].lower() in "aeiou" else "a"
+
+
 def slot_of(harness, pays):
     return f"{harness}-key" if pays == "key" else harness
 
@@ -671,19 +678,95 @@ def forget_member(harness):
 # private home that holds nothing else. Nothing goes on a command line. The
 # sign-in check and the model listing are the same GET.
 
+# Each harness's key, as the pinned CLI reads it (checked on the Commerce Mac,
+# 2026-11-16): service and the page that makes a key; the base URL(s) whose
+# GET /models checks it; the header it goes in; `rejected` (status, body):
+# what the service answers to a bad key; `env` (key, base): what the agent's
+# environment gets; `home_env`: the private home for the slot (homes/<slot>),
+# so the key agent never sees the subscription's files; `chat`: the models a
+# person would pick from the service's list; `label` and `efforts` per model
+# where known; and for Codex `install`, which puts the key where the CLI reads
+# it (its own auth.json in that home, written by `codex login --with-api-key`
+# on stdin: Codex's app-server does not read OPENAI_API_KEY from the environment).
+BEARER = lambda key: {"Authorization": "Bearer " + key}
+UNAUTHORIZED = lambda status, body: status in (401, 403)
+NOT_CHAT = re.compile(r"embedding|rerank|tts|asr|audio|omni|image|video|ocr|-vl|vl-|translat|guard|moderation|whisper|dall-e|realtime|transcri|vision", re.I)
+QWEN_NOT_CHAT = NOT_CHAT
 KEYS = {
+    "claude": {"service": "Anthropic", "keyUrl": "https://console.anthropic.com/settings/keys",
+               "bases": (("api", "https://api.anthropic.com/v1"),),
+               "headers": lambda key: {"x-api-key": key, "anthropic-version": "2023-06-01"},
+               "rejected": UNAUTHORIZED,
+               # Claude Code reads ANTHROPIC_API_KEY; CLAUDE_CONFIG_DIR keeps its state
+               # (and any sign-in it might find) apart from the machine user's own.
+               "home_env": "CLAUDE_CONFIG_DIR", "env": lambda key, base: {"ANTHROPIC_API_KEY": key},
+               "chat": lambda i: i.startswith("claude-") and not NOT_CHAT.search(i),
+               "label": lambda row: row.get("display_name") or claude_label(row["id"]),
+               "efforts": lambda i: claude_efforts(claude_cli()) if claude_cli() else []},
+    "codex": {"service": "OpenAI", "keyUrl": "https://platform.openai.com/api-keys",
+              "bases": (("api", "https://api.openai.com/v1"),),
+              "headers": BEARER, "rejected": UNAUTHORIZED,
+              "home_env": "CODEX_HOME", "env": lambda key, base: {},
+              "install": lambda key: install_codex_key(key), "installed": lambda key: codex_key_installed(key),
+              "chat": lambda i: (i.startswith("gpt-") or re.match(r"^o\d", i) is not None) and not NOT_CHAT.search(i) and "instruct" not in i,
+              "efforts": lambda i: cached_efforts("codex", i)},
+    "grok": {"service": "xAI", "keyUrl": "https://console.x.ai",
+             "bases": (("api", "https://api.x.ai/v1"),),
+             "headers": BEARER,
+             # xAI answers 400 "Incorrect API key provided" to a bad key, not 401.
+             "rejected": lambda status, body: status in (401, 403) or (status == 400 and re.search(r"api[ _-]?key", json.dumps(body or ""), re.I) is not None),
+             # grok reads XAI_API_KEY, but its agent mode (what buzz-acp runs) signs
+             # in with grok.com unless its config pins auth to the key: with this in
+             # the key home's config.toml it advertises xai.api_key and opens a session.
+             "home_env": "GROK_HOME", "env": lambda key, base: {"XAI_API_KEY": key},
+             "settings": (("auth", "preferred_method", '"api_key"'),),
+             "chat": lambda i: i.startswith("grok-") and not NOT_CHAT.search(i),
+             "efforts": lambda i: cached_efforts("grok", i)},
     "qwen": {"service": "QwenCloud", "keyUrl": "https://docs.qwencloud.com/developer-guides/administration/api-keys",
              # Qwen Code's own page for keys; the two QwenCloud plans take different keys.
              "bases": (("pay-as-you-go", "https://maas.qwencloudapi.com/compatible-mode/v1"),
                        ("token-plan", "https://token-plan.maas.qwencloudapi.com/compatible-mode/v1")),
-             "headers": lambda key: {"Authorization": "Bearer " + key},
-             "rejected": (401, 403), "home_env": "QWEN_HOME", "auth_args": ("--auth-type", "openai"),
+             "headers": BEARER, "rejected": UNAUTHORIZED,
+             "home_env": "QWEN_HOME", "auth_args": ("--auth-type", "openai"),
              # Qwen Code's --auth-type openai reads these (and the model as OPENAI_MODEL).
              "env": lambda key, base: {"OPENAI_API_KEY": key, "OPENAI_BASE_URL": base},
-             "chat": lambda i: i.lower().startswith("qwen") and not QWEN_NOT_CHAT.search(i)},
+             "chat": lambda i: i.lower().startswith("qwen") and not NOT_CHAT.search(i)},
 }
 KEY_RE = re.compile(r"^[\x21-\x7e]{16,512}$")  # printable ASCII, no spaces: it goes in a header and the environment
-QWEN_NOT_CHAT = re.compile(r"embedding|rerank|tts|asr|audio|omni|image|video|ocr|-vl|vl-|translat|guard|moderation", re.I)
+
+
+def install_codex_key(key):
+    """Puts the key where Codex reads it: `codex login --with-api-key` (the key
+    on stdin, never an argument) into the key slot's own home. True when done."""
+    cli = device_cli("codex")
+    if not cli: return False
+    home = slot_home("codex-key")
+    try:
+        done = subprocess.run([cli, "login", "--with-api-key"], input=key, env=device_env("codex", home), cwd=private_dir(RUN / "check"),
+                              capture_output=True, text=True, timeout=30)
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    path = home / CRED_FILE
+    if path.exists():
+        try: os.chmod(path, 0o600)
+        except OSError: pass
+    return done.returncode == 0 and codex_key_installed(key)
+
+
+def codex_key_installed(key):
+    """Whether the key slot's auth.json holds this key (Codex writes it there)."""
+    data = read_json(HOMES / "codex-key" / CRED_FILE)
+    return isinstance(data, dict) and data.get("OPENAI_API_KEY") == key
+
+
+def cached_efforts(harness, model):
+    """The efforts Codex or Grok know for this model, from the listing either
+    of its homes has cached (they fetch it themselves); [] when neither has."""
+    for slot in (f"{harness}-key", harness):
+        rows = (codex_models if harness == "codex" else grok_models)(HOMES / slot)
+        found = find_model(rows or [], model)
+        if found: return found["efforts"]
+    return []
 # Qwen Code lists no MCP tool by name at startup: every tool of the Black 4
 # connector is a deferred tool, reached only through its own tool_search and
 # tool_call (proven on 0.27.4: tool_search "probe" returned
@@ -734,10 +817,12 @@ def qwen_env(home=None):
 
 
 def slot_home(slot):
-    """The private home a slot's CLI runs in, made and settled: homes/<slot>."""
+    """The private home a slot's CLI runs in, made and settled: homes/<slot>.
+    None for Claude Code's subscription, which keeps nothing on disk here."""
     harness = harness_of(slot)
     if harness == "qwen": return qwen_home(HOMES / slot)
-    if harness in DEVICE: return cli_home(harness, HOMES / slot)
+    if harness in DEVICE: return cli_home(harness, HOMES / slot, KEYS.get(harness, {}).get("settings", ()) if slot.endswith("-key") else ())
+    if slot == "claude-key": return private_dir(private_dir(HOMES) / slot)
     return None
 
 
@@ -746,7 +831,9 @@ def slot_env(slot):
     harness = harness_of(slot)
     if harness == "qwen": return qwen_env(slot_home(slot))
     if harness in DEVICE: return device_env(harness, slot_home(slot))
-    return base_env()
+    env = base_env()
+    if slot == "claude-key": env[KEYS["claude"]["home_env"]] = str(slot_home(slot))
+    return env
 
 
 def harness_env(harness):
@@ -799,9 +886,9 @@ def key_get(harness, base, key):
 
 
 def judge_key_answer(harness, status, body=None):
-    """True: the key works (200 with a list). False: rejected. None: could not tell."""
+    """True: the key works (200). False: the service rejected it. None: could not tell."""
     if status == 200: return True
-    if status in KEYS[harness]["rejected"]: return False
+    if status is not None and KEYS[harness]["rejected"](status, body): return False
     return None
 
 
@@ -830,6 +917,8 @@ def forget_key(harness):
         (SECRETS / name).unlink(missing_ok=True)
     for name in (f"{harness}-key-check.json", f"{harness}-key-models.json"):
         (RUN / name).unlink(missing_ok=True)
+    if "install" in KEYS.get(harness, {}):  # the CLI's own copy of the key goes with it
+        (HOMES / f"{harness}-key" / CRED_FILE).unlink(missing_ok=True)
 
 
 def run_key_check(harness):
@@ -1278,10 +1367,10 @@ def effort_sorted(levels):
     return sorted(seen, key=lambda e: rank.get(e, len(rank)))
 
 
-def codex_models():
+def codex_models(home=None):
     """Codex's own cached listing (models_cache.json in its home), listed rows
     only, in Codex's order; None when Codex has not fetched one yet."""
-    cache = read_json(HOMES / "codex" / "models_cache.json")
+    cache = read_json((home or HOMES / "codex") / "models_cache.json")
     if not isinstance(cache, dict) or not isinstance(cache.get("models"), list): return None
     rows = sorted((m for m in cache["models"] if isinstance(m, dict) and m.get("visibility") == "list" and m.get("slug")),
                   key=lambda m: m.get("priority") or 0)
@@ -1291,9 +1380,9 @@ def codex_models():
             for m in rows]
 
 
-def grok_models():
+def grok_models(home=None):
     """Grok's own cached listing (models_cache.json in its home), visible rows."""
-    cache = read_json(HOMES / "grok" / "models_cache.json")
+    cache = read_json((home or HOMES / "grok") / "models_cache.json")
     if not isinstance(cache, dict) or not isinstance(cache.get("models"), dict): return None
     out = []
     for key, row in cache["models"].items():
@@ -1381,17 +1470,18 @@ def list_key_models(harness):
     """The chat models the service lists for the stored key (its model list on
     the base the key was saved for), the defaults first and then the rest in
     the service's order; None when it cannot tell (no key, rejected, offline).
-    No efforts: the services do not say, and Qwen Code has no effort lever on a
-    key (see "model and effort" above)."""
+    Efforts where the harness has a lever and knows them (Claude Code's own
+    levels; what Codex and Grok cached for the model), else none."""
     key = stored_key(harness)
     if not key: return None
     status, body = key_get(harness, key_base(harness), key)
     if status != 200 or not isinstance(body, dict) or not isinstance(body.get("data"), list): return None
-    ids = [m["id"] for m in body["data"] if isinstance(m, dict) and isinstance(m.get("id"), str) and MODEL_ID.match(m["id"])]
-    ids = [i for i in ids if KEYS[harness]["chat"](i)]
+    spec = KEYS[harness]
+    rows = {m["id"]: m for m in body["data"] if isinstance(m, dict) and isinstance(m.get("id"), str) and MODEL_ID.match(m["id"]) and spec["chat"](m["id"])}
     tries = DEFAULTS[harness][0]
-    order = [m for m in tries if m in ids] + [i for i in ids if i not in tries]
-    return [{"id": i, "label": i, "efforts": []} for i in dict.fromkeys(order)]
+    order = [m for m in tries if m in rows] + [i for i in rows if i not in tries]
+    label, efforts = spec.get("label", lambda row: row["id"]), spec.get("efforts", lambda i: [])
+    return [{"id": i, "label": str(label(rows[i]) or i), "efforts": effort_sorted(efforts(i))} for i in dict.fromkeys(order)]
 
 
 def list_member_models(harness):
@@ -1643,9 +1733,13 @@ def _start(d):
     if pays == "key":
         key = stored_key(harness) if harness in KEYS else None
         if not key or known_bad(slot):
-            fail(f"{label} has no working API key on this machine. Add a {KEYS[harness]['service'] if harness in KEYS else label} API key from Buzz first, or set this agent to pay by subscription.")
+            service = KEYS[harness]["service"] if harness in KEYS else label
+            fail(f"{label} has no working API key on this machine. Add {article(service)} {service} API key from Buzz first, or set this agent to pay by subscription.")
         env = slot_env(slot)
         env.update(KEYS[harness]["env"](key, key_base(harness)))  # the environment only: never an argument
+        spec = KEYS[harness]
+        if "install" in spec and not spec["installed"](key) and not spec["install"](key):
+            fail(f"{label} could not take the API key on this machine. Add it from Buzz again.")
     elif harness == "claude":
         token = claude_token()
         if not token or known_bad("claude"):
@@ -1957,7 +2051,7 @@ def login_start(harness, flows=None, pays="subscription"):
         if harness not in KEYS: fail(f"{label} cannot run on an API key on this machine.")
         if not installed(harness): fail(f"{label} is not installed on this machine.")
         if "key" not in flows:
-            fail(f"Update the Black 4 plugin in Buzz to add a {KEYS[harness]['service']} API key from it.")
+            fail(f"Update the Black 4 plugin in Buzz to add {article(KEYS[harness]['service'])} {KEYS[harness]['service']} API key from it.")
     else:
         if harness not in SIGN_IN:
             if harness in NO_SIGN_IN: fail(NO_SIGN_IN[harness])
@@ -2061,6 +2155,7 @@ def key_finish(d, harness, key):
     if ok is None: fail(f"{service} could not be reached to check the key. Try again in a moment.")
     if not ok: fail(f"{service} did not accept that key. Check it and paste it again.")
     save_key(harness, key, base, plan)
+    if "install" in KEYS[harness]: KEYS[harness]["install"](key)  # where the CLI reads it (Codex's own file)
     shutil.rmtree(d, ignore_errors=True)
     refresh_models(f"{harness}-key", wait=True)  # one GET: what this key offers, before its agents start
     spawn_restart(harness, "key")  # the agents paying by key, after the reply is free to go

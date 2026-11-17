@@ -386,7 +386,11 @@ test("render: a harness that takes an API key gets Pays with, and the model list
   assert.match(textIn(byKey), /has an API key|Signed in/);
   const claude = await settle(React.createElement(type.CreateConfiguration, {
     config: { ...hardwareDefaults(), harness: "claude" }, onChange: () => {}, disabled: false }));
-  assert.ok(!selectsIn(claude).some((entry) => entry.label === "Pays with"), "no key on this machine for Claude Code yet: no choice");
+  assert.ok(selectsIn(claude).some((entry) => entry.label === "Pays with"), "every harness that reports a key gets the choice");
+  const before = hardwareOn((request) => (request.op === "machine.status" ? { ok: true, machine: "commerce", harnesses: harnesses({ signedIn: true }) } : qwenFleet(request)));
+  const old = await before.settle(before.React.createElement(before.type.CreateConfiguration, {
+    config: { ...hardwareDefaults(), harness: "claude" }, onChange: () => {}, disabled: false }));
+  assert.ok(!selectsIn(old).some((entry) => entry.label === "Pays with"), "a machine from before keys: no choice");
 });
 
 test("render: Settings shows how the agent pays, and a change goes to its machine as settings.set with pays", async () => {
@@ -462,10 +466,11 @@ test("readiness for each sign-in state", () => {
 });
 
 // What a runner with Codex, Grok and Qwen Code sign-in reports (machine/agentctl machine.status).
+const noKey = { signIn: "key", signedIn: false, account: null, plan: null };
 const deviceRows = ({ codex = false, grok = false, qwen = false, qwenKey = false } = {}) => [
-  { id: "claude", label: "Claude Code", installed: true, signedIn: true, account: null, signIn: "code" },
-  { id: "codex", label: "Codex", installed: true, signedIn: codex, account: codex ? "owner@example.com" : null, signIn: "device" },
-  { id: "grok", label: "Grok Build", installed: true, signedIn: grok, account: null, signIn: "device" },
+  { id: "claude", label: "Claude Code", installed: true, signedIn: true, account: null, signIn: "code", key: noKey },
+  { id: "codex", label: "Codex", installed: true, signedIn: codex, account: codex ? "owner@example.com" : null, signIn: "device", key: noKey },
+  { id: "grok", label: "Grok Build", installed: true, signedIn: grok, account: null, signIn: "device", key: noKey },
   { id: "qwen", label: "Qwen Code", installed: true, signedIn: qwen, account: qwen ? "owner@example.com" : null, signIn: "device",
     key: { signIn: "key", signedIn: qwenKey, account: null, plan: qwenKey ? "pay-as-you-go" : null } },
   { id: "goose", label: "Goose", installed: true, signedIn: null, account: null, signIn: null,
@@ -692,11 +697,13 @@ test("sign-in: an empty code is not sent", async () => {
 test("a harness pays by subscription or by API key: each has its own sign-in state, and the machine's rule picks the default", () => {
   const none = { kind: "ok", harnesses: deviceRows() };
   assert.equal(takesKey(none, "qwen"), true);
-  assert.equal(takesKey(none, "codex"), false, "no key on this machine yet");
+  assert.equal(takesKey(none, "codex"), true);
+  const older = { kind: "ok", harnesses: harnesses() };
+  assert.equal(takesKey(older, "codex"), false, "a machine from before keys");
   assert.equal(takesKey(undefined, "qwen"), false);
   assert.deepEqual(signInState(none, "qwen"), { kind: "signed-out" });
   assert.deepEqual(signInState(none, "qwen", "key"), { kind: "signed-out" });
-  assert.deepEqual(signInState(none, "codex", "key"), { kind: "unavailable", reason: "Codex takes no API key on this machine." });
+  assert.deepEqual(signInState(older, "codex", "key"), { kind: "unavailable", reason: "Codex takes no API key on this machine." });
   assert.equal(defaultPays(none, "qwen"), "subscription", "nothing signed in: by subscription");
   const keyOnly = { kind: "ok", harnesses: deviceRows({ qwenKey: true }) };
   assert.deepEqual(signInState(keyOnly, "qwen", "key"), { kind: "signed-in", account: null });

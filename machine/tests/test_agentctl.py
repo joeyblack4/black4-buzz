@@ -89,7 +89,7 @@ if sys.argv[1:2] == ["models"]:  # what 0.5.30 printed for claude-agent-acp 0.94
 if os.path.exists(os.path.join(home, "crash.txt")):
     print("buzz-acp: relay refused the connection", flush=True); sys.exit(1)
 with open("env.json", "w") as f:
-    json.dump({{k: v for k, v in os.environ.items() if k.startswith(("BUZZ_ACP", "CLAUDE_CODE", "PATH", "CODEX", "GROK", "QWEN", "NO_BROWSER", "OPENAI", "XAI", "INITIAL_AGENT_MODE", "GOOSE", "ANTHROPIC"))}}, f)
+    json.dump({{k: v for k, v in os.environ.items() if k.startswith(("BUZZ_ACP", "CLAUDE_CODE", "CLAUDE_CONFIG_DIR", "PATH", "CODEX", "GROK", "QWEN", "NO_BROWSER", "OPENAI", "XAI", "INITIAL_AGENT_MODE", "GOOSE", "ANTHROPIC"))}}, f)
 while True: time.sleep(1)
 """
 
@@ -123,6 +123,11 @@ def stored(home_env):
 FAKE_CODEX = f"""#!{PY}
 {FAKE_DEVICE_LOGIN}
 args = sys.argv[1:]
+if args[:2] == ["login", "--with-api-key"]:
+    key = sys.stdin.read().strip()
+    with open(os.path.join(os.environ["HOME"], "codex-logins.txt"), "a") as f: f.write(os.environ["CODEX_HOME"] + "\\n")
+    with open(os.path.join(os.environ["CODEX_HOME"], "auth.json"), "w") as f: json.dump({{"OPENAI_API_KEY": key, "auth_mode": "apikey"}}, f)
+    print("Successfully logged in"); sys.exit(0)
 if args[:2] == ["login", "--device-auth"]:
     device_login("CODEX_HOME", "\\r\\nWelcome to Codex [v0.160.1]\\r\\n\\r\\n1. Open this link in your browser and sign in to your account\\r\\n   https://auth.openai.com/codex/device\\r\\n\\r\\n2. Enter this one-time code (expires in 15 minutes)\\r\\n   ABCD-12EFG\\r\\n")
 if args[:1] == ["app-server"]:
@@ -213,23 +218,49 @@ say({{"ok": False, "error": "unknown command"}}); sys.exit(1)
 """
 
 
+# The other services' fake keys, model lists and answers to a bad key (as the
+# real ones answered on 2026-11-16: Anthropic and OpenAI 401, xAI 400 with
+# "Incorrect API key provided").
+FAKE_ANTHROPIC_KEY = "sk-ant-fake-key-" + "A" * 24
+FAKE_OPENAI_KEY = "sk-fake-openai-key-" + "O" * 24
+FAKE_XAI_KEY = "xai-fake-key-" + "X" * 24
+SERVICES = {
+    "https://api.anthropic.com/v1": (FAKE_ANTHROPIC_KEY, "x-api-key",
+        {"data": [{"id": "claude-fable-5-2", "display_name": "Fable 5.2"}, {"id": "claude-haiku-5-5", "display_name": "Haiku 5.5"}, {"id": "claude-3-embedding"}]},
+        (401, {"type": "error", "error": {"type": "authentication_error", "message": "invalid x-api-key"}})),
+    "https://api.openai.com/v1": (FAKE_OPENAI_KEY, "bearer",
+        {"data": [{"id": "gpt-6.1-sol"}, {"id": "gpt-6-astra"}, {"id": "text-embedding-3-large"}, {"id": "gpt-4o-realtime-preview"}, {"id": "o3"}, {"id": "whisper-1"}]},
+        (401, {"error": {"message": "Incorrect API key provided: sk-x. You can find your API key at https://platform.openai.com/account/api-keys.", "code": "invalid_api_key"}})),
+    "https://api.x.ai/v1": (FAKE_XAI_KEY, "bearer",
+        {"data": [{"id": "grok-4.7"}, {"id": "grok-4.5"}, {"id": "grok-2-image-1212"}]},
+        (400, {"code": "invalid-argument", "error": "Incorrect API key provided. You can obtain an API key from https://console.x.ai."})),
+    QWEN_BASE: (FAKE_QWEN_KEY, "bearer", QWEN_MODELS_BODY, (401, {"error": {"message": "Incorrect API key provided.", "code": "invalid_api_key"}})),
+    QWEN_PLAN_BASE: (FAKE_QWEN_PLAN_KEY, "bearer", QWEN_MODELS_BODY, (401, {"request_id": "x", "code": "InvalidApiKey", "message": "Invalid API-key provided."})),
+}
+
+
 def fake_qwencloud(test):
-    """A fake of QwenCloud's GET /models, in place of agentctl's urllib call:
-    records (url, key) in test.http_calls; 200 for the fake key of each base,
-    401 otherwise, nothing for an sk-offline key, 500 for an sk-broken one.
-    The file qwen-revoked.txt in the test home makes every key a 401."""
+    """A fake of each service's GET /models, in place of agentctl's urllib
+    call: records (url, key) in test.http_calls; 200 for the fake key of each
+    base, the service's own refusal otherwise, nothing for an sk-offline key,
+    500 for an sk-broken one, and a 400 that says nothing about a key for an
+    xai-odd one. The file qwen-revoked.txt in the test home makes every key
+    refused."""
     test.http_calls = []
 
     def get(url, headers, timeout=20):
-        # The key as the service reads it: a Bearer header, or x-api-key (Anthropic).
-        key = headers.get("x-api-key") or headers.get("Authorization", "").split(" ", 1)[-1]
+        base = url.rsplit("/models", 1)[0]
+        good, where, listing, refused = SERVICES[base]
+        # The key as the service reads it: x-api-key (Anthropic) or a Bearer header.
+        key = headers.get("x-api-key") if where == "x-api-key" else headers.get("Authorization", "").split(" ", 1)[-1]
+        if where == "x-api-key": assert headers.get("anthropic-version"), "Anthropic needs anthropic-version"
         test.http_calls.append((url, key))
         if key.startswith("sk-offline"): return None, None
         if key.startswith("sk-broken"): return 500, {"error": "upstream"}
-        good = FAKE_QWEN_PLAN_KEY if url.startswith(QWEN_PLAN_BASE) else FAKE_QWEN_KEY
+        if key.startswith("xai-odd"): return 400, {"error": "bad request"}
         if key == good and not (test.home / "qwen-revoked.txt").exists() and url.endswith("/models"):
-            return 200, QWEN_MODELS_BODY
-        return 401, {"error": {"message": "Incorrect API key provided.", "code": "invalid_api_key"}}
+            return 200, listing
+        return refused
     return get
 
 
@@ -397,8 +428,12 @@ class MachineStatus(Base):
         self.assertEqual(rows["qwen"]["label"], "Qwen Code")
         self.assertFalse(rows["qwen"]["installed"])
         self.assertEqual(rows["qwen"]["key"], {"signIn": "key", "signedIn": None, "account": None, "plan": None}, "and takes an API key beside it")
+        for hid in ('claude', 'codex', 'grok'): self.assertEqual(rows[hid]["key"]["signIn"], "key", hid)
+        self.assertEqual(rows["claude"]["key"]["signedIn"], False, "installed, no key yet")
+        self.assertNotIn("key", rows["goose"])
         self.assertEqual(rows["claude"], {"id": "claude", "label": "Claude Code", "installed": True,
-                                          "signedIn": False, "account": None, "signIn": "code"})
+                                          "signedIn": False, "account": None, "signIn": "code",
+                                          "key": {"signIn": "key", "signedIn": False, "account": None, "plan": None}})
         self.assertFalse(rows["goose"]["installed"])
         self.assertIsNone(rows["codex"]["signedIn"])  # not installed here: nothing to check
         self.assertEqual(rows["codex"]["signIn"], "device")
@@ -1449,6 +1484,129 @@ class Pays(DeviceBase):
                       self.req(op="provision", name="S", community="wss://r.example.com", config={"harness": "qwen", "pays": "subscription", "model": "qwen3.7-plus"})["error"])
 
 
+class HarnessKeys(DeviceBase):
+    """Claude Code, Codex and Grok Build on an API key, beside their
+    subscriptions: each agent sees only the one it pays with."""
+    def test_claude_key_agents_get_the_key_and_subscription_agents_the_token_never_both(self):
+        self.sign_in()
+        done = self.sign_in_key(FAKE_ANTHROPIC_KEY, "claude")
+        self.assertEqual(done, {"ok": True, "signedIn": True, "account": None, "plan": "api"})
+        self.assertEqual(self.http_calls[0][0], "https://api.anthropic.com/v1/models")
+        self.assertEqual((self.a.SECRETS / "claude-key").read_text().strip(), FAKE_ANTHROPIC_KEY)
+        by_key = self.env_after_start(self.make_agent("claude", pays="key"))
+        self.assertEqual(by_key["ANTHROPIC_API_KEY"], FAKE_ANTHROPIC_KEY)
+        self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", by_key)
+        self.assertEqual(by_key["CLAUDE_CONFIG_DIR"], str(self.a.HOMES / "claude-key"), "its own state, apart from the machine user's")
+        self.assertEqual(by_key["ANTHROPIC_MODEL"], "claude-fable-5-2")
+        self.assertEqual(by_key["CLAUDE_CODE_EFFORT_LEVEL"], "high", "Claude Code's effort lever works on a key too")
+        self.assertEqual(stat.S_IMODE((self.a.HOMES / "claude-key").stat().st_mode), 0o700)
+        by_sub = self.env_after_start(self.make_agent("claude", pays="subscription"))
+        self.assertEqual(by_sub["CLAUDE_CODE_OAUTH_TOKEN"], FAKE_TOKEN)
+        self.assertNotIn("ANTHROPIC_API_KEY", by_sub)
+        self.assertNotIn("CLAUDE_CONFIG_DIR", by_sub, "the subscription runs as it always has")
+        rows = {h["id"]: h for h in self.req(op="machine.status")["harnesses"]}
+        self.assertEqual((rows["claude"]["signedIn"], rows["claude"]["key"]["signedIn"], rows["claude"]["key"]["plan"]), (True, True, "api"))
+
+    def test_the_anthropic_listing_for_a_key_carries_names_and_claude_codes_efforts(self):
+        self.assertTrue(self.sign_in_key(FAKE_ANTHROPIC_KEY, "claude")["signedIn"])
+        row = next(h for h in self.req(op="models")["harnesses"] if h["id"] == "claude")
+        self.assertEqual([(m["id"], m["label"]) for m in row["key"]["models"]], [("claude-fable-5-2", "Fable 5.2"), ("claude-haiku-5-5", "Haiku 5.5")], "no embeddings")
+        self.assertEqual(row["key"]["models"][0]["efforts"], ["low", "medium", "high", "xhigh", "max"])
+        self.assertEqual((row["key"]["model"], row["key"]["effort"], row["key"]["checked"]), ("claude-fable-5-2", "high", True))
+        self.assertEqual((row["models"], row["checked"]), ([], False), "the subscription is signed out: nothing listed for it")
+        self.assertIn("does not take the effort turbo", self.req(op="provision", name="C", community="wss://r.example.com",
+                                                                 config={"harness": "claude", "pays": "key", "effort": "turbo"})["error"])
+
+    def test_codex_puts_the_key_in_its_own_file_in_its_own_home(self):
+        self.sign_in_device("codex")
+        done = self.sign_in_key(FAKE_OPENAI_KEY, "codex")
+        self.assertEqual(done["plan"], "api")
+        key_home = self.a.HOMES / "codex-key"
+        self.assertEqual(json.loads((key_home / "auth.json").read_text()), {"OPENAI_API_KEY": FAKE_OPENAI_KEY, "auth_mode": "apikey"}, "codex login --with-api-key wrote it")
+        self.assertEqual(stat.S_IMODE((key_home / "auth.json").stat().st_mode), 0o600)
+        self.assertEqual((self.home / "codex-logins.txt").read_text().strip(), str(key_home), "on stdin, into the key home only")
+        self.assertIn(FAKE_CRED, (self.a.HOMES / "codex" / "auth.json").read_text(), "the ChatGPT sign-in is untouched")
+        by_key = self.env_after_start(self.make_agent("codex", pays="key"))
+        self.assertEqual(by_key["CODEX_HOME"], str(key_home))
+        self.assertNotIn("OPENAI_API_KEY", by_key, "Codex reads its file, not the environment")
+        self.assertIn('cli_auth_credentials_store = "file"', (key_home / "config.toml").read_text())
+        self.assertEqual(by_key["INITIAL_AGENT_MODE"], "agent-full-access")
+        by_sub = self.env_after_start(self.make_agent("codex", pays="subscription"))
+        self.assertEqual(by_sub["CODEX_HOME"], str(self.a.HOMES / "codex"))
+        self.assertNotIn("OPENAI_API_KEY", json.dumps(by_sub))
+        (key_home / "auth.json").unlink()
+        self.env_after_start(self.make_agent("codex", pays="key"))
+        self.assertTrue((key_home / "auth.json").exists(), "start puts the file back when it is gone")
+        self.assertEqual(self.req(op="logout", harness="codex", pays="key"), {"ok": True})
+        self.assertFalse((key_home / "auth.json").exists(), "the key and Codex's copy go together")
+        self.assertTrue((self.a.HOMES / "codex" / "auth.json").exists())
+
+    def test_codex_key_models_take_the_efforts_codex_cached_for_them(self):
+        (self.a.private_dir(self.a.HOMES / "codex") / "models_cache.json").write_text(json.dumps(CODEX_MODELS))
+        self.assertTrue(self.sign_in_key(FAKE_OPENAI_KEY, "codex")["signedIn"])
+        row = next(h for h in self.req(op="models")["harnesses"] if h["id"] == "codex")
+        self.assertEqual([m["id"] for m in row["key"]["models"]], ["gpt-6-astra", "gpt-6.1-sol", "o3"], "the defaults first; no embeddings, realtime or whisper")
+        self.assertEqual(row["key"]["models"][0]["efforts"], ["low", "medium", "high", "xhigh", "max", "ultra"])
+        self.assertEqual(row["key"]["models"][2]["efforts"], [], "nothing cached for it")
+        self.assertEqual((row["key"]["model"], row["key"]["effort"]), ("gpt-6-astra", "high"))
+
+    def test_grok_key_agents_get_xai_api_key_in_their_own_home(self):
+        self.sign_in_device("grok")
+        done = self.sign_in_key(FAKE_XAI_KEY, "grok")
+        self.assertEqual(done["plan"], "api")
+        by_key = self.env_after_start(self.make_agent("grok", pays="key"))
+        self.assertEqual(by_key["XAI_API_KEY"], FAKE_XAI_KEY)
+        self.assertEqual(by_key["GROK_HOME"], str(self.a.HOMES / "grok-key"))
+        self.assertFalse((self.a.HOMES / "grok-key" / "auth.json").exists(), "no subscription in the key home")
+        toml = (self.a.HOMES / "grok-key" / "config.toml").read_text()
+        self.assertIn("auto_update = false", toml)
+        self.assertIn('[auth]\npreferred_method = "api_key"', toml, "grok's agent mode takes the key only when its config pins auth to it")
+        self.assertNotIn("preferred_method", (self.a.HOMES / "grok" / "config.toml").read_text(), "the subscription home keeps grok.com")
+        self.assertEqual(by_key["GROK_SANDBOX"], "off")
+        self.assertIn("--model,grok-4.7", by_key["BUZZ_ACP_AGENT_ARGS"])
+        by_sub = self.env_after_start(self.make_agent("grok", pays="subscription"))
+        self.assertEqual(by_sub["GROK_HOME"], str(self.a.HOMES / "grok"))
+        self.assertNotIn("XAI_API_KEY", by_sub)
+        row = next(h for h in self.req(op="models")["harnesses"] if h["id"] == "grok")
+        self.assertEqual([m["id"] for m in row["key"]["models"]], ["grok-4.7", "grok-4.5"], "no image model")
+
+    def test_xais_400_for_a_bad_key_is_a_refusal_and_another_400_proves_nothing(self):
+        r, d = self.start_key("grok")
+        self.assertEqual(r["url"], "https://console.x.ai")
+        bad = self.req(op="login.finish", loginId=r["loginId"], code="xai-not-the-right-key-0000000000")
+        self.assertEqual(bad["error"], "xAI did not accept that key. Check it and paste it again.")
+        odd = self.req(op="login.finish", loginId=r["loginId"], code="xai-odd-answer-0000000000000000")
+        self.assertEqual(odd["error"], "xAI could not be reached to check the key. Try again in a moment.")
+        self.assertTrue(d.exists())
+        for harness, service, url in (("claude", "Anthropic", "https://console.anthropic.com/settings/keys"), ("codex", "OpenAI", "https://platform.openai.com/api-keys")):
+            with self.subTest(harness=harness):
+                r, _ = self.start_key(harness)
+                self.assertEqual(r["url"], url)
+                self.assertEqual(self.req(op="login.finish", loginId=r["loginId"], code="sk-not-the-right-key-000000000000")["error"],
+                                 f"{service} did not accept that key. Check it and paste it again.")
+
+    def test_a_key_agent_waits_for_its_key_whatever_the_subscription_says(self):
+        self.sign_in()
+        self.sign_in_device("codex")
+        self.sign_in_device("grok")
+        for harness, label, service in (("claude", "Claude Code", "an Anthropic"), ("codex", "Codex", "an OpenAI"), ("grok", "Grok Build", "a xAI")):
+            with self.subTest(harness=harness):
+                agent = self.make_agent(harness, pays="key")
+                self.assertEqual(self.req(op="start", pubkey=agent.name)["error"],
+                                 f"{label} has no working API key on this machine. Add {service} API key from Buzz first, or set this agent to pay by subscription.")
+                self.assertEqual(self.pays_of(agent), "key")
+                self.assertEqual(self.pays_of(self.make_agent(harness)), "subscription", "the default follows the signed-in subscription")
+
+    def pays_of(self, d):
+        return self.req(op="status", pubkey=d.name)["pays"]
+
+    def test_doctor_names_both_ways_for_every_harness(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out): self.a.print_doctor()
+        for label in ("Claude Code", "Codex", "Grok Build", "Qwen Code"):
+            self.assertIn(f"{label}: signed out (subscription signed out, API key signed out)", out.getvalue())
+
+
 def install_pinned(a, home):
     """Lays out what setup.sh installs, at the versions in machine/pins.json."""
     pins = json.loads((AGENTCTL.parent / "pins.json").read_text())
@@ -1552,7 +1710,7 @@ class Health(DeviceBase):
             self.assertTrue(rows[harness]["access"].startswith("full access"), rows[harness])
         out = io.StringIO()
         with contextlib.redirect_stdout(out): self.a.print_doctor()
-        self.assertIn("Codex: signed out; full access (agent-full-access", out.getvalue())
+        self.assertIn("Codex: signed out (subscription signed out, API key signed out); full access (agent-full-access", out.getvalue())
 
     def test_a_codex_adapter_without_the_full_access_mode_is_a_problem(self):
         (self.a.VENDOR / "acp/node_modules/@agentclientprotocol/codex-acp/dist/index.js").write_text('static Agent = new _AgentMode("agent",')

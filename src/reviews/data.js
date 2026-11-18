@@ -69,7 +69,8 @@ function reviewListed(queue) {
         assetId: review.assetId, reviewTitle: review.title, key: item.key, version: item.version, title: item.title, question: item.question,
         stake: item.stake, age: item.age, brief: item.brief, workType: item.workType, threadId: item.threadId ?? review.threadId ?? null,
         madeBy: item.madeBy ?? review.madeBy ?? null, requestedBy: item.requestedBy ?? review.requestedBy ?? null, job: item.job ?? review.job ?? null,
-        producer: item.producer ?? review.producer ?? null, origin: item.origin ?? review.origin ?? null });
+        producer: item.producer ?? review.producer ?? null, origin: item.origin ?? review.origin ?? null,
+        capture: item.capture && typeof item.capture === "object" ? item.capture : review.capture && typeof review.capture === "object" ? review.capture : null });
     }
   }
   return out;
@@ -108,28 +109,41 @@ function reviewOrigin(review, item) {
 }
 
 /** Who made a review item and what set it off, for its byline:
- * `{ maker: { name, pubkey?, app?, agent }, origin: { kind: job | request |
- * proactive, text, threadId? } }`. Reads Platform Control's structured
- * `producer` and `origin` when present; until then `madeBy` is shown whole
- * (nothing is parsed out of it), with `job`, `requestedBy` and `threadId`. */
+ * `{ maker: { name, pubkey?, signed, app?, person?, personVerified, agent },
+ * origin: { kind: job | request | proactive | unknown, text, threadId? } }`.
+ * Reads Platform Control's `producer` and `origin` (review-artifact slice A):
+ * `pubkey` only when the agent's request was signed (`verified.agentKey`), and
+ * `signed` only then; everything else is as the agent reported it. Without
+ * them, `madeBy` is shown whole (nothing is parsed out of it), with `job`,
+ * `requestedBy` and `threadId`. */
 function reviewByline(review, item) {
   const text = (value, max = 160) => (typeof value === "string" && value.trim() ? plain(value, max) : undefined);
   const key = (value) => (/^[0-9a-f]{64}$/i.test(String(value ?? "")) ? String(value).toLowerCase() : undefined);
   const producer = item?.producer ?? review?.producer;
   const said = item?.origin ?? review?.origin;
   const job = item?.job ?? review?.job;
-  const threadId = text(item?.threadId ?? review?.threadId, 200);
+  const threadId = text(said?.threadId ?? item?.threadId ?? review?.threadId, 200);
   const requestedBy = text(item?.requestedBy ?? review?.requestedBy, 120);
-  const maker = producer && typeof producer === "object"
-    ? { pubkey: key(producer.agentPubkey ?? producer.pubkey), name: text(producer.agentName ?? producer.name ?? producer.person, 80) ?? "Unknown",
-        app: text(producer.app ?? producer.harness, 60), agent: !!(producer.agentPubkey ?? producer.pubkey ?? producer.agentName) }
-    : { name: text(item?.madeBy ?? review?.madeBy, 160) ?? "Unknown maker", agent: false };
+  let maker;
+  if (producer && typeof producer === "object") {
+    const verified = producer.verified ?? {};
+    const pubkey = verified.agentKey === true ? key(producer.agentKey) : undefined;
+    const model = text(producer.model, 60);
+    const app = text(producer.app, 60);
+    maker = { name: text(producer.agent, 80) ?? text(item?.madeBy ?? review?.madeBy, 160) ?? "An agent", agent: true, signed: !!pubkey,
+      ...(pubkey ? { pubkey } : {}),
+      ...(model || app ? { app: model && app ? `${model} via ${app}` : model ?? app } : {}),
+      ...(text(producer.person, 120) ? { person: text(producer.person, 120), personVerified: verified.person === true } : {}) };
+  } else maker = { name: text(item?.madeBy ?? review?.madeBy, 160) ?? "Unknown maker", agent: false, signed: false };
   let origin;
-  if (said && typeof said === "object" && ["job", "request", "proactive"].includes(said.kind)) {
-    origin = { kind: said.kind, text: text(said.label ?? said.text, 120) ?? (said.kind === "job" ? "Scheduled run" : said.kind === "request" ? "Asked for" : "Proactive") };
-  } else if (job && (job.jobName || job.jobId)) origin = { kind: "job", text: `${text(job.jobName, 80) ?? "A job"} · scheduled run` };
-  else if (requestedBy && !/^proactive$/i.test(requestedBy)) origin = { kind: "request", text: `Asked by ${requestedBy}` };
-  else origin = { kind: "proactive", text: "On its own initiative" };
+  const kind = said && typeof said === "object" ? said.kind : undefined;
+  if (kind === "job" || (!kind && job && (job.jobName || job.jobId))) {
+    const run = kind === "job" ? said.job : job;
+    origin = { kind: "job", text: `Scheduled job ${text(run?.jobName, 80) ?? text(run?.jobId, 80) ?? ""}`.trim() };
+  } else if (kind === "request" || (!kind && requestedBy && !/^proactive$/i.test(requestedBy))) {
+    origin = { kind: "request", text: `Asked by ${text(kind === "request" ? said.requestedBy : requestedBy, 120) ?? "someone"}` };
+  } else if (kind === "unknown") origin = { kind: "unknown", text: "What started it was not recorded" };
+  else origin = { kind: "proactive", text: "On the agent's own initiative" };
   if (threadId) origin.threadId = threadId;
   return { maker, origin };
 }
@@ -162,7 +176,7 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
   undoMs = REVIEW_UNDO_MS, timeoutMs = REVIEW_DECIDE_TIMEOUT_MS } = {}) {
   const tokens = new Map(); // item id -> { token, version, expiresAt }: this closure only
   const previews = new Map(); // item id -> { after, before }: { url, contentType }
-  const captures = new Map(); // item id -> { url, contentType }: the platform's picture of the work, when it sends one
+  const captures = new Map(); // item id -> { capture?, beforeCapture? }: the platform's pictures of the page (desktop size)
   const reviews = new Map(); // asset key -> { data, readAt }
   const flights = new Map(); // asset key -> a read in flight
   const businesses = new Map(); // assetId -> businessId (locators only)
@@ -222,8 +236,11 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
       const after = meta?.previews?.[item.key];
       const before = meta?.beforePreviews?.[item.key];
       if (after || before) previews.set(id, { after, before });
-      const capture = meta?.captures?.[item.key]?.desktop ?? meta?.captures?.[item.key];
-      if (typeof capture?.url === "string") captures.set(id, { url: capture.url, contentType: capture.contentType ?? "image/png" });
+      // Captures of the item's page (and of its before page), desktop width.
+      const shot = (entry) => { const link = entry?.desktop ?? entry?.phone; return typeof link?.url === "string" && /^https:\/\//.test(link.url) ? { url: link.url, contentType: link.contentType ?? "image/jpeg" } : null; };
+      const capture = shot(meta?.captures?.[item.key]);
+      const beforeCapture = shot(meta?.beforeCaptures?.[item.key]);
+      if (capture || beforeCapture) captures.set(id, { capture, beforeCapture });
       // A decision the server now shows replaces a receipt still unsure of it.
       const receipt = receipts.get(id);
       if (receipt && item.decision && ["unknown", "conflict"].includes(receipt.state)) receipts.set(id, { ...receipt, state: "saved", decision: item.decision });
@@ -282,28 +299,46 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
 
   /** An image of the item's work as a data URL, read through get_review_file
    * (the MCP origin only): `which` is "after" (the preview) or "before". */
-  const image = (businessId, assetId, key, which = "after") => {
-    const id = reviewItemId(businessId, assetId, key);
-    const cacheKey = `${id}/${which}`;
+  /** A picture behind a link the server shared: read through get_review_file
+   * (the MCP origin; an image part) when its path is a review file; a capture,
+   * which may not be, is shown from its own exact-file link if that read fails. */
+  const pictureFrom = (businessId, assetId, version, link, cacheKey, { direct = false } = {}) => {
     if (images.has(cacheKey)) return images.get(cacheKey);
-    const link = which === "capture" ? captures.get(id) : previews.get(id)?.[which];
     const read = (async () => {
       if (!link?.url || !/^image\//.test(String(link.contentType ?? ""))) return null;
-      // The link names the file; only its path is used, never the link itself.
       const match = String(link.url).match(/^https:\/\/[^/]+\/v\/[^/]+\/(.+)$/);
-      if (!match) return null;
-      const path = match[1].split("/").map((part) => { try { return decodeURIComponent(part); } catch { return part; } }).join("/");
-      const item = cachedReview(businessId, assetId)?.items?.find((entry) => entry.key === key);
-      const result = await call("get_review_file", { businessId, assetId, path, ...(item?.version ? { version: item.version } : {}) });
-      if (result?.isError) return null;
-      const part = (result?.content ?? []).find((entry) => entry?.type === "image" && typeof entry.data === "string");
-      if (!part || !/^image\/(png|jpeg|gif|webp|avif)$/.test(String(part.mimeType))) return null;
-      return `data:${part.mimeType};base64,${part.data}`;
+      if (match) {
+        const path = match[1].split(/[?#]/)[0].split("/").map((part) => { try { return decodeURIComponent(part); } catch { return part; } }).join("/");
+        try {
+          const result = await call("get_review_file", { businessId, assetId, path, ...(version ? { version } : {}) });
+          const part = !result?.isError && (result?.content ?? []).find((entry) => entry?.type === "image" && typeof entry.data === "string");
+          if (part && /^image\/(png|jpeg|gif|webp|avif)$/.test(String(part.mimeType))) return `data:${part.mimeType};base64,${part.data}`;
+        } catch {}
+      }
+      return direct && /^https:\/\//.test(link.url) ? link.url : null;
     })().catch(() => null);
-    if (images.size >= 60) images.delete(images.keys().next().value);
+    if (images.size >= 80) images.delete(images.keys().next().value);
     images.set(cacheKey, read);
-    read.then((src) => { if (src) { if (pictures.size >= 60) pictures.delete(pictures.keys().next().value); pictures.set(cacheKey, src); changed(); } });
+    read.then((src) => { if (src) { if (pictures.size >= 80) pictures.delete(pictures.keys().next().value); pictures.set(cacheKey, src); changed(); } });
     return read;
+  };
+  /** An image of the item's work as a data URL (or a capture's own link):
+   * `which` is "after" (the preview), "before", "capture" or "beforeCapture". */
+  const image = (businessId, assetId, key, which = "after") => {
+    const id = reviewItemId(businessId, assetId, key);
+    const shots = captures.get(id);
+    const link = which === "capture" ? shots?.capture : which === "beforeCapture" ? shots?.beforeCapture : previews.get(id)?.[which];
+    const version = cachedReview(businessId, assetId)?.items?.find((entry) => entry.key === key)?.version;
+    return pictureFrom(businessId, assetId, version, link, `${id}/${which}`, { direct: which === "capture" || which === "beforeCapture" });
+  };
+  /** The capture the queue lists for a review (a later platform slice), once read. */
+  const queuePicture = (entry) => {
+    const link = entry?.capture?.desktop ?? entry?.capture?.phone ?? entry?.capture;
+    if (typeof link?.url !== "string") return null;
+    const cacheKey = `${entry.businessId}/${entry.assetId}/queue-capture`;
+    const ready = pictures.get(cacheKey);
+    if (!ready) void pictureFrom(entry.businessId, entry.assetId, entry.version, { url: link.url, contentType: link.contentType ?? "image/jpeg" }, cacheKey, { direct: true });
+    return ready ?? null;
   };
 
   // ---- deciding ----------------------------------------------------------------
@@ -492,10 +527,12 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
     /** Which picture of the work there is to show: the platform's capture, else an image preview. */
     pictureKind: (businessId, assetId, key) => {
       const id = reviewItemId(businessId, assetId, key);
-      if (captures.has(id)) return "capture";
+      if (captures.get(id)?.capture) return "capture";
       return /^image\//.test(String(previews.get(id)?.after?.contentType ?? "")) ? "after" : null;
     },
     hasBefore: (businessId, assetId, key) => /^image\//.test(String(previews.get(reviewItemId(businessId, assetId, key))?.before?.contentType ?? "")),
+    hasBeforeCapture: (businessId, assetId, key) => !!captures.get(reviewItemId(businessId, assetId, key))?.beforeCapture,
+    queuePicture,
     /** The work's own preview link (a page or file the server shared for
      * showing the work), or null. Never a decision token. */
     preview: (businessId, assetId, key) => {

@@ -249,11 +249,12 @@ function reviewsPart(ctx, bridge) {
     const { maker } = item ? reviewByline(review, item) : { maker: null };
     const profile = maker?.pubkey ? bridge.profile?.(maker.pubkey) : null;
     const kind = item ? store.pictureKind(review.businessId, review.assetId, item.key) : null;
+    const queued = item ? reviewOrder(store.queue).find((entry) => entry.assetId === review.assetId && entry.key === item.key) : null;
     React.useEffect(() => { if (kind) store.image(review.businessId, review.assetId, item.key, kind); }, [kind, item?.key]);
     return h(ui.MessageRow, { title,
       subtitle: state ? `${review.businessName} · ${screens.bylineWords(review, item)} · ${state.text}` : failed ? (failed.code === "elsewhere" ? "Not in your queue" : "Couldn't read it") : "",
       avatar: maker ? h(ui.Avatar, { name: profile?.name || maker.name, picture: profile?.picture, size: "small", shape: maker.agent ? "squircle" : "circle" }) : null,
-      thumbnail: kind ? store.picture(review.businessId, review.assetId, item.key, kind) : null,
+      thumbnail: (queued ? store.queuePicture(queued) : null) ?? (kind ? store.picture(review.businessId, review.assetId, item.key, kind) : null),
       loading: !item && !failed && link.status === "connected", onOpen: open, openLabel: "Open" });
   }
   function ReviewPreview({ url, open }) {

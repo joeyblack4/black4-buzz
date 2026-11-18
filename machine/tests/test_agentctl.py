@@ -3036,7 +3036,7 @@ elif sys.argv[1:3] == ["messages", "send"]:
 """
 
 
-def drop_line(author, at="2026-11-18T16:15:12.441262Z", dm=False, channel="160041bb-c2e2-45a7-b584-2c1ee3f0332e", colour=True):
+def drop_line(author, at="2026-11-18T09:00:12.000000Z", dm=False, channel="6f1c7c1e-1d5b-4c55-9d43-0c1f0b6a2f10", colour=True):
     """The line buzz-acp 0.5.30 writes when its author gate drops an event."""
     target = "\x1b[2mbuzz_acp::inbound_author_gate\x1b[0m\x1b[2m:\x1b[0m" if colour else "buzz_acp::inbound_author_gate:"
     return (f"{at}  INFO {target} inbound author gate \u2014 dropping event channel_id={channel} raw_author={author} "
@@ -3069,7 +3069,7 @@ class DroppedMentions(Base):
         return [c for c in self.buzz_calls() if c["argv"][:2] == ["messages", "send"]]
 
     def message(self, author, at, event_id="9" * 64, dm=False):
-        tags = [["h", "160041bb-c2e2-45a7-b584-2c1ee3f0332e"]] + ([] if dm else [["p", self.d.name]])
+        tags = [["h", "6f1c7c1e-1d5b-4c55-9d43-0c1f0b6a2f10"], ["p", self.d.name]]
         (self.home / "messages.json").write_text(json.dumps([
             {"id": "8" * 64, "pubkey": STAFF[0], "kind": 9, "created_at": at - 30, "content": "earlier", "tags": [["p", self.d.name]]},
             {"id": event_id, "pubkey": author, "kind": 9, "created_at": at, "content": "@Agent hello", "tags": tags}]))
@@ -3152,7 +3152,7 @@ class DroppedMentions(Base):
         with open(self.log, "a") as f: f.write(drop_line(NEWCOMER))
         self.a.supervise_pass(now + 1)
         self.assertEqual(spawned, [self.d.name])
-        with open(self.log, "a") as f: f.write(drop_line(NEWCOMER, at="2026-11-18T16:15:40.000000Z"))
+        with open(self.log, "a") as f: f.write(drop_line(NEWCOMER, at="2026-11-18T09:00:40.000000Z"))
         self.a.supervise_pass(now + 2)
         self.assertEqual(spawned, [self.d.name], "not again within the minute")
         self.a.supervise_pass(now + self.a.DROP_EVERY + 3)
@@ -3160,7 +3160,7 @@ class DroppedMentions(Base):
         self.a.supervise_pass(now + 2 * self.a.DROP_EVERY + 4)
         self.assertEqual(len(spawned), 2, "nothing new: no ask")
         view = self.req(op="status", pubkey=self.d.name)["audience"]["unheard"]
-        self.assertEqual((view["count"], view["lastAt"]), (2, int(self.a.log_stamp("2026-11-18T16:15:40.000000Z"))))
+        self.assertEqual((view["count"], view["lastAt"]), (2, int(self.a.log_stamp("2026-11-18T09:00:40.000000Z"))))
 
     def test_a_newly_linked_person_is_heard_after_the_turns_in_flight_and_told_so_once(self):
         self.link(NEWCOMER)
@@ -3168,7 +3168,7 @@ class DroppedMentions(Base):
         self.message(NEWCOMER, at)
         deferred = []
         self.a.defer_apply = lambda d, audience=False: deferred.append((d.name, audience))
-        drop = {"author": NEWCOMER, "channel": "160041bb-c2e2-45a7-b584-2c1ee3f0332e", "at": at, "dm": False}
+        drop = {"author": NEWCOMER, "channel": "6f1c7c1e-1d5b-4c55-9d43-0c1f0b6a2f10", "at": at, "dm": False}
         (self.d / "drops.json").write_text(json.dumps({"offset": 0, "pending": [drop], "events": [drop]}))
         (self.d / "audience.json").write_text(json.dumps({**json.loads((self.d / "audience.json").read_text()), "tried": 0}))
         self.a.turns_in_flight = lambda d: 2  # two parallel sessions busy
@@ -3179,14 +3179,14 @@ class DroppedMentions(Base):
         self.assertEqual(len(sends), 1)
         argv = sends[0]["argv"]
         self.assertEqual(argv[argv.index("--reply-to") + 1], "9" * 64, "a thread reply to the dropped message")
-        self.assertEqual(argv[argv.index("--channel") + 1], "160041bb-c2e2-45a7-b584-2c1ee3f0332e")
+        self.assertEqual(argv[argv.index("--channel") + 1], "6f1c7c1e-1d5b-4c55-9d43-0c1f0b6a2f10")
         self.assertEqual(argv[argv.index("--content") + 1], self.a.SIGN_SOON)
         self.assertEqual((sends[0]["key"], sends[0]["relay"]), (True, "https://relay.example.com"), "as the agent, on its community")
         for word in (STAFF[0], "staff", "list", "allow"):
             self.assertNotIn(word, self.a.SIGN_SOON.lower(), "nothing about who else it serves")
         # A second mention within the period: no second line.
         (self.d / "drops.json").write_text(json.dumps({**json.loads((self.d / "drops.json").read_text()),
-                                                      "pending": [{"author": NEWCOMER, "channel": "160041bb-c2e2-45a7-b584-2c1ee3f0332e", "at": at + 60, "dm": False}]}))
+                                                      "pending": [{"author": NEWCOMER, "channel": "6f1c7c1e-1d5b-4c55-9d43-0c1f0b6a2f10", "at": at + 60, "dm": False}]}))
         self.message(NEWCOMER, at + 60, event_id="7" * 64)
         self.a.handle_dropped(self.d)
         self.assertEqual(len(self.sends()), 1, "once per person per period")
@@ -3215,18 +3215,52 @@ class DroppedMentions(Base):
         at = int(time.time()) - 5
         self.message(STAFF[0], at, dm=True)
         (self.d / "drops.json").write_text(json.dumps({"offset": 0, "events": [],
-                                                      "pending": [{"author": STAFF[0], "channel": "160041bb-c2e2-45a7-b584-2c1ee3f0332e", "at": at, "dm": True}]}))
+                                                      "pending": [{"author": STAFF[0], "channel": "6f1c7c1e-1d5b-4c55-9d43-0c1f0b6a2f10", "at": at, "dm": True}]}))
         self.a.handle_dropped(self.d)
         sends = self.sends()
         self.assertEqual(len(sends), 1)
         self.assertEqual(sends[0]["argv"][sends[0]["argv"].index("--content") + 1], self.a.SIGN_DM)
         self.assertEqual(len(self.calls()), 1, "already listed: no need to ask again")
 
+    def test_a_sign_is_noted_before_it_is_sent_so_it_never_goes_twice(self):
+        write_exe(self.a.BIN / "buzz", FAKE_BUZZ_CLI.replace('print(json.dumps({{"event_id": "f" * 64, "accepted": True}}))', 'pass'))
+        self.link(NEWCOMER)
+        self.a.defer_apply = lambda d, audience=False: None
+        (self.d / "audience.json").write_text(json.dumps({**json.loads((self.d / "audience.json").read_text()), "tried": 0}))
+        for n in range(2):
+            at = int(time.time()) + 1
+            self.message(NEWCOMER, at, event_id=str(7 + n) * 64)
+            (self.d / "drops.json").write_text(json.dumps({**self.a.drops_state(self.d), "offset": 0,
+                "pending": [{"author": NEWCOMER, "channel": "6f1c7c1e-1d5b-4c55-9d43-0c1f0b6a2f10", "at": at, "dm": False}]}))
+            self.a.handle_dropped(self.d)
+        self.assertEqual(len(self.sends()), 1, "a send that prints nothing still counts as sent")
+        self.assertIn(f"{NEWCOMER}:soon", json.loads((self.d / "signed.json").read_text()))
+
+    def test_a_drop_waits_for_a_list_asked_after_it(self):
+        # The list was asked a moment before the person linked and mentioned:
+        # no ask now (once a minute at most), but the drop is not forgotten.
+        self.link(NEWCOMER)
+        state = json.loads((self.d / "audience.json").read_text())
+        at = int(time.time()) + 1
+        (self.d / "audience.json").write_text(json.dumps({**state, "tried": at - 10, "at": at - 10, "entries": [{"pubkey": k, "kind": "staff"} for k in STAFF if k != NEWCOMER]}))
+        self.message(NEWCOMER, at)
+        drop = {"author": NEWCOMER, "channel": "6f1c7c1e-1d5b-4c55-9d43-0c1f0b6a2f10", "at": at, "dm": False}
+        (self.d / "drops.json").write_text(json.dumps({"offset": 0, "events": [drop], "pending": [drop]}))
+        self.a.defer_apply = lambda d, audience=False: None
+        self.a.handle_dropped(self.d)
+        self.assertEqual(self.sends(), [])
+        self.assertEqual(self.a.drops_state(self.d)["pending"], [drop], "kept for the next run")
+        state = json.loads((self.d / "audience.json").read_text())
+        (self.d / "audience.json").write_text(json.dumps({**state, "tried": at - 120}))  # a minute on
+        self.a.handle_dropped(self.d)
+        self.assertEqual(len(self.sends()), 1, "asked, found, told")
+        self.assertEqual(self.a.drops_state(self.d)["pending"], [])
+
     def test_no_message_found_means_no_reply(self):
         self.link(NEWCOMER)
         (self.home / "messages.json").write_text("[]")
         (self.d / "drops.json").write_text(json.dumps({"offset": 0, "events": [],
-                                                      "pending": [{"author": NEWCOMER, "channel": "160041bb-c2e2-45a7-b584-2c1ee3f0332e", "at": int(time.time()), "dm": False}]}))
+                                                      "pending": [{"author": NEWCOMER, "channel": "6f1c7c1e-1d5b-4c55-9d43-0c1f0b6a2f10", "at": int(time.time()), "dm": False}]}))
         self.a.defer_apply = lambda d, audience=False: None
         self.a.handle_dropped(self.d)
         self.assertEqual(self.sends(), [])

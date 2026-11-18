@@ -1346,7 +1346,7 @@ test("the owner sees the mentions an agent's gate dropped, and whether they are 
   const time = () => "16:22";
   assert.equal(unheardText(undefined), "");
   assert.equal(unheardText({ count: 0 }), "");
-  assert.equal(unheardText({ count: 3, lastAt: 1795018967, waiting: 1 }, { time }), "3 dropped in the last day, last at 16:22. 1 heard after its restart.");
-  assert.equal(unheardText({ count: 1, lastAt: 1795018967, waiting: 0 }, { time }), "1 dropped in the last day, last at 16:22.");
+  assert.equal(unheardText({ count: 3, lastAt: 1795000000, waiting: 1 }, { time }), "3 dropped in the last day, last at 16:22. 1 heard after its restart.");
+  assert.equal(unheardText({ count: 1, lastAt: 1795000000, waiting: 0 }, { time }), "1 dropped in the last day, last at 16:22.");
   assert.equal(unheardText({ count: 2, waiting: 2 }, { time }), "2 dropped in the last day. 2 heard after its restart.");
 });

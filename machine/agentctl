@@ -80,7 +80,7 @@ Black 4 MCP: when setup.sh has installed the connector (mcp/black4), every agent
 gets it as buzz-acp's MCP server. It signs each request with the agent's own key
 and owner attestation, so there is nothing to sign in to and no per-agent setting.
 """
-import calendar, fcntl, hashlib, json, os, re, secrets, shutil, signal, socket, subprocess, sys, time
+import calendar, contextlib, fcntl, hashlib, json, os, re, secrets, shutil, signal, socket, subprocess, sys, time
 from pathlib import Path
 
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -1723,8 +1723,11 @@ def audience_line(name, view):
 #     thread reply to the dropped message; never the model) only to a person
 #     Platform Control names for this agent, at most once per person per
 #     SIGN_EVERY: someone just linked, behind a gate that has not restarted
-#     yet (SIGN_SOON), or someone it serves who wrote it a direct message,
-#     which buzz-acp answers from its owner only (SIGN_DM). Anyone else, an
+#     yet (SIGN_SOON), or someone it serves who mentioned it in a direct
+#     message, which buzz-acp answers from its owner only (SIGN_DM). Only a
+#     message that mentions the agent gets a line. A drop by someone not on
+#     the kept list waits (DROP_PATIENCE at most) for a list asked after it,
+#     so a skipped or failed ask is tried again. Anyone else, an
 #     unlinked key, a customer of another business, another agent, gets
 #     nothing: the runner cannot tell them apart and never says who is on
 #     the list. Their drops show in status and list ("unheard").
@@ -1733,6 +1736,7 @@ DROP_LINE = re.compile(rb"^(\S+)\s.*inbound author gate .{1,4} dropping event ch
 DROP_EVERY = 60            # seconds between `agentctl dropped` runs for one agent
 DROP_REFRESH = 60          # a list asked this recently is not asked again for a drop
 DROP_KEEP = 24 * 3600      # how long status shows a drop
+DROP_PATIENCE = 15 * 60    # a drop waits this long at most for a list asked after it
 SIGN_EVERY = 6 * 3600      # at most one line per person and kind this often
 DROP_FIND = 180            # seconds around a drop the dropped message is looked for
 SIGN_SOON = "I can't pick up that message, but I will be able to in a few minutes. Mention me again then."
@@ -1750,11 +1754,24 @@ def drops_state(d):
     return read_json(d / "drops.json", {}) or {}
 
 
+@contextlib.contextmanager
+def drops_lock(d):
+    """Held for each read-modify-write of drops.json, by the supervisor and
+    `agentctl dropped` alike (briefly: never across a network call)."""
+    with open(d / "drops.state.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
 def watch_drops(d, now=None):
     """Reads what agent.log gained since the last look for the gate's drops.
     Returns whether a drop is waiting to be handled. The first look starts at
     the log's end: a drop from before the watch is not answered."""
     now = now or time.time()
+    with drops_lock(d): return _watch_drops(d, now)
+
+
+def _watch_drops(d, now):
     state = drops_state(d)
     size = log_size(d)
     if "offset" not in state:
@@ -1805,14 +1822,15 @@ def runner_buzz(d, s, args, timeout=20):
     except (OSError, subprocess.TimeoutExpired):
         return None
     if done.returncode != 0: return None
-    try: return json.loads(done.stdout or "null")
-    except ValueError: return None
+    try: parsed = json.loads(done.stdout or "null")
+    except ValueError: parsed = None
+    return True if parsed is None else parsed  # exit 0 is done, whatever it printed
 
 
 def dropped_message(d, s, drop):
     """The id of the message a drop was about: the author's latest in that
-    channel around the drop's time that mentions this agent (a direct message
-    need not). None when it cannot be found."""
+    channel around the drop's time that mentions this agent. None when it
+    cannot be found."""
     at = int(drop.get("at") or 0)
     rows = runner_buzz(d, s, ["messages", "get", "--channel", drop["channel"], "--since", str(at - DROP_FIND), "--limit", "100"])
     best = None
@@ -1820,36 +1838,46 @@ def dropped_message(d, s, drop):
         if not isinstance(row, dict) or row.get("pubkey") != drop["author"] or not HEX64.match(str(row.get("id") or "")): continue
         when = row.get("created_at") if isinstance(row.get("created_at"), (int, float)) else None
         if when is None or not at - DROP_FIND <= when <= at + 5: continue
-        mentions = any(isinstance(tag, list) and tag[:2] == ["p", d.name] for tag in row.get("tags") or [])
-        if not (mentions or drop.get("dm")): continue
+        # Only a message that names the agent: never a line into a conversation
+        # (a group direct message too) that was not addressed to it.
+        if not any(isinstance(tag, list) and tag[:2] == ["p", d.name] for tag in row.get("tags") or []): continue
         if best is None or when >= best[0]: best = (when, row["id"])
     return best[1] if best else None
 
 
 def handle_dropped(d):
     """`agentctl dropped <pubkey>`: what the gate dropped since the last run,
-    once (see "a mention the gate drops"). One at a time per agent."""
+    once (see "a mention the gate drops"). One at a time per agent. A drop by
+    someone not on the kept list stays pending until a list asked after it
+    has arrived, so a skipped or failed ask is tried again on the next run."""
     lock = open(d / "drops.lock", "a")
     try:
         try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError: return
-        state = drops_state(d)
-        pending = [p for p in state.get("pending") or [] if isinstance(p, dict) and HEX64.match(str(p.get("author") or ""))]
-        write_private(d / "drops.json", json.dumps({**state, "pending": []}))
+        with drops_lock(d):
+            pending = [p for p in drops_state(d).get("pending") or [] if isinstance(p, dict) and HEX64.match(str(p.get("author") or ""))]
         if not pending: return
         s = read_settings(d)
         now = time.time()
+        listed = respond_to(s) in AUDIENCE_MODES
         audience = audience_state(d)
-        keys = set(audience_keys(s, audience.get("entries") or [])) if respond_to(s) in AUDIENCE_MODES else set()
+        keys = set(audience_keys(s, audience.get("entries") or [])) if listed else set()
         # Someone not on the kept list may have just been added: ask now
         # (a changed list restarts the agent: at once when idle, else once no
         # turn is in flight). A listed person's direct message needs no ask.
-        if respond_to(s) in AUDIENCE_MODES and any(p["author"] not in keys for p in pending) and now - (audience.get("tried") or 0) >= DROP_REFRESH:
+        if listed and any(p["author"] not in keys for p in pending) and now - (audience.get("tried") or 0) >= DROP_REFRESH:
             audience = refresh_audience(d)
             keys = set(audience_keys(s, audience.get("entries") or []))
+        answered = audience.get("at") or 0  # when the kept list last came back
+        done, keep = [], []
+        for p in pending:
+            # (The 10-minute refresh covers one older than DROP_PATIENCE.)
+            if listed and p["author"] not in keys and answered < (p.get("at") or 0) and now - (p.get("at") or 0) < DROP_PATIENCE: keep.append(p)
+            else: done.append(p)
         latest = {}
-        for p in pending: latest[(p["author"], bool(p.get("dm")))] = p  # one line per person and kind
-        signed = {k: v for k, v in (state.get("signed") or {}).items() if isinstance(v, (int, float)) and now - v < SIGN_EVERY}
+        for p in done: latest[(p["author"], bool(p.get("dm")))] = p  # one line per person and kind
+        # Only `agentctl dropped` writes signed.json, under drops.lock.
+        signed = {k: v for k, v in (read_json(d / "signed.json", {}) or {}).items() if isinstance(v, (int, float)) and now - v < SIGN_EVERY}
         served = {}
         for (author, dm), p in latest.items():
             served[author] = author in keys
@@ -1858,14 +1886,18 @@ def handle_dropped(d):
             if f"{author}:{kind}" in signed: continue
             event = dropped_message(d, s, p)
             if not event: continue
-            sent = runner_buzz(d, s, ["messages", "send", "--channel", p["channel"], "--reply-to", event,
-                                      "--content", SIGN_DM if dm else SIGN_SOON])
-            if sent is not None:
-                signed[f"{author}:{kind}"] = now
+            # Noted before it is sent: a send that posts and then times out
+            # is never sent twice.
+            signed[f"{author}:{kind}"] = now
+            write_private(d / "signed.json", json.dumps(signed))
+            if runner_buzz(d, s, ["messages", "send", "--channel", p["channel"], "--reply-to", event, "--content", SIGN_DM if dm else SIGN_SOON]) is not None:
                 log_line("supervisor", f"told {author[:8]} that {d.name[:8]} {'answers its owner only by direct message' if dm else 'will hear them after its restart'}")
-        state = drops_state(d)  # the supervisor may have written meanwhile
-        events = [{**e, **({"served": served[e["author"]]} if e.get("author") in served else {})} for e in state.get("events") or [] if isinstance(e, dict)]
-        write_private(d / "drops.json", json.dumps({**state, "events": events, "signed": signed}))
+        with drops_lock(d):
+            state = drops_state(d)  # the supervisor may have added drops meanwhile
+            handled = {json.dumps(p, sort_keys=True) for p in done}
+            rest = [p for p in state.get("pending") or [] if json.dumps(p, sort_keys=True) not in handled]
+            events = [{**e, **({"served": served[e["author"]]} if e.get("author") in served else {})} for e in state.get("events") or [] if isinstance(e, dict)]
+            write_private(d / "drops.json", json.dumps({**state, "events": events, "pending": rest}))
     finally:
         lock.close()
 

@@ -253,7 +253,8 @@ export function fakeReviews({ decide = ["ok"], cardClient = true, needsBusiness 
     blocked: [], stalled: [] });
   self.handle = (name, args = {}) => {
     self.calls.push({ name, args });
-    if (name === "review_queue") return data(self.queue());
+    // The queue's pictures stay out of what a model reads: only in _meta, by assetId.
+    if (name === "review_queue") return data(self.queue(), { captures: { [self.review.assetId]: { desktop: { url: "https://content.example.test/v/grant-queue/_captures/menu-1440.jpg", expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString(), contentType: "image/jpeg" } } } });
     if (name === "open_review") {
       if (!args.businessId && needsBusiness) return { error: { code: -32602, message: "MCP error -32602: businessId is required" } };
       if (args.assetId !== self.review.assetId || (args.businessId && args.businessId !== self.review.businessId)) return refusal("review_not_found", "No review was found.");

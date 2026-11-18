@@ -138,3 +138,15 @@ test("the message card: one card for every review link in a message, each with i
   assert.match(a.label(card), /Change the hero\?.*Crumb & Co · copy-bot · Mira · Asked by Weekly refresh · Waiting for you.*Change the price\?/, "question, business, who made it and what set it off, live state");
   assert.equal(a.expand(a.registered.accessory.component({ message: { content: "no links here" }, open: () => true })), null);
 });
+
+test("the queue the badge polls carries each review's capture into the queue rows, from _meta", async (t) => {
+  const a = await app(t);
+  const queueView = () => a.expand(a.registered.panel.component({ target: "https://app.black4.ai/reviews" }));
+  queueView();
+  await settle(); await settle();
+  const view = queueView();
+  const picture = a.find(view, (node) => node.type === "img" && /^data:image\/png;base64,|^https:\/\//.test(String(node.props.src)));
+  assert.ok(picture, "a row shows the review's capture");
+  assert.ok(a.reviews.calls.some((call) => call.name === "get_review_file" && call.args.path === "_captures/menu-1440.jpg"), "read through the MCP");
+  assert.match(String(picture.props.src), /^data:image\//, "the MCP read it, so the grant link itself is not what the row shows");
+});

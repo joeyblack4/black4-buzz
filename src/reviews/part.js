@@ -115,6 +115,11 @@ function reviewsPart(ctx, bridge) {
     const [picked, setPicked] = React.useState(() => new Set());
     const [bulk, setBulk] = React.useState(null); // { ids } while approving together
     const setEntry = (entry) => setView({ entry });
+    // The first waiting item is open from the start: one less click per session.
+    const first = reviewOrder(queue)[0];
+    React.useEffect(() => {
+      if (!view.entry && first && !view.filter) setView({ entry: { businessId: first.businessId, assetId: first.assetId, itemKey: first.key } });
+    }, [first?.id]);
     const step = useStepping(current.entry, setEntry);
     surface = { next: step.next, previous: step.previous };
     const order = reviewOrder(queue);
@@ -147,7 +152,7 @@ function reviewsPart(ctx, bridge) {
       picked: live, onPick: pick, filter: current.filter, onFilter: (filter) => setView({ filter }) });
     const detail = current.entry
       ? h(ReviewItem, { key: "item", entry: current.entry, step, onCommand, frame: true })
-      : h(ui.EmptyState, { glyph: "decisions", title: queue && order.length ? "Choose a decision" : "Nothing to decide", frame: "none" });
+      : link.status === "connected" && queue ? h(ui.EmptyState, { glyph: "decisions", title: order.length ? "Choose a decision" : "Nothing to decide", frame: "none" }) : null;
     return h(ui.Page, { label: "Reviews", fill: true, header: h(ui.PanelHeader, { title: "Reviews", actions: [h(ui.IconButton, { key: "refresh", label: "Refresh", glyph: "refresh", large: true, onClick: () => bridge.queue.refresh() })] }),
       onFocus: focusIn, onBlur: focusOut },
       toolbar,
@@ -288,6 +293,7 @@ function reviewsPart(ctx, bridge) {
   shortcut("previous", "Previous decision", [{ key: "k" }, { key: "ArrowUp" }], () => surface?.previous?.(), () => !!surface?.previous);
   shortcut("approve", "Approve this decision", { key: "a" }, () => commands?.approve?.(), () => !!commands?.approve);
   shortcut("changes", "Ask for changes", { key: "c" }, () => commands?.changes?.(), () => !!commands?.changes);
+  shortcut("reject", "Reject", { key: "r" }, () => commands?.reject?.(), () => !!commands?.reject);
   shortcut("undo", "Undo the decision", { key: "z", mod: true }, () => commands?.undo?.(), () => !!commands?.undo);
 
   // ---- the queue the badge already polls: notifications --------------------------

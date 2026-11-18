@@ -366,20 +366,45 @@ yet.
 
 ## Reviews
 
-Only `https://app.black4.ai/reviews` and `/r/:assetId` links match the panel.
-The native brief reads through the signed-in MCP account, with access enforced
-by the server: the exact action, the recommendation, current and proposed,
-consequences, provenance and decision state. The queue belongs to the account
-and is never inferred from a channel name. A link is a locator and grants
-nothing. A link to an older version is refused, not substituted.
+Reviews is native in Buzz: the dock page, the side panel, a card under each
+message that links reviews, a **Decisions** section in the Team sidebar and two
+notification switches (a decision waiting; approved work blocked). It never
+opens the Black 4 Reviews website. Its source is `src/reviews/`, stamped into
+`plugins/black4/plugin.js` by `npm run build`, and it starts in its own child
+scope, so a fault there is one line in **Settings → Black 4** and never stops the
+MCP connection or the agent tools.
 
-The Reviews dock page opens Black 4's decision inbox in Buzz's embedded
-browser, in a website session named `black4-reviews` that is separate from the
-MCP sign-in. Decisions are recorded there, by the person. Where Buzz has no
-embedded browser (today, anything but macOS), the page shows the native queue
-and brief, and "View work & decide" is an ordinary web link. A remembered
-website sign-in needs macOS 14 or newer. Buzz labels the embedded browser a
-preview API; it has no popups or downloads.
+- **Work first.** The question, the stake and facts as chips, then the change
+  itself (fields as Now and After, text as a word diff, a list, before and
+  after images, or the finished page), and the recommendation in one line.
+  Why, evidence, provenance and the pinned request sit in one closed
+  **Details**.
+- **Decide in place.** Approve, Ask for changes and Reject sit in a bar at the
+  bottom; the last two take feedback in place. A decision waits 8 seconds for
+  **Undo**; nothing reaches Black 4 before then. Each item then shows its own
+  receipt: saved, changed (a newer version or someone else's decision, with
+  **Load the new version**), failed (**Try again**), or unconfirmed (read again
+  before anything is claimed). Approval is never shown as done: the item's own
+  execution status says waiting, running, blocked or done.
+- **Fast.** The page opens on the first waiting item. **J**/**K** or the arrows
+  step through everything waiting, in queue order; **A** approves, **C** asks
+  for changes, **R** rejects; a saved decision moves on by itself. Items of one
+  business and one kind of work sit together. Buzz has no swipe gesture, so
+  neither does Reviews.
+- **Bulk approve.** Pick items in the queue (nothing is picked for you), then
+  **Approve N**. Each is still its own decision with its own token and receipt;
+  a partial failure shows per item. Ask for changes and Reject stay one at a
+  time.
+
+A link is a locator and grants nothing; the server checks every read. Only this
+plugin's Reviews code calls `decide_review_item`, only after a person's click
+or key, with the single-use decision token `open_review` hands it in `_meta`.
+Tokens live in memory inside Reviews: never logged, stored, rendered or put in
+a URL. Agents are never offered an app-only tool (`_meta.ui.visibility`
+without `"model"`, or `decide_review_item`, `void_review`, `restore_review` by
+name), and are refused one directly or through `call_tool`. When Black 4 issues
+no token on this connection, the bar says deciding isn't available yet, with
+**Retry**.
 
 ## Everyone in a channel reaches its agents
 

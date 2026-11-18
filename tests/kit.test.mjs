@@ -55,7 +55,7 @@ test("kit: each part draws with Buzz's classes, and Pill draws Buzz's popup or t
     useState: (v) => [v, () => {}], useRef: (current) => ({ current }), useId: () => "id", useEffect() {}, useLayoutEffect() {} };
   const ui = loadKit()(React);
   assert.deepEqual(Object.keys(ui).sort(), ["Actions", "Alert", "Button", "Caption", "ChangeTable", "Checkbox", "Chip", "ChipRow", "Code", "CodeColumn", "Column", "CountBadge",
-    "DecisionBar", "DiffText", "Disclosure", "Dot", "EmptyState", "ErrorLine", "Failure", "Fill", "Glyph", "Group", "Header", "Heading", "ICON", "IconButton", "Input", "Line", "Lines",
+    "DecisionBar", "DiffText", "Disclosure", "Dot", "EmptyState", "ErrorLine", "Failure", "Fill", "Frame", "Glyph", "Group", "Header", "Heading", "ICON", "IconButton", "Input", "Line", "Lines",
     "LinkChip", "ListGroup", "MediaPair", "MessageCard", "MessageRow", "Native", "NavItem", "Note", "Notice", "OneTimeCode", "Page", "PanelBody", "PanelHeader", "Paragraph", "Pill",
     "Popup", "Pre", "Row", "SectionTitle", "SelectRow", "Skeleton", "Spinner", "Split", "Stack", "Status", "Strong", "Subview", "Surface", "Switch", "SwitchRow", "Tabs", "TextField",
     "Title", "Toolbar", "VARIANTS", "Value"]);

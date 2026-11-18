@@ -339,7 +339,7 @@ function buzzUi(React, { nativeSelect = false } = {}) {
   /** A column of sections, cards or fields. `as: "form"` makes it the form
    * (with `onSubmit`); gap 4 between sections, 2 within a field. */
   const Stack = ({ as = "div", gap, onSubmit, children }) =>
-    h(as, { className: GAPS[one(VARIANTS.Stack.gap, gap)], onSubmit }, ...each(children));
+    h(as, { className: GAPS[one(VARIANTS.Stack.gap, gap)], onSubmit, style: { gridTemplateColumns: "minmax(0, 1fr)" } }, ...each(children));
   /** Builderlab's sign-in column: lines and a button, left-aligned. */
   const Column = ({ gap, children }) =>
     h("div", { "data-buzz-ui": "", className: one(VARIANTS.Column.gap, gap) === 2 ? "flex flex-col items-start gap-2" : "flex flex-col items-start gap-4" }, ...each(children));
@@ -522,7 +522,7 @@ function buzzUi(React, { nativeSelect = false } = {}) {
   /** One of the kit's icons on its own, as Buzz draws a 16px icon (a sidebar section's mark). */
   const Glyph = ({ name, size = 16 }) => icon(ICON[name] ?? ICON.check, size);
   /** Chips in a row that wraps. */
-  const ChipRow = ({ children }) => h("div", { className: "flex flex-wrap items-center gap-2" }, ...each(children));
+  const ChipRow = ({ children }) => h("div", { className: "flex flex-wrap items-center gap-2", style: { minWidth: 0 } }, ...each(children));
 
   /** Diffs' card (bundled/diffs, Diffs.module.css `.card`/`.fileHeader`):
    * the frame around a change. */
@@ -530,12 +530,12 @@ function buzzUi(React, { nativeSelect = false } = {}) {
   const cardHeader = { display: "flex", alignItems: "center", gap: "var(--space-2)", padding: "var(--space-2) var(--space-3)", background: "var(--surface-inset)" };
   /** Diffs' insert and delete fills (`--diff-code-insert/delete-background-color`):
    * a tint on the words, never red text (red means broken). */
-  const RUN = { added: { background: "var(--affordance-success)", borderRadius: "var(--space-half)" },
+  const RUN = { added: { background: "var(--affordance-success)", borderRadius: "var(--space-half)", textDecoration: "none" },
     removed: { background: "var(--affordance-danger)", borderRadius: "var(--space-half)", textDecoration: "line-through" } };
   /** A word diff as Diffs draws inserted and deleted code: `runs` of
    * { kind: same | added | removed, text }, under its `label`. */
   const DiffText = ({ label, runs }) =>
-    h("figure", { "data-buzz-ui": "", style: { ...card, margin: 0 } },
+    h("figure", { style: { ...card, margin: 0 } },
       label ? h("figcaption", { className: "text-caption text-subtle", style: cardHeader }, label) : null,
       h("p", { className: "m-0 text-body", style: { padding: "var(--space-3)", whiteSpace: "pre-wrap", overflowWrap: "anywhere" } },
         ...runs.map((run, index) => run.kind === "same" ? h(Fragment, { key: index }, run.text)
@@ -591,7 +591,7 @@ function buzzUi(React, { nativeSelect = false } = {}) {
   const Checkbox = ({ checked, onCheckedChange, label, disabled, size = "md" }) =>
     h("button", { type: "button", role: "checkbox", "aria-checked": !!checked, "aria-label": label, disabled,
         "data-buzz-ui": "", className: "buzz-checkbox", "data-size": size === "sm" ? "sm" : "md",
-        "data-checked": checked ? "" : undefined, "data-unchecked": checked ? undefined : "", "data-disabled": disabled ? "" : undefined,
+        "data-checked": checked ? "" : undefined, "data-disabled": disabled ? "" : undefined,
         onClick: (event) => { event.stopPropagation(); if (!disabled) onCheckedChange(!checked); } },
       checked ? h("span", { "aria-hidden": true, style: { display: "flex" } }, icon(ICON.check, size === "sm" ? 12 : 14)) : null);
 
@@ -641,6 +641,10 @@ function buzzUi(React, { nativeSelect = false } = {}) {
       narrow && !showing ? null : h("div", { style: { ...pane, flex: 1 } }, detail));
   };
 
+  /** The finished work as a page, in Diffs' card (`.preview`: a bounded,
+   * scrolling frame) with an embedded view inside. */
+  const Frame = ({ label, children }) =>
+    h("div", { "data-buzz-ui": "", role: "group", "aria-label": label, style: { ...card, display: "flex", height: "min(28rem, 60vh)", minHeight: "16rem" } }, ...each(children));
   /** A message's card (Diffs' DiffMessage card): a quiet frame around rows. */
   const MessageCard = ({ label, children }) =>
     h("div", { "data-buzz-ui": "", role: "group", "aria-label": label, style: { ...card, display: "grid" } }, ...each(children));
@@ -682,7 +686,7 @@ function buzzUi(React, { nativeSelect = false } = {}) {
 
   return { VARIANTS, SectionTitle, Group, Row, Button, Input, Switch, SwitchRow, Pill, Popup, Native, TextField, Stack, Column, Actions, Note, ErrorLine, Spinner, Status, Value, Alert, Code,
     Header, IconButton, PanelHeader, Page, Subview, Surface, PanelBody, Fill, Toolbar, EmptyState, NavItem, Tabs, Disclosure, CountBadge, Dot, LinkChip, OneTimeCode, CodeColumn, Failure, Notice,
-    Glyph, Chip, ChipRow, DiffText, ChangeTable, MediaPair, DecisionBar, Skeleton, Checkbox, SelectRow, ListGroup, Split, MessageCard, MessageRow,
+    Glyph, Frame, Chip, ChipRow, DiffText, ChangeTable, MediaPair, DecisionBar, Skeleton, Checkbox, SelectRow, ListGroup, Split, MessageCard, MessageRow,
     Title, Heading, Paragraph, Caption, Strong, Lines, Line, Pre, ICON };
 }
 // ---- end buzz-ui kit ----

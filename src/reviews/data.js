@@ -58,6 +58,10 @@ const reviewAssetKey = (businessId, assetId) => `${businessId}/${assetId}`;
 /** Everything waiting, in queue order, one entry per item: what next and
  * previous step through. Approved work that is blocked or stalled is not here. */
 function reviewOrder(queue) {
+  return reviewGroups(queue).flatMap((group) => group.items);
+}
+/** Every waiting item in the order the server listed them. */
+function reviewListed(queue) {
   const out = [];
   for (const review of queue?.reviews ?? []) {
     for (const item of review.items ?? []) {
@@ -72,9 +76,16 @@ function reviewOrder(queue) {
 /** The queue grouped by business, in the order businesses first appear. */
 function reviewGroups(queue) {
   const groups = new Map();
-  for (const entry of reviewOrder(queue)) {
+  for (const entry of reviewListed(queue)) {
     if (!groups.has(entry.businessId)) groups.set(entry.businessId, { businessId: entry.businessId, businessName: entry.businessName, items: [] });
     groups.get(entry.businessId).items.push(entry);
+  }
+  // Similar work side by side: within a business, items of one work type
+  // together, in the order each type first waits.
+  for (const group of groups.values()) {
+    const first = new Map();
+    group.items.forEach((entry, index) => { if (!first.has(entry.workType)) first.set(entry.workType, index); });
+    group.items = group.items.map((entry, index) => ({ entry, index })).sort((a, b) => first.get(a.entry.workType) - first.get(b.entry.workType) || a.index - b.index).map(({ entry }) => entry);
   }
   return [...groups.values()];
 }
@@ -423,6 +434,12 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
     get revision() { return revision; },
     get queue() { return queue; },
     noteQueue, readQueue, open, cachedReview, canDecide, image,
+    /** The work's own preview link (a page or file the server shared for
+     * showing the work), or null. Never a decision token. */
+    preview: (businessId, assetId, key) => {
+      const link = previews.get(reviewItemId(businessId, assetId, key))?.after;
+      return typeof link?.url === "string" && /^https:\/\//.test(link.url) && !/^image\//.test(String(link.contentType ?? "")) ? link.url : null;
+    },
     receipt: (id) => receipts.get(id) ?? null,
     receipts: () => [...receipts.values()],
     propose, undo, retry, recheck, clear,

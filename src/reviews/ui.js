@@ -70,7 +70,7 @@ function reviewScreens(React, store, bridge) {
       }
       return () => { live = false; };
     }, [review.assetId, item.key, item.version]);
-    if (images.after === null && !images.before) return Note("The image opens in Black 4 Reviews.");
+    if (images.after === null && !images.before) return h(Page_, { review, item });
     return h(MediaPair, { before: images.before ?? null, after: images.after, loading: images.after === undefined, label: item.title });
   }
   /** The change, as the card's `show` says, else the brief's before and after. */
@@ -86,7 +86,15 @@ function reviewScreens(React, store, bridge) {
     if (show?.type === "media") return h(Media, { review, item });
     const brief = item.brief ?? {};
     if (brief.before || brief.after) return h(ChangeTable, { rows: [{ label: "", before: brief.before ?? "", after: brief.after ?? "", changed: brief.before !== brief.after }] });
+    if (store.preview(review.businessId, review.assetId, item.key)) return h(Page_, { review, item });
     return Note(item.action || "No change was attached.");
+  }
+  /** The finished work when it is a page or file: its own preview, shown in
+   * place (never the review application around it). */
+  function Page_({ review, item }) {
+    const link = store.preview(review.businessId, review.assetId, item.key);
+    if (!link || !bridge.browser) return Note(item.action || "The work has no preview here.");
+    return h(ui.Frame, { label: item.title }, h(bridge.browser, { url: link, storage: "black4-review-work", label: `The work: ${item.title}` }));
   }
 
   /** Why, evidence, provenance and the pinned request: one closed disclosure. */
@@ -118,7 +126,7 @@ function reviewScreens(React, store, bridge) {
 
   // ---- deciding --------------------------------------------------------------------
   /** The bar at the bottom: Approve, Ask for changes, Reject; then Undo; then the receipt. */
-  function Decide({ review, item, onReload, onHandOff, autoFocus, compose, setCompose }) {
+  function Decide({ review, item, onReload, autoFocus, compose, setCompose }) {
     useStore();
     const id = reviewItemId(review.businessId, review.assetId, item.key);
     const receipt = store.receipt(id);
@@ -151,9 +159,9 @@ function reviewScreens(React, store, bridge) {
         decision?.feedback ? Caption(decision.feedback) : null);
     }
     if (!store.canDecide(review, item)) {
-      // This Black 4 server lets the person decide only in Black 4 Reviews.
-      return h(DecisionBar, { status: Caption("Decide in Black 4 Reviews") },
-        h(Button, { key: "web", variant: "prominent", ...(onHandOff ? { onClick: onHandOff } : { href: reviewUrl(item.reviewUrl || review.reviewUrl) || REVIEWS_HOME }) }, "Open in Black 4 Reviews"));
+      // This connection got no decision token: say so quietly; never the website.
+      return h(DecisionBar, { status: Line("Deciding isn't available on this connection yet.") },
+        h(Button, { key: "retry", variant: "outline", onClick: onReload }, "Retry"));
     }
     if (compose) {
       const words = COMPOSE[compose];
@@ -181,13 +189,11 @@ function reviewScreens(React, store, bridge) {
     useStore();
     const [state, setState] = React.useState({ review: null, error: null });
     const [revision, setRevision] = React.useState(0);
-    const [human, setHuman] = React.useState(null);
     const [compose, setCompose] = React.useState(null);
     const key = `${entry?.businessId ?? ""}/${entry?.assetId ?? ""}`;
     React.useEffect(() => setCompose(null), [key, entry?.itemKey]);
     React.useEffect(() => {
       let live = true;
-      setHuman(null);
       if (link.status !== "connected" || !entry?.assetId) return () => { live = false; };
       const cached = entry.businessId ? store.cachedReview(entry.businessId, entry.assetId) : null;
       setState({ review: cached, error: null });
@@ -216,6 +222,7 @@ function reviewScreens(React, store, bridge) {
       return onCommand({
         approve: review && item && !receipt && !compose && store.canDecide(review, item) ? () => store.propose({ review, item, verdict: "approved" }) : null,
         changes: review && item && !receipt && store.canDecide(review, item) ? () => setCompose("changes_requested") : null,
+        reject: review && item && !receipt && store.canDecide(review, item) ? () => setCompose("rejected") : null,
         undo: receipt?.state === "pending" ? () => store.undo(id) : null,
       });
     }, [id, receipt?.state, review?.decideIn, compose, store.revision]);
@@ -233,14 +240,10 @@ function reviewScreens(React, store, bridge) {
       : h(Stack, { gap: 4 }, body, bar);
 
     if (link.status !== "connected") return wrap("Reviews", h(NotConnected, { link }));
-    if (human && bridge.browser) {
-      return h(Subview, { header: h(PanelHeader, { title: "Black 4 Reviews", navigation: h(IconButton, { label: "Back to the decision", glyph: "back", large: true, onClick: () => { setHuman(null); setRevision((n) => n + 1); } }) }) },
-        h(bridge.browser, { url: human, storage: "black4-reviews", label: "Black 4 Reviews" }));
-    }
     if (state.error) {
       const elsewhere = state.error.code === "elsewhere";
       return wrap("Reviews", elsewhere
-        ? h(Column, { gap: 2 }, Line("This review isn't waiting in your queue."), h(Button, { size: "sm", href: reviewUrl(reviewLink(entry)) || REVIEWS_HOME }, "Open in Black 4 Reviews"))
+        ? Line("This review isn't waiting for you.")
         : h(Failure, { message: plain(state.error.message, 300), retry: () => setRevision((n) => n + 1), retryLabel: "Try again" }));
     }
     if (!review) return wrap("Reviews", h(Skeleton, { layout: "item" }));
@@ -263,8 +266,7 @@ function reviewScreens(React, store, bridge) {
       recommendation ? Line(recommendation) : null,
       origin.threadId && bridge.openThread ? h(Actions, null, h(Button, { size: "sm", variant: "outline", onClick: () => bridge.openThread(origin) }, "Open thread")) : null,
       h(Details, { review, item }));
-    const handOff = bridge.browser ? () => setHuman(reviewUrl(item.reviewUrl || review.reviewUrl) || REVIEWS_HOME) : null;
-    return wrap(review.businessName, body, h(Decide, { review, item, compose, setCompose, onReload: () => setRevision((n) => n + 1), onHandOff: handOff }));
+    return wrap(review.businessName, body, h(Decide, { review, item, compose, setCompose, onReload: () => setRevision((n) => n + 1) }));
   }
 
   // ---- the queue -----------------------------------------------------------------

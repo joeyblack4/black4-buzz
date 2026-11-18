@@ -68,6 +68,15 @@ is.
 | `Tabs`, `Disclosure` | `Tabs` (panel), `Accordion` (form) | Pick one of a few items; a section that opens. |
 | `OneTimeCode`, `CodeColumn` | Pairing's code | A code to confirm elsewhere, with its Copy button. |
 | `LinkChip` | `InlineChip` (link) | A link renderer's chip in a message. |
+| `Chip`, `ChipRow`, `Glyph` | `ValueChip` | A short read-only value (a stake, a fact), with an optional 12px mark; one icon alone. |
+| `DiffText` | Diffs' card and insert/delete fills (`bundled/diffs`) | A word diff: added words on the insert tint, removed words struck through on the delete tint. Never red text. |
+| `ChangeTable` | Diffs' card | Fields before and after: each row's label, Now and After; unchanged rows read once, quietly. |
+| `MediaPair`, `Frame` | Diffs' card and `.preview` | Before and after images; the finished work as a page in a bounded frame. |
+| `DecisionBar` | Activity's toolbar border, at the bottom | The bar under a panel's body: a status line, then the actions. |
+| `Skeleton` | (Buzz has none) inset bars in the real layout | Loading, without a spinner in place of the content. |
+| `Checkbox` | `Checkbox` | A checkbox the row names. |
+| `SelectRow`, `ListGroup`, `Split` | Activity's `MessageListRow` in a `NavigationCard`; Inbox's workspace | A list row with an optional Checkbox beside it; a titled list; the list beside the preview. |
+| `MessageCard`, `MessageRow`, `Surface` | Diffs' `DiffMessage` card | One card under a message, its rows; a panel surface that knows it has focus. |
 | `Title`, `Heading`, `Paragraph`, `Caption`, `Strong`, `Lines`, `Line`, `Pre` | Buzz's type roles | Page title, section heading, body, muted small text, a row's emphasised line, stacked lines, a status or alert line, pre-formatted text. |
 
 A part takes only variants Buzz styles (`VARIANTS` in the kit). Anything else

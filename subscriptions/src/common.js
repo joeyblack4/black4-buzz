@@ -532,7 +532,7 @@ function buzzUi(React, { nativeSelect = false } = {}) {
   /** A word diff as Diffs draws inserted and deleted code: `runs` of
    * { kind: same | added | removed, text }, under its `label`. */
   const DiffText = ({ label, runs }) =>
-    h("figure", { "data-buzz-ui": "", style: { ...card, margin: 0 } },
+    h("figure", { style: { ...card, margin: 0 } },
       label ? h("figcaption", { className: "text-caption text-subtle", style: cardHeader }, label) : null,
       h("p", { className: "m-0 text-body", style: { padding: "var(--space-3)", whiteSpace: "pre-wrap", overflowWrap: "anywhere" } },
         ...runs.map((run, index) => run.kind === "same" ? h(Fragment, { key: index }, run.text)
@@ -588,7 +588,7 @@ function buzzUi(React, { nativeSelect = false } = {}) {
   const Checkbox = ({ checked, onCheckedChange, label, disabled, size = "md" }) =>
     h("button", { type: "button", role: "checkbox", "aria-checked": !!checked, "aria-label": label, disabled,
         "data-buzz-ui": "", className: "buzz-checkbox", "data-size": size === "sm" ? "sm" : "md",
-        "data-checked": checked ? "" : undefined, "data-unchecked": checked ? undefined : "", "data-disabled": disabled ? "" : undefined,
+        "data-checked": checked ? "" : undefined, "data-disabled": disabled ? "" : undefined,
         onClick: (event) => { event.stopPropagation(); if (!disabled) onCheckedChange(!checked); } },
       checked ? h("span", { "aria-hidden": true, style: { display: "flex" } }, icon(ICON.check, size === "sm" ? 12 : 14)) : null);
 
@@ -638,6 +638,10 @@ function buzzUi(React, { nativeSelect = false } = {}) {
       narrow && !showing ? null : h("div", { style: { ...pane, flex: 1 } }, detail));
   };
 
+  /** The finished work as a page, in Diffs' card (`.preview`: a bounded,
+   * scrolling frame) with an embedded view inside. */
+  const Frame = ({ label, children }) =>
+    h("div", { "data-buzz-ui": "", role: "group", "aria-label": label, style: { ...card, display: "flex", height: "min(28rem, 60vh)", minHeight: "16rem" } }, ...each(children));
   /** A message's card (Diffs' DiffMessage card): a quiet frame around rows. */
   const MessageCard = ({ label, children }) =>
     h("div", { "data-buzz-ui": "", role: "group", "aria-label": label, style: { ...card, display: "grid" } }, ...each(children));
@@ -679,7 +683,7 @@ function buzzUi(React, { nativeSelect = false } = {}) {
 
   return { VARIANTS, SectionTitle, Group, Row, Button, Input, Switch, SwitchRow, Pill, Popup, Native, TextField, Stack, Column, Actions, Note, ErrorLine, Spinner, Status, Value, Alert, Code,
     Header, IconButton, PanelHeader, Page, Subview, Surface, PanelBody, Fill, Toolbar, EmptyState, NavItem, Tabs, Disclosure, CountBadge, Dot, LinkChip, OneTimeCode, CodeColumn, Failure, Notice,
-    Glyph, Chip, ChipRow, DiffText, ChangeTable, MediaPair, DecisionBar, Skeleton, Checkbox, SelectRow, ListGroup, Split, MessageCard, MessageRow,
+    Glyph, Frame, Chip, ChipRow, DiffText, ChangeTable, MediaPair, DecisionBar, Skeleton, Checkbox, SelectRow, ListGroup, Split, MessageCard, MessageRow,
     Title, Heading, Paragraph, Caption, Strong, Lines, Line, Pre, ICON };
 }
 // ---- end buzz-ui kit ----

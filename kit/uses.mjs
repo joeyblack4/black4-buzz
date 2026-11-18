@@ -73,7 +73,7 @@ export function collect() {
       h(ui.Checkbox, { checked: true, label: "L", onCheckedChange() {} }), h(ui.Checkbox, { checked: false, size: "sm", disabled: true, label: "L", onCheckedChange() {} }),
       h(ui.ListGroup, { label: "L", count: 2 }, h(ui.SelectRow, { title: "T", subtitle: "S", meta: "2h", selected: true, picked: true, onPick() {}, onOpen() {} }),
         h(ui.SelectRow, { title: "T", quiet: true, onOpen() {} })),
-      h(ui.Split, { label: "L", list: "l", detail: "d" }),
+      h(ui.Split, { label: "L", list: "l", detail: "d" }), h(ui.Frame, { label: "L" }, "x"),
       h(ui.MessageCard, { label: "L" }, h(ui.MessageRow, { title: "T", subtitle: "S", onOpen() {} }), h(ui.MessageRow, { title: "T", loading: true })),
       ui.Title("t"), ui.Heading("h"), ui.Paragraph("p"), ui.Caption("c"), ui.Strong("s"), ui.Lines("a", "b"), ui.Line("l", { role: "status" }), ui.Line("l", { danger: true }), ui.Pre("p"));
   }

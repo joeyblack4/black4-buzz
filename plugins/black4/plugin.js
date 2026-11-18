@@ -2722,7 +2722,7 @@ function buzzUi(React, { nativeSelect = false } = {}) {
   /** A word diff as Diffs draws inserted and deleted code: `runs` of
    * { kind: same | added | removed, text }, under its `label`. */
   const DiffText = ({ label, runs }) =>
-    h("figure", { "data-buzz-ui": "", style: { ...card, margin: 0 } },
+    h("figure", { style: { ...card, margin: 0 } },
       label ? h("figcaption", { className: "text-caption text-subtle", style: cardHeader }, label) : null,
       h("p", { className: "m-0 text-body", style: { padding: "var(--space-3)", whiteSpace: "pre-wrap", overflowWrap: "anywhere" } },
         ...runs.map((run, index) => run.kind === "same" ? h(Fragment, { key: index }, run.text)
@@ -2778,7 +2778,7 @@ function buzzUi(React, { nativeSelect = false } = {}) {
   const Checkbox = ({ checked, onCheckedChange, label, disabled, size = "md" }) =>
     h("button", { type: "button", role: "checkbox", "aria-checked": !!checked, "aria-label": label, disabled,
         "data-buzz-ui": "", className: "buzz-checkbox", "data-size": size === "sm" ? "sm" : "md",
-        "data-checked": checked ? "" : undefined, "data-unchecked": checked ? undefined : "", "data-disabled": disabled ? "" : undefined,
+        "data-checked": checked ? "" : undefined, "data-disabled": disabled ? "" : undefined,
         onClick: (event) => { event.stopPropagation(); if (!disabled) onCheckedChange(!checked); } },
       checked ? h("span", { "aria-hidden": true, style: { display: "flex" } }, icon(ICON.check, size === "sm" ? 12 : 14)) : null);
 
@@ -2828,6 +2828,10 @@ function buzzUi(React, { nativeSelect = false } = {}) {
       narrow && !showing ? null : h("div", { style: { ...pane, flex: 1 } }, detail));
   };
 
+  /** The finished work as a page, in Diffs' card (`.preview`: a bounded,
+   * scrolling frame) with an embedded view inside. */
+  const Frame = ({ label, children }) =>
+    h("div", { "data-buzz-ui": "", role: "group", "aria-label": label, style: { ...card, display: "flex", height: "min(28rem, 60vh)", minHeight: "16rem" } }, ...each(children));
   /** A message's card (Diffs' DiffMessage card): a quiet frame around rows. */
   const MessageCard = ({ label, children }) =>
     h("div", { "data-buzz-ui": "", role: "group", "aria-label": label, style: { ...card, display: "grid" } }, ...each(children));
@@ -2869,7 +2873,7 @@ function buzzUi(React, { nativeSelect = false } = {}) {
 
   return { VARIANTS, SectionTitle, Group, Row, Button, Input, Switch, SwitchRow, Pill, Popup, Native, TextField, Stack, Column, Actions, Note, ErrorLine, Spinner, Status, Value, Alert, Code,
     Header, IconButton, PanelHeader, Page, Subview, Surface, PanelBody, Fill, Toolbar, EmptyState, NavItem, Tabs, Disclosure, CountBadge, Dot, LinkChip, OneTimeCode, CodeColumn, Failure, Notice,
-    Glyph, Chip, ChipRow, DiffText, ChangeTable, MediaPair, DecisionBar, Skeleton, Checkbox, SelectRow, ListGroup, Split, MessageCard, MessageRow,
+    Glyph, Frame, Chip, ChipRow, DiffText, ChangeTable, MediaPair, DecisionBar, Skeleton, Checkbox, SelectRow, ListGroup, Split, MessageCard, MessageRow,
     Title, Heading, Paragraph, Caption, Strong, Lines, Line, Pre, ICON };
 }
 // ---- end buzz-ui kit ----
@@ -2936,6 +2940,10 @@ const reviewAssetKey = (businessId, assetId) => `${businessId}/${assetId}`;
 /** Everything waiting, in queue order, one entry per item: what next and
  * previous step through. Approved work that is blocked or stalled is not here. */
 function reviewOrder(queue) {
+  return reviewGroups(queue).flatMap((group) => group.items);
+}
+/** Every waiting item in the order the server listed them. */
+function reviewListed(queue) {
   const out = [];
   for (const review of queue?.reviews ?? []) {
     for (const item of review.items ?? []) {
@@ -2950,9 +2958,16 @@ function reviewOrder(queue) {
 /** The queue grouped by business, in the order businesses first appear. */
 function reviewGroups(queue) {
   const groups = new Map();
-  for (const entry of reviewOrder(queue)) {
+  for (const entry of reviewListed(queue)) {
     if (!groups.has(entry.businessId)) groups.set(entry.businessId, { businessId: entry.businessId, businessName: entry.businessName, items: [] });
     groups.get(entry.businessId).items.push(entry);
+  }
+  // Similar work side by side: within a business, items of one work type
+  // together, in the order each type first waits.
+  for (const group of groups.values()) {
+    const first = new Map();
+    group.items.forEach((entry, index) => { if (!first.has(entry.workType)) first.set(entry.workType, index); });
+    group.items = group.items.map((entry, index) => ({ entry, index })).sort((a, b) => first.get(a.entry.workType) - first.get(b.entry.workType) || a.index - b.index).map(({ entry }) => entry);
   }
   return [...groups.values()];
 }
@@ -3301,6 +3316,12 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
     get revision() { return revision; },
     get queue() { return queue; },
     noteQueue, readQueue, open, cachedReview, canDecide, image,
+    /** The work's own preview link (a page or file the server shared for
+     * showing the work), or null. Never a decision token. */
+    preview: (businessId, assetId, key) => {
+      const link = previews.get(reviewItemId(businessId, assetId, key))?.after;
+      return typeof link?.url === "string" && /^https:\/\//.test(link.url) && !/^image\//.test(String(link.contentType ?? "")) ? link.url : null;
+    },
     receipt: (id) => receipts.get(id) ?? null,
     receipts: () => [...receipts.values()],
     propose, undo, retry, recheck, clear,
@@ -3407,7 +3428,7 @@ function reviewScreens(React, store, bridge) {
       }
       return () => { live = false; };
     }, [review.assetId, item.key, item.version]);
-    if (images.after === null && !images.before) return Note("The image opens in Black 4 Reviews.");
+    if (images.after === null && !images.before) return h(Page_, { review, item });
     return h(MediaPair, { before: images.before ?? null, after: images.after, loading: images.after === undefined, label: item.title });
   }
   /** The change, as the card's `show` says, else the brief's before and after. */
@@ -3423,7 +3444,15 @@ function reviewScreens(React, store, bridge) {
     if (show?.type === "media") return h(Media, { review, item });
     const brief = item.brief ?? {};
     if (brief.before || brief.after) return h(ChangeTable, { rows: [{ label: "", before: brief.before ?? "", after: brief.after ?? "", changed: brief.before !== brief.after }] });
+    if (store.preview(review.businessId, review.assetId, item.key)) return h(Page_, { review, item });
     return Note(item.action || "No change was attached.");
+  }
+  /** The finished work when it is a page or file: its own preview, shown in
+   * place (never the review application around it). */
+  function Page_({ review, item }) {
+    const link = store.preview(review.businessId, review.assetId, item.key);
+    if (!link || !bridge.browser) return Note(item.action || "The work has no preview here.");
+    return h(ui.Frame, { label: item.title }, h(bridge.browser, { url: link, storage: "black4-review-work", label: `The work: ${item.title}` }));
   }
 
   /** Why, evidence, provenance and the pinned request: one closed disclosure. */
@@ -3455,7 +3484,7 @@ function reviewScreens(React, store, bridge) {
 
   // ---- deciding --------------------------------------------------------------------
   /** The bar at the bottom: Approve, Ask for changes, Reject; then Undo; then the receipt. */
-  function Decide({ review, item, onReload, onHandOff, autoFocus, compose, setCompose }) {
+  function Decide({ review, item, onReload, autoFocus, compose, setCompose }) {
     useStore();
     const id = reviewItemId(review.businessId, review.assetId, item.key);
     const receipt = store.receipt(id);
@@ -3488,9 +3517,9 @@ function reviewScreens(React, store, bridge) {
         decision?.feedback ? Caption(decision.feedback) : null);
     }
     if (!store.canDecide(review, item)) {
-      // This Black 4 server lets the person decide only in Black 4 Reviews.
-      return h(DecisionBar, { status: Caption("Decide in Black 4 Reviews") },
-        h(Button, { key: "web", variant: "prominent", ...(onHandOff ? { onClick: onHandOff } : { href: reviewUrl(item.reviewUrl || review.reviewUrl) || REVIEWS_HOME }) }, "Open in Black 4 Reviews"));
+      // This connection got no decision token: say so quietly; never the website.
+      return h(DecisionBar, { status: Line("Deciding isn't available on this connection yet.") },
+        h(Button, { key: "retry", variant: "outline", onClick: onReload }, "Retry"));
     }
     if (compose) {
       const words = COMPOSE[compose];
@@ -3518,13 +3547,11 @@ function reviewScreens(React, store, bridge) {
     useStore();
     const [state, setState] = React.useState({ review: null, error: null });
     const [revision, setRevision] = React.useState(0);
-    const [human, setHuman] = React.useState(null);
     const [compose, setCompose] = React.useState(null);
     const key = `${entry?.businessId ?? ""}/${entry?.assetId ?? ""}`;
     React.useEffect(() => setCompose(null), [key, entry?.itemKey]);
     React.useEffect(() => {
       let live = true;
-      setHuman(null);
       if (link.status !== "connected" || !entry?.assetId) return () => { live = false; };
       const cached = entry.businessId ? store.cachedReview(entry.businessId, entry.assetId) : null;
       setState({ review: cached, error: null });
@@ -3553,6 +3580,7 @@ function reviewScreens(React, store, bridge) {
       return onCommand({
         approve: review && item && !receipt && !compose && store.canDecide(review, item) ? () => store.propose({ review, item, verdict: "approved" }) : null,
         changes: review && item && !receipt && store.canDecide(review, item) ? () => setCompose("changes_requested") : null,
+        reject: review && item && !receipt && store.canDecide(review, item) ? () => setCompose("rejected") : null,
         undo: receipt?.state === "pending" ? () => store.undo(id) : null,
       });
     }, [id, receipt?.state, review?.decideIn, compose, store.revision]);
@@ -3570,14 +3598,10 @@ function reviewScreens(React, store, bridge) {
       : h(Stack, { gap: 4 }, body, bar);
 
     if (link.status !== "connected") return wrap("Reviews", h(NotConnected, { link }));
-    if (human && bridge.browser) {
-      return h(Subview, { header: h(PanelHeader, { title: "Black 4 Reviews", navigation: h(IconButton, { label: "Back to the decision", glyph: "back", large: true, onClick: () => { setHuman(null); setRevision((n) => n + 1); } }) }) },
-        h(bridge.browser, { url: human, storage: "black4-reviews", label: "Black 4 Reviews" }));
-    }
     if (state.error) {
       const elsewhere = state.error.code === "elsewhere";
       return wrap("Reviews", elsewhere
-        ? h(Column, { gap: 2 }, Line("This review isn't waiting in your queue."), h(Button, { size: "sm", href: reviewUrl(reviewLink(entry)) || REVIEWS_HOME }, "Open in Black 4 Reviews"))
+        ? Line("This review isn't waiting for you.")
         : h(Failure, { message: plain(state.error.message, 300), retry: () => setRevision((n) => n + 1), retryLabel: "Try again" }));
     }
     if (!review) return wrap("Reviews", h(Skeleton, { layout: "item" }));
@@ -3600,8 +3624,7 @@ function reviewScreens(React, store, bridge) {
       recommendation ? Line(recommendation) : null,
       origin.threadId && bridge.openThread ? h(Actions, null, h(Button, { size: "sm", variant: "outline", onClick: () => bridge.openThread(origin) }, "Open thread")) : null,
       h(Details, { review, item }));
-    const handOff = bridge.browser ? () => setHuman(reviewUrl(item.reviewUrl || review.reviewUrl) || REVIEWS_HOME) : null;
-    return wrap(review.businessName, body, h(Decide, { review, item, compose, setCompose, onReload: () => setRevision((n) => n + 1), onHandOff: handOff }));
+    return wrap(review.businessName, body, h(Decide, { review, item, compose, setCompose, onReload: () => setRevision((n) => n + 1) }));
   }
 
   // ---- the queue -----------------------------------------------------------------
@@ -3775,6 +3798,11 @@ function reviewsPart(ctx, bridge) {
     const [picked, setPicked] = React.useState(() => new Set());
     const [bulk, setBulk] = React.useState(null); // { ids } while approving together
     const setEntry = (entry) => setView({ entry });
+    // The first waiting item is open from the start: one less click per session.
+    const first = reviewOrder(queue)[0];
+    React.useEffect(() => {
+      if (!view.entry && first && !view.filter) setView({ entry: { businessId: first.businessId, assetId: first.assetId, itemKey: first.key } });
+    }, [first?.id]);
     const step = useStepping(current.entry, setEntry);
     surface = { next: step.next, previous: step.previous };
     const order = reviewOrder(queue);
@@ -3807,7 +3835,7 @@ function reviewsPart(ctx, bridge) {
       picked: live, onPick: pick, filter: current.filter, onFilter: (filter) => setView({ filter }) });
     const detail = current.entry
       ? h(ReviewItem, { key: "item", entry: current.entry, step, onCommand, frame: true })
-      : h(ui.EmptyState, { glyph: "decisions", title: queue && order.length ? "Choose a decision" : "Nothing to decide", frame: "none" });
+      : link.status === "connected" && queue ? h(ui.EmptyState, { glyph: "decisions", title: order.length ? "Choose a decision" : "Nothing to decide", frame: "none" }) : null;
     return h(ui.Page, { label: "Reviews", fill: true, header: h(ui.PanelHeader, { title: "Reviews", actions: [h(ui.IconButton, { key: "refresh", label: "Refresh", glyph: "refresh", large: true, onClick: () => bridge.queue.refresh() })] }),
       onFocus: focusIn, onBlur: focusOut },
       toolbar,
@@ -3948,6 +3976,7 @@ function reviewsPart(ctx, bridge) {
   shortcut("previous", "Previous decision", [{ key: "k" }, { key: "ArrowUp" }], () => surface?.previous?.(), () => !!surface?.previous);
   shortcut("approve", "Approve this decision", { key: "a" }, () => commands?.approve?.(), () => !!commands?.approve);
   shortcut("changes", "Ask for changes", { key: "c" }, () => commands?.changes?.(), () => !!commands?.changes);
+  shortcut("reject", "Reject", { key: "r" }, () => commands?.reject?.(), () => !!commands?.reject);
   shortcut("undo", "Undo the decision", { key: "z", mod: true }, () => commands?.undo?.(), () => !!commands?.undo);
 
   // ---- the queue the badge already polls: notifications --------------------------

@@ -346,21 +346,19 @@ test("signed out: every surface offers the same one Sign in, never a sentence po
   assert.match(text(app.settings()), /WDJB-MJHT/, "the same sign-in shows in Settings");
 });
 
-test("signed out with the embedded inbox: Sign in sits above it, and signing in keeps the inbox in place", async (t) => {
+test("signed out, the native Reviews page offers Sign in where the queue goes, and never embeds the website", async (t) => {
   const app = await harness(t);
   await settle();
-  // The page: its header, then the body: the sign-in bar (or nothing), then the inbox.
-  const body = (view) => view.children[0].children[1];
   let view = app.workspace();
-  assert.ok(button(body(view).children[0], "Sign in to Black 4"), "a bar above the inbox");
-  assert.ok(find(body(view).children[1], (n) => n.type === "browser-view"));
+  assert.ok(button(view, "Sign in to Black 4"), "Sign in in place of the queue");
+  assert.equal(find(view, (n) => n.type === "browser-view"), null, "no embedded website");
   app.click("Sign in to Black 4", view);
   await app.waitingForCode();
-  assert.match(text(body(app.workspace()).children[0]), /Confirm\s+WDJB-MJHT\s+in your browser/);
+  assert.match(text(app.workspace()), /WDJB-MJHT[\s\S]*Confirm it in your browser/);
   await app.connected();
   view = app.workspace();
-  assert.equal(body(view).children[0], null, "signed in: the bar is gone");
-  assert.ok(find(body(view).children[1], (n) => n.type === "browser-view"), "the inbox kept its place");
+  assert.equal(button(view, "Sign in to Black 4"), null, "signed in: Sign in is gone");
+  assert.equal(find(view, (n) => n.type === "browser-view"), null, "still no embedded website");
 });
 
 test("the Reviews dock entry carries a dot while signed out, and the count once signed in", async (t) => {

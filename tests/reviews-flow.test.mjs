@@ -187,3 +187,38 @@ test("the queue the badge polls carries each review's capture into the queue row
   assert.ok(a.reviews.calls.some((call) => call.name === "get_review_file" && call.args.path === "_captures/menu-1440.jpg"), "read through the MCP");
   assert.match(String(picture.props.src), /^data:image\//, "the MCP read it, so the grant link itself is not what the row shows");
 });
+
+test("the open review shows its whole question, stake and action; the bar keeps its buttons; no stand-in stake", async (t) => {
+  const a = await app(t);
+  const stake = "Sets the plan for about $2,400 of promotion spend across both shops, which replaces the tune-up offer approved in the original review's October 19 to November 30 window and moves the Saturday clinics to Sundays.";
+  const action = "Accept this document as feedback only. This does not authorize publication, campaign launches, spending, or changes to customer tools. Request changes to have the owning agent revise this document.";
+  const question = "Accept the winter service report as the plan for the next six weeks of tune-up promotions across both shops, starting with the Sunday clinics?";
+  const [hero, price] = a.reviews.review.items;
+  Object.assign(hero, { action, card: { ...hero.card, question, stake: { kind: "money", text: stake } },
+    madeBy: `gpt-6 · Wren via agent [nostr:${"cd".repeat(32)}]`,
+    producer: { agent: "Wren", agentKey: null, model: "gpt-6", effort: null, app: "agent", person: "ops@example.test", verified: { person: true, agentKey: false } } });
+  Object.assign(price, { card: null, action: "Accept these notes." });
+  const view = await a.shown();
+  const bar = a.find(view, (node) => node.props?.["aria-label"] === "Decision");
+  const words = a.label(bar);
+  assert.ok(words.includes(stake), "the whole stake");
+  assert.ok(words.includes(action), "the whole action");
+  for (const verdict of ["Approve", "Ask for changes", "Reject"]) assert.ok(a.button(bar, verdict), `${verdict} is in the bar`);
+  // Nothing in the bar or the heading is cut to a line count or an ellipsis.
+  const heading = a.find(view, (node) => node.type === "h2" && a.label(node) === question);
+  assert.ok(heading, "the whole question");
+  const styles = JSON.stringify([bar, heading]);
+  assert.doesNotMatch(styles, /ellipsis|LineClamp|"nowrap"/);
+  // A long status scrolls inside the bar instead of pushing the buttons off screen.
+  const status = a.find(bar, (node) => node.props?.["aria-live"] === "polite");
+  assert.equal(status.props.style.overflowY, "auto");
+  assert.ok(status.props.style.maxBlockSize);
+  // The byline names no "agent" app, and Details does not repeat the raw madeBy.
+  assert.match(a.label(view), /gpt-6 · for ops@example\.test/);
+  assert.doesNotMatch(a.label(view), /via agent|nostr:/);
+  // An item with no stake and no facts gets no stake line, not the business name.
+  const plain = await a.shown("https://app.black4.ai/r/rv_bakery?v=1&item=price");
+  const plainBar = a.find(plain, (node) => node.props?.["aria-label"] === "Decision");
+  assert.doesNotMatch(a.label(plainBar), /Crumb/);
+  assert.ok(a.label(plainBar).includes("Accept these notes."));
+});

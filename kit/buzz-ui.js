@@ -490,12 +490,14 @@ function buzzUi(React, { nativeSelect = false } = {}) {
   };
 
   /** The bar fixed under a panel's body (Activity's toolbar border, at the
-   * bottom): a `status` line, then the actions. `stacked`: a field above. */
+   * bottom): a `status` line, then the actions. `stacked`: a field above.
+   * A long status wraps in full and scrolls past a third of the window, so
+   * the actions stay on screen. */
   const DecisionBar = ({ status, stacked = false, children }) =>
     h("div", { "data-buzz-ui": "", role: "group", "aria-label": "Decision", style: { flex: "0 0 auto", display: "flex", flexDirection: stacked ? "column" : "row", flexWrap: "wrap",
         alignItems: stacked ? "stretch" : "center", justifyContent: "space-between", gap: "var(--space-2) var(--space-3)",
         padding: "var(--space-3) var(--space-panel-inset)", borderTop: "1px solid var(--border-standard)", background: "var(--surface-panel)" } },
-      status ? h("div", { "aria-live": "polite", style: { minWidth: 0, flex: stacked ? undefined : "1 1 12rem" } }, status) : null,
+      status ? h("div", { "aria-live": "polite", style: { minWidth: 0, flex: stacked ? undefined : "1 1 12rem", maxBlockSize: "min(16rem, 34vh)", overflowY: "auto" } }, status) : null,
       ...(children == null ? [] : [stacked ? h("div", { key: "actions", className: "grid gap-2" }, ...each(children))
         : h("div", { key: "actions", className: "flex flex-wrap items-center gap-2" }, ...each(children))]));
 
@@ -607,18 +609,19 @@ function buzzUi(React, { nativeSelect = false } = {}) {
   const CanvasImage = ({ src, alt }) => src
     ? h("img", { src, alt, style: { display: "block", maxWidth: "100%", maxHeight: "100%", objectFit: "contain", margin: "auto" } })
     : h("div", { role: "img", "aria-label": `${alt} loading`, "aria-busy": true, style: { flex: 1, background: "var(--surface-inset)" } });
-  /** A quiet line of short values (the stake, the facts), one line, cut short. */
+  /** A quiet line of short values (the stake, the facts), wrapped in full:
+   * the mark stays beside its first line. */
   const QuietLine = ({ glyph, children }) =>
-    h("p", { className: "m-0 text-caption text-subtle", style: { display: "flex", gap: "var(--space-1)", alignItems: "center", minWidth: 0 } },
-      glyph && ICON[glyph] ? icon(ICON[glyph], 12, { style: { flex: "none" } }) : null,
-      h("span", { style: { minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, children));
-  /** What approving permits, in two lines at most (the whole on hover). */
-  const Permits = (text) => h("p", { className: "m-0 text-body-sm text-standard", title: text, style: { display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" } }, text);
+    h("p", { className: "m-0 text-caption text-subtle", style: { display: "flex", gap: "var(--space-1)", alignItems: "baseline", minWidth: 0 } },
+      glyph && ICON[glyph] ? icon(ICON[glyph], 12, { style: { flex: "none", alignSelf: "flex-start", marginBlockStart: "0.125rem" } }) : null,
+      h("span", { style: { minWidth: 0, overflowWrap: "anywhere" } }, children));
+  /** What approving permits, in full. */
+  const Permits = (text) => h("p", { className: "m-0 text-body-sm text-standard", style: { overflowWrap: "anywhere" } }, text);
   /** One review item's column: its heading, the canvas taking the rest, then details. */
   const Article = ({ label, children }) =>
     h("article", { "aria-label": label, style: { display: "flex", flexDirection: "column", gap: "var(--space-3)", flex: "1 0 auto", minHeight: "100%" } }, ...each(children));
-  /** The question, one or two lines, the heading of the item. */
-  const Question = (text) => h("h2", { className: "m-0 text-label", style: { display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden", overflowWrap: "anywhere" } }, text);
+  /** The question, in full, the heading of the item. */
+  const Question = (text) => h("h2", { className: "m-0 text-label", style: { overflowWrap: "anywhere" } }, text);
 
   /** The finished work as a page, in Diffs' card (`.preview`: a bounded,
    * scrolling frame) with an embedded view inside. */

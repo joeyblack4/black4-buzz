@@ -451,8 +451,11 @@ function buzzUi(React, { nativeSelect = false } = {}) {
       label ? h("figcaption", { className: "text-caption text-subtle", style: cardHeader }, label) : null,
       h("p", { className: "m-0 text-body", style: { padding: "var(--space-3)", whiteSpace: "pre-wrap", overflowWrap: "anywhere" } },
         ...runs.map((run, index) => run.kind === "same" ? h(Fragment, { key: index }, run.text)
-          : h(run.kind === "added" ? "ins" : "del", { key: index, style: { ...RUN[run.kind], color: "inherit" } },
-            h("span", { className: "sr-only" }, run.kind === "added" ? "Added: " : "Removed: "), run.text))));
+          : h(Fragment, { key: index },
+              h(run.kind === "added" ? "ins" : "del", { style: { ...RUN[run.kind], color: "inherit" } },
+                h("span", { className: "sr-only" }, run.kind === "added" ? "Added: " : "Removed: "), run.text),
+              // A removed word and its replacement read as two words.
+              run.kind === "removed" && runs[index + 1]?.kind === "added" ? " " : null))));
 
   /** Settings before and after, in Diffs' card: each row its label, Now and
    * After; a changed row's new value carries the insert tint, an unchanged
@@ -487,7 +490,8 @@ function buzzUi(React, { nativeSelect = false } = {}) {
         alignItems: stacked ? "stretch" : "center", justifyContent: "space-between", gap: "var(--space-2) var(--space-3)",
         padding: "var(--space-3) var(--space-panel-inset)", borderTop: "1px solid var(--border-standard)", background: "var(--surface-panel)" } },
       status ? h("div", { "aria-live": "polite", style: { minWidth: 0, flex: stacked ? undefined : "1 1 12rem" } }, status) : null,
-      ...(children == null ? [] : [h("div", { key: "actions", className: "flex flex-wrap items-center gap-2" }, ...each(children))]));
+      ...(children == null ? [] : [stacked ? h("div", { key: "actions", className: "grid gap-2" }, ...each(children))
+        : h("div", { key: "actions", className: "flex flex-wrap items-center gap-2" }, ...each(children))]));
 
   /** A placeholder in the real layout while it loads (Buzz has no skeleton:
    * inset bars in the place of the lines). `layout`: item | list. */

@@ -81,7 +81,8 @@ function reviewScreens(React, store, bridge) {
     }
     if (show?.type === "text") return h(DiffText, { label: show.label, runs: wordDiff(show.before ?? "", show.after ?? "") });
     if (show?.type === "list" && show.rows?.length) {
-      return h(ListGroup, { label: show.label }, ...show.rows.map((row, index) => h(Row, { key: `${index}`, title: row.label, description: row.detail })));
+      return h("div", null, show.label ? h(SectionTitle, { title: show.label }) : null,
+        h(Group, null, ...show.rows.map((row, index) => h(Row, { key: `${index}`, title: row.label, description: row.detail }))));
     }
     if (show?.type === "media") return h(Media, { review, item });
     // No card: the finished page or file itself, when there is one (documents).

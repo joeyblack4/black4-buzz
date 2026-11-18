@@ -8,7 +8,8 @@ agent.log.1 past 5 MB), and one buzz-acp process.
 
 Requests: {"op": ...} with op one of
   provision, activate, profile, instructions.get, instructions.set,
-  settings.set (model, effort, pays, compactAt, and buzz-acp's own levers:
+  settings.set (model, effort, pays, compactAt, respondTo and businessId
+               (see "whom an agent answers"), and buzz-acp's own levers:
                agents, sessionPolicy, multipleEventHandling, maxTurnsPerSession,
                maxTurnDuration, contextMessageLimit), remove, start, status, list   (one agent)
   identity                                (each agent's key and the owner it attests)
@@ -25,6 +26,10 @@ Requests: {"op": ...} with op one of
 
 Not requests (run from cron or by agentctl itself):
   agentctl supervise          keeps activated agents running; cron starts it
+  agentctl list               prints each agent and whom it answers
+  agentctl audience <pubkey>  asks Platform Control for an agent's audience again
+  agentctl tool-gate          a customer-facing agent's Claude Code hook (see
+                              "the customer-facing profile")
   agentctl login-helper <id>  holds one sign-in open between SSH calls
   agentctl check <slot>       checks a stored sign-in, out of band for machine.status
                               (a slot is a harness, or <harness>-key for its key)
@@ -105,7 +110,7 @@ def set_root(home, root=None):
     """Point every path at the runner's root: <home>/workforce, or `root`
     (BLACK4_WORKFORCE_ROOT) for a second runner beside it, e.g. a dev copy.
     Tests use a temporary home."""
-    global HOME, ROOT, AGENTS, BIN, RUN, VENDOR, BLACK4_MCP, CRON_MARK, PINS
+    global HOME, ROOT, AGENTS, BIN, RUN, VENDOR, BLACK4_MCP, CRON_MARK, PINS, STAFF_FILE, RUNNER_FILE
     HOME = Path(home)
     ROOT = (HOME / Path(root).expanduser()) if root else HOME / "workforce"
     # Each root has its own cron lines. The default root keeps the released
@@ -120,6 +125,13 @@ def set_root(home, root=None):
     # The version set this machine was installed with (machine/pins.json,
     # copied by setup.sh). doctor and machine.status check the install against it.
     PINS = ROOT / "pins.json"
+    # The static staff list (machine/staff.json, copied by setup.sh): whom a
+    # staff agent answers while Platform Control has no get_buzz_audience.
+    STAFF_FILE = ROOT / "staff.json"
+    # What this runner is (setup.sh writes it): {"profile": "platform"} for the
+    # customer-facing runner, which runs only platform agents; {"platform":
+    # {"user", "agentctl"}} on the main runner names that runner.
+    RUNNER_FILE = ROOT / "runner.json"
     use_account(None)
 
 
@@ -1433,7 +1445,241 @@ def heartbeat_view(s):
 # agent keeps at least two parallel processes, so a person can still talk to
 # it while a scheduled run is going.
 
-RESPOND_TO = ("anyone", "owner-only")  # whom an agent answers (BUZZ_ACP_RESPOND_TO)
+# ---------------------------------------------------------------- whom an agent answers
+# Black 4 has one Buzz community for staff and customers (Joey, 2026-11-17),
+# so every agent serves exactly one audience (respondTo):
+#   staff       Black 4 staff only. The default for every new agent.
+#   business    staff, plus the people linked to one customer business
+#               (businessId). What an account manager runs.
+#   owner-only  its owner only (and the owner's other agents).
+#   anyone      everyone in the community. Only for an agent that holds no
+#               business data, and only ever chosen in settings.set: a
+#               provision or activate that says "anyone" (what plugins before
+#               this one sent as their default) gets staff.
+# staff and business run buzz-acp's allowlist gate with the keys Platform
+# Control's get_buzz_audience names for this agent, asked signed as the agent
+# through its Black 4 connector (`mcp/black4 --call`), at its start and about
+# every 10 minutes (the supervisor). The answer is kept in
+# agents/<pubkey>/audience.json; a failed refresh keeps the last good one, and
+# an agent with none at all starts owner-only (closed, never open). A changed
+# list restarts the agent after its turn: buzz-acp reads the list once, at its
+# start. Until Platform Control has the tool (it answers that it has none),
+# staff.json, the machine's static staff list, stands in for its staff keys.
+#
+# What buzz-acp 0.5.30 does with it (crates/buzz-acp/src/lib.rs,
+# author_allowed): channel messages and their threads pass the gate when the
+# author is listed, is the owner, or is a sibling (an agent whose NIP-OA owner
+# is this agent's owner). Direct messages ignore the list in every mode but
+# nobody: only the owner and siblings get a DM answered. So staff reach a
+# staff agent by @mention in a channel or thread, not by DM, unless they own it.
+RESPOND_TO = ("staff", "business", "owner-only", "anyone")
+AUDIENCE_MODES = ("staff", "business")       # the modes that ask Platform Control
+NEW_RESPOND_TO = "staff"
+AUDIENCE_TOOL = "get_buzz_audience"
+AUDIENCE_EVERY = 10 * 60      # a running agent's list is asked again this often
+AUDIENCE_RETRY = 60           # an agent that has none is asked again this often
+AUDIENCE_FRESH = 60           # a start this soon after an answer does not ask again
+AUDIENCE_TIMEOUT = 20         # seconds one ask may take
+BUSINESS_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+
+
+def respond_to(s):
+    """Whom the saved settings say the agent answers. An agent saved before
+    there was a choice answers its owner only."""
+    mode = s.get("respondTo")
+    return mode if mode in RESPOND_TO else "owner-only"
+
+
+def checked_audience(mode, business_id, explicit_anyone=True):
+    """(respondTo, businessId) from a request, refused when it does not hold
+    together. `explicit_anyone` False turns "anyone" into staff (provision and
+    activate, where an older plugin sent it as its default)."""
+    if mode in (None, ""): mode = NEW_RESPOND_TO
+    if mode == "anyone" and not explicit_anyone: mode = NEW_RESPOND_TO
+    if mode not in RESPOND_TO: fail("respondTo is staff, business, owner-only or anyone")
+    if mode == "business":
+        if not isinstance(business_id, str) or not BUSINESS_ID.fullmatch(business_id):
+            fail("an agent that answers a business needs that business's id (businessId)")
+        return mode, business_id
+    return mode, None
+
+
+def staff_list():
+    """The machine's static staff keys (staff.json), or None when it has none."""
+    data = read_json(STAFF_FILE)
+    rows = data.get("staff") if isinstance(data, dict) else None
+    if not isinstance(rows, list): return None
+    keys = [str(r.get("pubkey")) for r in rows if isinstance(r, dict) and HEX64.match(str(r.get("pubkey") or ""))]
+    return keys or None
+
+
+def audience_entries(result):
+    """The people in a get_buzz_audience result ({keys: [{pubkey, email, kind,
+    businessId?}], asOf}), as (entries, asOf). Only what the gate needs is
+    kept: no emails. None when the answer is not that shape."""
+    data = result.get("structuredContent") if isinstance(result, dict) else None
+    if not isinstance(data, dict) and isinstance(result, dict):
+        for part in result.get("content") or []:
+            if isinstance(part, dict) and part.get("type") == "text":
+                try: data = json.loads(part.get("text") or "")
+                except ValueError: continue
+                break
+    if isinstance(data, dict) and isinstance(data.get("data"), dict): data = data["data"]
+    if not isinstance(data, dict) or not isinstance(data.get("keys"), list): return None
+    entries = []
+    for row in data["keys"]:
+        if not isinstance(row, dict) or not HEX64.match(str(row.get("pubkey") or "")): continue
+        if row.get("kind") not in ("staff", "customer"): continue
+        entry = {"pubkey": row["pubkey"], "kind": row["kind"]}
+        if row["kind"] == "customer":
+            if not isinstance(row.get("businessId"), str): continue
+            entry["businessId"] = row["businessId"]
+        entries.append(entry)
+    as_of = data.get("asOf") if isinstance(data.get("asOf"), (str, int, float)) else None
+    return entries, as_of
+
+
+def audience_keys(s, entries):
+    """The keys an agent with these settings answers, from a list's entries:
+    staff for staff; staff and that business's people for business."""
+    mode, business = respond_to(s), s.get("businessId")
+    keys = [e["pubkey"] for e in entries if e.get("kind") == "staff"]
+    if mode == "business" and business:
+        keys += [e["pubkey"] for e in entries if e.get("kind") == "customer" and e.get("businessId") == business]
+    return sorted(set(keys))
+
+
+def ask_black4(d, s, tool):
+    """One Black 4 tool call signed as this agent, through its connector
+    (`mcp/black4 --call`): ("ok", result), ("missing", why) when the server
+    has no such tool for it, or ("failed", why)."""
+    if not os.access(BLACK4_MCP, os.X_OK): return "failed", "this machine has no Black 4 connector"
+    if not s.get("auth"): return "failed", "the agent has no owner attestation yet"
+    env = {**base_env(), "BUZZ_PRIVATE_KEY": (d / "key").read_text().strip(), "BUZZ_AUTH_TAG": json.dumps(s["auth"]),
+           "BLACK4_MCP_TIMEOUT_MS": str(AUDIENCE_TIMEOUT * 1000)}
+    if (s.get("name") or "").strip(): env["BUZZ_ACP_DISPLAY_NAME"] = s["name"].strip()
+    try:
+        done = subprocess.run([str(BLACK4_MCP), "--call", tool], env=env, input="{}", capture_output=True,
+                              text=True, timeout=AUDIENCE_TIMEOUT + 10, cwd=str(d))
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return "failed", f"the Black 4 connector did not answer ({type(e).__name__})"
+    reply = None
+    for line in reversed((done.stdout or "").strip().splitlines()):
+        try: reply = json.loads(line); break
+        except ValueError: continue
+    if not isinstance(reply, dict): return "failed", "the Black 4 connector gave no answer"
+    if reply.get("ok"): return "ok", reply.get("result")
+    detail = str(reply.get("detail") or reply.get("kind") or "no detail")[:200]
+    return ("missing" if reply.get("kind") == "missing" else "failed"), detail
+
+
+def ask_audience(d, s):
+    """Asks Platform Control, signed as this agent, whom it may answer:
+    ("ok", entries, asOf), ("missing", None, why) when the server has no such
+    tool yet, or ("failed", None, why)."""
+    status, value = ask_black4(d, s, AUDIENCE_TOOL)
+    if status != "ok": return status, None, value
+    parsed = audience_entries(value)
+    if parsed is None: return "failed", None, "Platform Control's audience was not a list of keys"
+    return "ok", parsed[0], parsed[1]
+
+
+def audience_state(d):
+    return read_json(d / "audience.json", {}) or {}
+
+
+def refresh_audience(d, restart=True):
+    """Asks for this agent's list and keeps the answer. A failure keeps the
+    last good list. With `restart`, a running agent whose keys changed is
+    restarted after its turn. One at a time per agent; returns the state."""
+    s = read_settings(d)
+    if respond_to(s) not in AUDIENCE_MODES: return audience_state(d)
+    lock = open(d / "audience.lock", "a")
+    try:
+        try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError: return audience_state(d)
+        state = audience_state(d)
+        status, entries, detail = ask_audience(d, s)
+        now = time.time()
+        if status == "missing" and staff_list():
+            entries, detail, source = [{"pubkey": k, "kind": "staff"} for k in staff_list()], None, "machine"
+            status = "ok"
+        else:
+            source = "platform"
+        if status == "ok":
+            state = {"entries": entries, "source": source, "asOf": detail if source == "platform" else None,
+                     "at": now, "tried": now}
+        else:
+            state = {**state, "tried": now, "error": detail}
+        write_private(d / "audience.json", json.dumps(state))
+    finally:
+        lock.close()
+    if restart and running(d) and not applying(d):
+        launched = read_json(d / "launch.json") or {}
+        if isinstance(launched, dict) and launched.get("audience") != audience_launch(s, state)["fingerprint"]:
+            log_line("supervisor", f"audience of {d.name[:8]} changed; restarting it after its turn")
+            defer_apply(d)
+    return state
+
+
+def audience_launch(s, state=None):
+    """What buzz-acp's gate runs with for these settings and this list:
+    {"respondTo": buzz-acp's mode, "keys": [...], "fingerprint"}."""
+    mode = respond_to(s)
+    if mode == "anyone": gate, keys = "anyone", []
+    elif mode in AUDIENCE_MODES:
+        keys = audience_keys(s, (state or {}).get("entries") or [])
+        gate = "allowlist" if keys else "owner-only"  # none at all: closed, never open
+    else: gate, keys = "owner-only", []
+    fingerprint = hashlib.sha256(json.dumps([gate, keys]).encode()).hexdigest()[:16]
+    return {"respondTo": gate, "keys": keys, "fingerprint": fingerprint}
+
+
+def audience_due(d, now=None):
+    state = audience_state(d)
+    now = now or time.time()
+    every = AUDIENCE_EVERY if state.get("entries") is not None else AUDIENCE_RETRY
+    return now - (state.get("tried") or 0) >= every
+
+
+def spawn_audience(d):
+    """Starts `agentctl audience <pubkey>` detached; it outlives the supervisor's pass."""
+    env = {**base_env(), **root_env()}
+    if os.environ.get("AGENTCTL_NO_CRON"): env["AGENTCTL_NO_CRON"] = "1"
+    try:
+        subprocess.Popen([PYTHON, str(SELF), "audience", d.name], env=env, cwd=str(private_dir(RUN)),
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:
+        pass
+
+
+def audience_view(d, s):
+    """What list and status say about whom an agent answers: its choice, the
+    gate it runs (or would start) with, how many keys, from where and when."""
+    mode = respond_to(s)
+    view = {"respondTo": mode, **({"businessId": s.get("businessId")} if mode == "business" else {})}
+    state = audience_state(d) if mode in AUDIENCE_MODES else {}
+    launched = read_json(d / "launch.json") if running(d) else None
+    gate = (launched or {}).get("gate") if isinstance(launched, dict) and launched.get("gate") else audience_launch(s, state)
+    view["gate"] = gate.get("respondTo")
+    view["keys"] = len(gate.get("keys") or []) if isinstance(gate.get("keys"), list) else gate.get("keys")
+    if mode in AUDIENCE_MODES:
+        view["source"] = state.get("source") if state.get("entries") is not None else None
+        if state.get("asOf"): view["asOf"] = state["asOf"]
+        if state.get("at"): view["checkedAt"] = int(state["at"])
+        if state.get("error") and (state.get("tried") or 0) > (state.get("at") or 0): view["lastError"] = state["error"]
+    return view
+
+
+def audience_line(name, view):
+    """One line of `agentctl list`: whom the agent answers and how."""
+    mode = view["respondTo"] + (f" {view['businessId']}" if view.get("businessId") else "")
+    if view.get("gate") == "allowlist": how = f"allow-list of {view.get('keys')} from {view.get('source') or '?'}"
+    elif view["respondTo"] in AUDIENCE_MODES: how = "owner-only until a list arrives"
+    else: how = view.get("gate")
+    return f"{name}: {mode} ({how})"
+
+
 CONTROLS = {  # setting -> (buzz-acp's environment variable, int bounds or the allowed values, buzz-acp's default)
     "agents": ("BUZZ_ACP_AGENTS", (1, 8), 1),
     "sessionPolicy": ("BUZZ_ACP_SESSION_POLICY", ("channel", "thread"), "channel"),
@@ -2049,7 +2295,6 @@ def _start(d):
         "BUZZ_RELAY_URL": "wss://" + s["community"].split("://", 1)[1],
         "BUZZ_AUTH_TAG": json.dumps(s["auth"]),
         "BUZZ_ACP_AGENT_COMMAND": command,
-        "BUZZ_ACP_RESPOND_TO": s.get("respondTo") or "owner-only",
         "BUZZ_ACP_LAZY_POOL": "true",
     })
     # buzz-acp forwards this to the Black 4 connector, which sends it as the
@@ -2071,18 +2316,37 @@ def _start(d):
         })
     env.update(control_env(s))  # buzz-acp's own levers, as this agent set them
     if args: env["BUZZ_ACP_AGENT_ARGS"] = args
-    env.update(FULL_ACCESS[harness])
+    if access_of(s) == "platform":
+        # The customer-facing profile: see "the customer-facing profile".
+        if not platform_runner(): fail("A customer-facing agent runs only on this machine's customer-facing runner.")
+        if harness != "claude" or pays != "subscription" or respond_to(s) != "business":
+            fail("A customer-facing agent runs Claude Code on its creator's subscription and answers one business.")
+        problem = seated_problem(d, s)
+        if problem: fail(problem)
+        env[KEYS["claude"]["home_env"]] = str(platform_home(d))
+        env["BUZZ_ACP_PERMISSION_MODE"] = "default"
+    else:
+        env.update(FULL_ACCESS[harness])
     # buzz-acp declares one MCP server per session and hands it the agent's key
     # (nsec) and BUZZ_AUTH_TAG. Buzz's own tools are the agent's shell and the
     # buzz CLI, so the slot is free for Black 4. Missing connector: no MCP.
     if os.access(BLACK4_MCP, os.X_OK): env["BUZZ_ACP_MCP_COMMAND"] = str(BLACK4_MCP)
-    if s.get("allow"): env["BUZZ_ACP_RESPOND_TO_ALLOWLIST"] = ",".join(s["allow"])
+    # Whom it answers (see "whom an agent answers"): a staff or business agent
+    # asks for its list now unless it just did, and starts owner-only when
+    # it has never had one. `allow` is not used: no key outside the list.
+    audience = audience_state(d)
+    if respond_to(s) in AUDIENCE_MODES and time.time() - (audience.get("tried") or 0) >= AUDIENCE_FRESH:
+        audience = refresh_audience(d, restart=False)
+    gate = audience_launch(s, audience)
+    env["BUZZ_ACP_RESPOND_TO"] = gate["respondTo"]
+    if gate["keys"]: env["BUZZ_ACP_RESPOND_TO_ALLOWLIST"] = ",".join(gate["keys"])
     if (s.get("instructions") or "").strip():
         (d / "instructions.md").write_text(s["instructions"])
         env["BUZZ_ACP_SYSTEM_PROMPT_FILE"] = str(d / "instructions.md")
     # Never BUZZ_ACP_MODEL: see "model and effort" above.
     env.update(model_env)
-    write_private(d / "launch.json", json.dumps({**{k: picked.get(k) for k in ("model", "effort", "note", "checked")}, "compactAt": compact_at}))
+    write_private(d / "launch.json", json.dumps({**{k: picked.get(k) for k in ("model", "effort", "note", "checked")}, "compactAt": compact_at,
+                                                 "audience": gate["fingerprint"], "gate": {"respondTo": gate["respondTo"], "keys": len(gate["keys"])}}))
     cap_log(d / "agent.log", AGENT_LOG_CAP)
     # buzz-acp writes to agent.raw.log; the log filter follows it into
     # agent.log (see "an agent changing itself"). The filter for the previous
@@ -2122,11 +2386,13 @@ def harness_agents(harness, pays=None):
 
 def restart_harness_agents(harness, pays=None):
     """Restart activated agents on this harness (after a sign-in), or only
-    those paying the way that was signed in."""
+    those paying the way that was signed in. A new Claude sign-in also goes
+    to the customer-facing runner, for this person's agents there."""
     for d, s in harness_agents(harness, pays):
         if s.get("auth"):
             try: start(d)
             except Exception as e: log_line("supervisor", f"restart {d.name[:8]} failed: {str(e)[:200]}")
+    if harness == "claude" and pays in (None, "subscription"): sync_platform_signin()
 
 
 def stop_harness_agents(harness, pays=None):
@@ -2254,6 +2520,12 @@ def inside_agent(d, pid=None, tree=None):
         seen.add(p)
         p = tree[p][0]
     return p == agent
+
+
+def inside_any_agent():
+    """Whether this process runs inside any agent's own tree."""
+    tree = process_tree()
+    return any(inside_agent(d, tree=tree) for d in agent_dirs())
 
 
 def applying(d):
@@ -2472,6 +2744,9 @@ def recheck_launch(d, s):
     except Exception as e: log_line("supervisor", f"restart {d.name[:8]} failed: {str(e)[:200]}")
 
 
+AUDIENCE_SPAWNED = {}  # pubkey -> when this supervisor last started its refresh
+
+
 def supervise_pass(now=None):
     """One look at every agent: restart an activated agent that is not running,
     waiting 5, 10, 20 ... 300 s between restarts while it keeps stopping. One
@@ -2489,6 +2764,10 @@ def supervise_pass(now=None):
         if running(d):
             if r and now - r.get("at", now) > HEALTHY_AFTER: (d / "restarts.json").unlink(missing_ok=True)
             recheck_launch(d, s)
+            # Its list again about every 10 minutes (every minute while it has none), out of band.
+            if respond_to(s) in AUDIENCE_MODES and audience_due(d, now) and now - AUDIENCE_SPAWNED.get(d.name, 0) >= AUDIENCE_RETRY:
+                AUDIENCE_SPAWNED[d.name] = now
+                spawn_audience(d)
             continue
         if now < r.get("next", 0): continue
         if known_bad(slot_of(s.get("harness") or "claude", pays_of(s))): continue  # waits for a sign-in
@@ -3013,7 +3292,9 @@ def logout(harness, pays="subscription"):
     if pays == "key":
         if harness not in KEYS: fail("That harness has no API key on this machine.")
         forget_key(harness)
-    elif harness == "claude": forget_claude_token()
+    elif harness == "claude":
+        forget_claude_token()
+        sync_platform_signin()  # this person's agents there stop too
     elif harness in DEVICE: forget_device(harness)
     elif harness in MEMBER: forget_member(harness)
     else: fail("Buzz cannot sign that harness out on this machine.")
@@ -3048,6 +3329,208 @@ def community_url(value):
     if not isinstance(value, str) or not re.match(r"^(wss|https)://[A-Za-z0-9.-]+(:\d+)?/?$", value):
         fail("community must be a wss:// or https:// address")
     return "https://" + value.split("://", 1)[1].rstrip("/")
+
+
+# ---------------------------------------------------------------- the customer-facing profile
+# Staff agents keep full access (FULL_ACCESS). An agent customers talk to (an
+# account manager) runs with access "platform" instead:
+#   - Claude Code only, with the Black 4 MCP and WebFetch and nothing else: no
+#     shell, no file tools, no subagents. Two locks, each enough alone, both
+#     in the agent's own Claude home (agents/<pubkey>/claude, written at every
+#     start): Claude Code's deny rules, which take the tools out of the
+#     model's list, and a PreToolUse hook (`agentctl tool-gate`) that refuses
+#     every tool outside the allowed set. buzz-acp runs it in the adapter's
+#     default permission mode, never bypassPermissions; it approves every
+#     permission prompt itself, so a prompt is no lock. (claude-agent-acp
+#     0.94.0 offers no dontAsk mode, so buzz-acp could not set one.) Checked on
+#     the Commerce Mac, 2026-11-17, through claude-agent-acp as buzz-acp
+#     drives it: with the deny rules, Bash, Read, Write, Glob and Agent were
+#     not offered; with the hook alone, each was refused by it.
+#   - its audience is one business (respondTo "business").
+#   - it lives on a runner of its own, run by a separate macOS user with its
+#     own workforce root (runner.json {"profile": "platform"}), so even a
+#     broken lock reads none of the staff agents' keys or sign-ins. The main
+#     runner forwards every request about such an agent to that runner with
+#     `sudo -n -u <user>` (runner.json {"platform": {"user", "agentctl"}} on
+#     the main runner, written by machine/platform-user.sh), along with the
+#     creator's Claude sign-in, which the platform runner keeps in its own
+#     accounts/ (it cannot read the main runner's).
+ACCESS_PROFILES = ("full", "platform")
+PLATFORM_TOOLS = ("WebFetch", "ToolSearch")   # besides the Black 4 MCP's own (mcp__black4__*)
+PLATFORM_MCP_PREFIX = "mcp__black4__"
+PLATFORM_DENY = ("Bash", "BashOutput", "KillBash", "KillShell", "PowerShell", "Read", "Write", "Edit", "MultiEdit",
+                 "NotebookEdit", "NotebookRead", "Glob", "Grep", "LS", "LSP", "WebSearch", "Task", "Agent", "Workflow",
+                 "TaskCreate", "TaskUpdate", "TaskOutput", "TaskStop", "SendMessage", "Skill", "SlashCommand", "Monitor",
+                 "CronCreate", "CronDelete", "ScheduleWakeup", "RemoteTrigger", "EnterWorktree", "ExitWorktree",
+                 "EnterPlanMode", "ExitPlanMode", "TodoWrite", "ListMcpResourcesTool", "ReadMcpResourceTool", "mcp__acp")
+# Customers talk only to customer-facing agents: a full-access agent never
+# answers a business.
+BUSINESS_NEEDS_PLATFORM = ("An agent that answers a business is customer-facing: it is made as one (access platform), "
+                           "with only the Black 4 tools. A full-access agent answers staff.")
+FORWARDED_SIGNIN_OPS = {"provision", "activate", "start", "settings.set", "instructions.set", "heartbeat.set", "profile"}
+
+
+def access_of(s):
+    return "platform" if s.get("access") == "platform" else "full"
+
+
+def runner():
+    """This runner's runner.json: {"profile": "platform"} on the customer-facing
+    runner, {"platform": {...}} on a main runner that has one."""
+    data = read_json(RUNNER_FILE)
+    return data if isinstance(data, dict) else {}
+
+
+def platform_runner():
+    """Whether this is the customer-facing runner."""
+    return runner().get("profile") == "platform"
+
+
+def platform_target():
+    """The customer-facing runner the main runner forwards to, or None."""
+    target = runner().get("platform")
+    if not isinstance(target, dict) or not isinstance(target.get("agentctl"), str): return None
+    user = target.get("user")
+    if user is not None and not (isinstance(user, str) and re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", user)): return None
+    return target
+
+
+def seated_problem(d, s):
+    """Why this customer-facing agent may not start, or None. Black 4 acts as
+    an agent's owner unless the agent is seated in a business (Platform
+    Control's seat_agent), and then only in that business. So it starts only
+    when its own whoami says so: kind customer, businesses exactly its own."""
+    status, result = ask_black4(d, s, "whoami")
+    if status != "ok": return f"Black 4 could not confirm this agent's seat ({result}), so it does not start."
+    data = None
+    for part in (result or {}).get("content") or []:
+        if isinstance(part, dict) and part.get("type") == "text":
+            try: data = json.loads(part.get("text") or "")
+            except ValueError: pass
+            break
+    data = (data or {}).get("data", data) if isinstance(data, dict) else {}
+    business = s.get("businessId")
+    if data.get("kind") == "customer" and data.get("businesses") == [business]: return None
+    return (f"This customer-facing agent is not seated in {business}: Black 4 would let it act as its owner ({data.get('kind') or 'unknown'}). "
+            "Black 4 staff seat it first (seat_agent with this agent's key and that business).")
+
+
+def tool_allowed(name):
+    return isinstance(name, str) and (name in PLATFORM_TOOLS or (name.startswith(PLATFORM_MCP_PREFIX) and len(name) > len(PLATFORM_MCP_PREFIX)))
+
+
+def tool_gate():
+    """`agentctl tool-gate`: Claude Code's PreToolUse hook for a platform
+    agent. Exit 0 lets an allowed tool through; anything else, or input it
+    cannot read, exits 2, which blocks the call and tells the model why."""
+    try:
+        name = json.loads(sys.stdin.read() or "{}").get("tool_name")
+    except (ValueError, AttributeError):
+        name = None
+    if tool_allowed(name): return 0
+    sys.stderr.write(f"{name or 'This tool'} is not available to this agent. It has only the Black 4 tools and WebFetch.\n")
+    return 2
+
+
+def platform_settings():
+    """Claude Code's user settings for a platform agent."""
+    gate = f"{PYTHON} {SELF} tool-gate"
+    return {
+        "permissions": {"defaultMode": "default", "allow": ["mcp__black4", *PLATFORM_TOOLS], "deny": list(PLATFORM_DENY),
+                        "disableBypassPermissionsMode": "disable"},
+        "hooks": {"PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": gate, "timeout": 10}]}]},
+        "enableAllProjectMcpServers": False,
+        "disableAllHooks": False,
+    }
+
+
+def platform_home(d):
+    """The platform agent's own Claude home, its settings written anew."""
+    home = private_dir(d / "claude")
+    write_private(home / "settings.json", json.dumps(platform_settings(), indent=2))
+    return home
+
+
+def forward(req, signin=None):
+    """Sends one request to the customer-facing runner and returns its reply."""
+    target = platform_target()
+    if not target: fail("This machine has no customer-facing runner yet. A Black 4 admin sets one up (machine/platform-user.sh).")
+    argv = [target["agentctl"], *(["--caller", CALLER] if CALLER else [])]
+    if target.get("user"): argv = ["/usr/bin/sudo", "-n", "-u", target["user"], "-H", *argv]
+    body = dict(req, **({"signin": signin} if signin else {}))
+    env = {**base_env(), **({"AGENTCTL_HOME": target["home"]} if target.get("home") and not target.get("user") else {})}
+    try:
+        done = subprocess.run(argv, input=json.dumps(body), capture_output=True, text=True, timeout=180, env=env, cwd="/")
+    except (OSError, subprocess.TimeoutExpired) as e:
+        fail(f"The customer-facing runner did not answer ({type(e).__name__}).")
+    for line in reversed((done.stdout or "").strip().splitlines()):
+        try: reply = json.loads(line)
+        except ValueError: continue
+        if isinstance(reply, dict):
+            if not reply.get("ok"): fail(str(reply.get("error") or "the customer-facing runner refused"))
+            return reply
+    fail("The customer-facing runner did not answer: " + (done.stderr or "")[-200:].strip())
+
+
+def creator_signin(creator):
+    """The creator's Claude sign-in, for the customer-facing runner, which
+    cannot read this runner's accounts. None when they have none."""
+    if not creator: return None
+    saved = ACCOUNT
+    use_account(creator)
+    try:
+        token = claude_token()
+        return {"account": creator, "claude": token} if token else {"account": creator, "claude": None}
+    finally:
+        use_account(saved)
+
+
+def take_signin(signin):
+    """On the customer-facing runner: keep the creator's sign-in that came
+    with a forwarded request (None drops it)."""
+    if not isinstance(signin, dict) or not ACCOUNT_NAME.fullmatch(str(signin.get("account") or "")): return
+    saved = ACCOUNT
+    use_account(signin["account"])
+    try:
+        token = signin.get("claude")
+        if isinstance(token, str) and TOKEN_RE.fullmatch(token.strip()):
+            if claude_token() != token.strip(): save_claude_token(token.strip(), None)
+        elif token is None and claude_token():
+            forget_claude_token()
+    finally:
+        use_account(saved)
+
+
+def platform_rows(op):
+    """The customer-facing runner's agents, for list and identity here."""
+    if not platform_target(): return []
+    try: reply = forward({"op": op})
+    except Fail as e:
+        log_line("supervisor", f"customer-facing runner: {str(e)[:200]}")
+        return []
+    return [dict(row, runner="platform") for row in reply.get("agents") or [] if isinstance(row, dict)]
+
+
+def handle_forwarded(req):
+    """On the main runner: a request that belongs to the customer-facing
+    runner, sent there; None when it is this runner's own."""
+    if platform_runner() or not platform_target(): return None
+    op = req.get("op")
+    if op == "provision":
+        if (req.get("config") or {}).get("access") != "platform": return None
+        return forward(req, creator_signin(CALLER) if CALLER else None)
+    if not isinstance(req.get("pubkey"), str) or not HEX64.match(req["pubkey"]) or (AGENTS / req["pubkey"]).exists(): return None
+    rows = {row.get("pubkey"): row for row in platform_rows("list")}
+    if req["pubkey"] not in rows: return None
+    return forward(req, creator_signin(rows[req["pubkey"]].get("createdBy")) if op in FORWARDED_SIGNIN_OPS else None)
+
+
+def sync_platform_signin():
+    """After this runner's Claude sign-in changed: hand it to the customer-
+    facing runner, which restarts that person's agents on it."""
+    if platform_runner() or not platform_target() or not ACCOUNT: return
+    try: forward({"op": "signin.sync"}, creator_signin(ACCOUNT))
+    except Fail as e: log_line("supervisor", f"customer-facing runner sign-in sync: {str(e)[:200]}")
 
 
 # ---------------------------------------------------------------- requests
@@ -3104,6 +3587,20 @@ def handle(req):
     private_dir(AGENTS)
     # Sign-ins, the machine's status and its models are the caller's own.
     use_account(CALLER)
+    # A creator's sign-in comes along only from the main runner to the
+    # customer-facing one (see "the customer-facing profile"); from anyone
+    # else it is dropped unread.
+    signin = req.pop("signin", None)
+    if platform_runner(): take_signin(signin)
+    if op == "signin.sync":
+        if not platform_runner(): fail("unknown op")
+        who = signin.get("account") if isinstance(signin, dict) else None
+        use_account(who)
+        if claude_token(): restart_harness_agents("claude", "subscription")
+        else: stop_harness_agents("claude", "subscription")
+        return {"ok": True}
+    forwarded = handle_forwarded(req)
+    if forwarded is not None: return forwarded
 
     if op == "machine.status": return machine_status()
     if op == "models": return models_reply()
@@ -3143,6 +3640,20 @@ def handle(req):
         # harness takes it on the model the agent will run.
         runs = model or choice(harness, {"pays": pays}).get("model")
         compact_at = checked_compact(harness, config["compactAt"], runs) if config.get("compactAt") not in (None, "") else default_compact(harness, runs)
+        # Whom it answers: staff unless it says otherwise ("anyone" here is an
+        # older plugin's default, so it is staff too).
+        audience, business = checked_audience(config.get("respondTo"), config.get("businessId"), explicit_anyone=False)
+        access = config.get("access") or "full"
+        if access not in ACCESS_PROFILES: fail("access is full or platform")
+        if access == "platform":
+            if not platform_runner(): fail("This machine has no customer-facing runner yet. A Black 4 admin sets one up (machine/platform-user.sh).")
+            if harness != "claude": fail("A customer-facing agent runs Claude Code: it is the harness whose tools Black 4 locks down.")
+            if pays != "subscription": fail("A customer-facing agent pays with its creator's Claude subscription.")
+            if audience != "business": fail("A customer-facing agent answers one business: choose it (respondTo business, businessId).")
+        elif platform_runner():
+            fail("This runner is for customer-facing agents only (access platform).")
+        elif audience == "business":
+            fail(BUSINESS_NEEDS_PLATFORM)
         secret = secrets.token_hex(32)
         while not 0 < int(secret, 16) < N: secret = secrets.token_hex(32)
         pubkey = pubkey_of(secret)
@@ -3155,8 +3666,7 @@ def handle(req):
             "community": community,
             "harness": harness, "pays": pays, "model": model, "effort": effort, "compactAt": compact_at,
             "instructions": config.get("instructions") or "",
-            "respondTo": config.get("respondTo") or "owner-only",
-            "allow": [k for k in (config.get("allow") or []) if HEX64.match(str(k))],
+            "respondTo": audience, **({"businessId": business} if business else {}), "access": access,
             "createdAt": int(time.time()), "createdBy": CALLER,
         })
         return {"ok": True, "pubkey": pubkey}
@@ -3166,7 +3676,7 @@ def handle(req):
         # Black 4 account. Public keys only; no key file is opened.
         return {"ok": True, "agents": [
             {"pubkey": d.name, "name": read_settings(d).get("name"),
-             "owner": owner_of(read_settings(d))} for d in agent_dirs()]}
+             "owner": owner_of(read_settings(d))} for d in agent_dirs()] + platform_rows("identity")}
 
     if op == "list":
         rows, cache = [], {}
@@ -3174,10 +3684,10 @@ def handle(req):
             s = read_settings(d)
             as_agent(d, s)
             rows.append({"pubkey": d.name, "name": s.get("name"), "harness": s.get("harness"), "pays": pays_of(s),
-                         "respondTo": s.get("respondTo"), "activated": bool(s.get("auth")), "running": bool(running(d)),
+                         "respondTo": respond_to(s), "audience": audience_view(d, s), "activated": bool(s.get("auth")), "running": bool(running(d)),
                          "keepsStopping": keeps_stopping(d), "createdBy": s.get("createdBy"), "heartbeat": heartbeat_minutes(s),
-                         **model_fields(s, cache.setdefault(ACCOUNT, {}), d)})
-        return {"ok": True, "agents": rows}
+                         "access": access_of(s), **model_fields(s, cache.setdefault(ACCOUNT, {}), d)})
+        return {"ok": True, "agents": rows + platform_rows("list")}
 
     d = folder(req.get("pubkey"))
     if op in CHANGES and d.exists(): may_change(read_settings(d), op)
@@ -3205,8 +3715,16 @@ def handle(req):
             fail("auth must be a NIP-OA tag: [auth, owner, conditions, signature]")
         s["auth"] = auth
         s["community"] = community_url(req.get("community") or s["community"])
-        for key in ("harness", "model", "effort", "instructions", "respondTo", "heartbeat", "pays", "compactAt"):
+        for key in ("harness", "model", "effort", "instructions", "heartbeat", "pays", "compactAt"):
             if (req.get("config") or {}).get(key) is not None: s[key] = req["config"][key]
+        config = req.get("config") or {}
+        if config.get("respondTo") is not None:
+            # As at provision: "anyone" from the Create form is an older plugin's default.
+            s["respondTo"], business = checked_audience(config["respondTo"], config.get("businessId", s.get("businessId")), explicit_anyone=False)
+            if (s["respondTo"] == "business") != (access_of(s) == "platform"):
+                fail(BUSINESS_NEEDS_PLATFORM if s["respondTo"] == "business" else "A customer-facing agent answers one business.")
+            if business: s["businessId"] = business
+            else: s.pop("businessId", None)
         # What each heartbeat does, chosen with the agent ("" keeps Black 4's standard).
         prompt = (req.get("config") or {}).get("heartbeatPrompt")
         if prompt is not None:
@@ -3265,14 +3783,25 @@ def handle(req):
         # The agent's model and effort ("" is the harness's default here), how
         # it pays ("subscription" or "key"; "" settles the machine's default
         # now), compactAt (tokens; null for the harness's default), whom it
-        # answers (respondTo "anyone" or "owner-only", and allow: the public
-        # keys it also answers) and buzz-acp's levers. A field left out stays
+        # answers (respondTo and businessId: see "whom an agent answers";
+        # allow is kept for older plugins and not used) and buzz-acp's levers. A field left out stays
         # as it was; a new way of paying drops a model and effort not sent with
         # it, since the other sign-in offers its own. An activated agent
         # restarts on them.
-        if "respondTo" in req and req["respondTo"] not in RESPOND_TO: fail("respondTo is anyone or owner-only")
+        audience_change = any(k in req for k in ("respondTo", "businessId", "allow"))
+        if audience_change and CALLER is None and inside_any_agent():
+            # Whom an agent answers is a person's choice, never the agent's own
+            # (nor another agent's): an agent's shell runs agentctl as the admin.
+            fail("An agent cannot change whom an agent answers. A person changes it in the agent's Settings in Buzz.")
         if "allow" in req and (not isinstance(req["allow"], list) or any(not HEX64.match(str(k)) for k in req["allow"])):
             fail("allow is a list of public keys (64 hex characters each)")
+        current = read_settings(d)
+        if "respondTo" in req or "businessId" in req:
+            audience, business = checked_audience(req.get("respondTo", respond_to(current)), req.get("businessId", current.get("businessId")))
+            if access_of(current) == "platform" and audience != "business": fail("A customer-facing agent answers one business.")
+            if access_of(current) != "platform" and audience == "business": fail(BUSINESS_NEEDS_PLATFORM)
+        if access_of(current) == "platform" and req.get("pays") not in (None, "", "subscription"):
+            fail("A customer-facing agent pays with its creator's Claude subscription.")
         with agent_lock(d):
             s = read_settings(d)
             harness = s.get("harness") or "claude"
@@ -3285,11 +3814,15 @@ def handle(req):
             if "compactAt" in req: s["compactAt"] = checked_compact(harness, req["compactAt"], s["model"] or choice(harness, s).get("model"))
             for name in CONTROLS:
                 if name in req: s[name] = checked_control(name, req[name])
-            if "respondTo" in req: s["respondTo"] = req["respondTo"]
+            if "respondTo" in req or "businessId" in req:
+                if (audience, business) != (respond_to(s), s.get("businessId")): (d / "audience.json").unlink(missing_ok=True)
+                s["respondTo"] = audience
+                if business: s["businessId"] = business
+                else: s.pop("businessId", None)
             if "allow" in req: s["allow"] = list(dict.fromkeys(str(k) for k in req["allow"]))
             write_settings(d, s)
             if s.get("auth"): defer_apply(d) if me else _start(d)
-        return {"ok": True, "pays": pays, "respondTo": s.get("respondTo"), "allow": s.get("allow") or [], **model_fields(s, d=d), **later}
+        return {"ok": True, "pays": pays, "respondTo": respond_to(s), "audience": audience_view(d, s), "allow": s.get("allow") or [], **model_fields(s, d=d), **later}
 
     if op == "start":
         if me:
@@ -3300,13 +3833,22 @@ def handle(req):
     if op == "status":
         r = restarts(d)
         return {"ok": True, "running": bool(running(d)), "activated": bool(s.get("auth")),
-                "name": s.get("name"), "harness": s.get("harness"), "pays": pays_of(s), "respondTo": s.get("respondTo"), "allow": s.get("allow") or [],
-                "keepsStopping": keeps_stopping(d), "restarts": r.get("count", 0), **model_fields(s, d=d),
+                "name": s.get("name"), "harness": s.get("harness"), "pays": pays_of(s), "respondTo": respond_to(s), "audience": audience_view(d, s), "allow": s.get("allow") or [],
+                "keepsStopping": keeps_stopping(d), "restarts": r.get("count", 0), "access": access_of(s), **model_fields(s, d=d),
                 "createdBy": s.get("createdBy"), "yours": bool(CALLER) and s.get("createdBy") == CALLER,
                 **({"nextRestart": int(r["next"])} if r.get("next") and not running(d) else {}),
                 "log": log_tail(d, 1500)}
 
     fail("unknown op")
+
+
+def print_list():
+    """`agentctl list`: each agent, whom it answers and whether it runs."""
+    for d in agent_dirs():
+        s = read_settings(d)
+        state = "running" if running(d) else ("stopped" if s.get("auth") else "not set up")
+        print(f"{d.name[:8]}  {audience_line(s.get('name') or '?', audience_view(d, s))}; {LABEL.get(s.get('harness') or 'claude', '?')}, {state}")
+    return 0
 
 
 def adopt_signins(who):
@@ -3347,7 +3889,11 @@ def main(argv=None):
         CALLER, argv = argv[1], []
     use_account(os.environ.get("AGENTCTL_ACCOUNT") or None)
     if argv[:1] == ["adopt-signins"] and len(argv) == 2: return adopt_signins(argv[1])
+    if argv[:1] == ["tool-gate"] and len(argv) == 1: sys.exit(tool_gate())
     if argv[:1] == ["supervise"]: return supervise()
+    if argv[:1] == ["audience"] and len(argv) == 2 and HEX64.match(argv[1]) and (AGENTS / argv[1]).is_dir():
+        return refresh_audience(AGENTS / argv[1]) and None
+    if argv[:1] == ["list"] and len(argv) == 1: sys.exit(print_list())
     if argv[:1] == ["doctor"]: sys.exit(print_doctor())
     if argv[:1] == ["login-helper"] and len(argv) == 2: return login_helper(argv[1])
     if argv[:1] == ["check"] and len(argv) == 2 and harness_of(argv[1]) in SIGN_IN: return run_check(argv[1])

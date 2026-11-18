@@ -7,6 +7,7 @@ import {
   askMachine, hardwareProvider, hardwareDefaults, HEARTBEAT_MINUTES, HEARTBEAT_CHOICES, heartbeatChoices, beatFrom, heartbeatRemote, MACHINES, machineOf, statusReader, harnessOptions, signInState, readyToCreate, takesKey, defaultPays, PAYS,
   createLogin, agentDirectory, summaryOf, signInOf, doorTransport, bodySha256, createSession, createMcp, readAnswer, memoryStore,
   modelsReader, modelChoices, applyPick, setModel, applyHardware, COMPACT_OPTIONS, buzzUi, CONVERSATION_ROWS, controlOptions, controlValue,
+  audienceValue, audienceSettings, audienceOptions, businessesOf,
 } from "../plugins/black4/plugin.js";
 import { fakeAuthKit, fakeMcp, fakeDoor, https, sha256url, DOOR } from "./fakes.mjs";
 
@@ -357,7 +358,7 @@ const pillsIn = (tree) => rowsIn(tree).filter((row) => row.options);
 const buttonsIn = (tree) => all(tree, (node) => has(node, "buzz-button")).map((button) => ({ label: textIn(button).trim(), disabled: button.props.disabled, click: () => button.props.onClick?.({ preventDefault() {} }) }));
 
 /** The hardware type registered on a test host whose machine answers `reply`. */
-function hardwareOn(reply) {
+function hardwareOn(reply, { businesses } = {}) {
   const { React, settle, unmount } = testReact();
   const asked = [];
   const pages = {};
@@ -368,7 +369,7 @@ function hardwareOn(reply) {
     agents: { register: (registered) => { type = registered; } },
     pages: { register: (page) => { pages[page.id] = page; } },
   };
-  applyHardware(ctx, { sign: async () => ({ pass: "test-pass" }) });
+  applyHardware(ctx, { sign: async () => ({ pass: "test-pass" }), businesses });
   return { type, pages, React, settle, unmount, asked };
 }
 
@@ -455,9 +456,9 @@ test("render: the Create agent form is one card of rows, with Model and Thinking
   const card = find(tree, (node) => has(node, "buzz-settings-group"));
   assert.ok(card, "a Buzz settings card");
   assert.ok(has(card.props.children.filter(Boolean)[0], "host"), "the host's Harness row comes first in the card");
-  assert.deepEqual(rowsIn(tree).map((row) => row.title), ["Harness", "Runs on", "Runs", "Model", "Thinking", "Answers", "Sign-in", "Heartbeat"]);
+  assert.deepEqual(rowsIn(tree).map((row) => row.title), ["Harness", "Runs on", "Runs", "Model", "Thinking", "Audience", "Sign-in", "Heartbeat"]);
   const pills = pillsIn(tree);
-  assert.deepEqual(pills.map((entry) => [entry.title, entry.value]), [["Runs on", "commerce"], ["Runs", "claude"], ["Model", "claude-fable-5-2"], ["Thinking", "high"], ["Answers", "anyone"]]);
+  assert.deepEqual(pills.map((entry) => [entry.title, entry.value]), [["Runs on", "commerce"], ["Runs", "claude"], ["Model", "claude-fable-5-2"], ["Thinking", "high"], ["Audience", "staff"]], "a new agent answers staff");
   assert.deepEqual(pills[2].options, ["claude-fable-5-2", "opus"]);
   assert.deepEqual(pills[3].options, ["low", "medium", "high", "xhigh", "max"]);
   pills[2].pick("opus");
@@ -468,7 +469,7 @@ test("render: the Create agent form is one card of rows, with Model and Thinking
     "every control is a Buzz primitive");
   const older = hardwareOn((request) => (request.op === "models" ? UNKNOWN : fleet(request)));
   const plain = await older.settle(older.React.createElement(older.type.CreateConfiguration, { config: hardwareDefaults(), onChange: () => {} }));
-  assert.deepEqual(pillsIn(plain).map((entry) => entry.title), ["Runs on", "Runs", "Answers"], "an older machine: no Model or Thinking, no Conversations");
+  assert.deepEqual(pillsIn(plain).map((entry) => entry.title), ["Runs on", "Runs", "Audience"], "an older machine: no Model or Thinking, no Conversations");
   assert.deepEqual(all(plain, (node) => has(node, "buzz-content-header-title")).map((node) => textIn(node).trim()), ["Heartbeat"]);
 });
 
@@ -551,7 +552,7 @@ test("render: a harness that takes an API key gets Pays with, and the model list
   const tree = await settle(React.createElement(type.CreateConfiguration, {
     config: { ...hardwareDefaults(), harness: "qwen" }, onChange: (next) => changes.push(next), disabled: false }));
   const pills = pillsIn(tree);
-  assert.deepEqual(pills.slice(0, 6).map((entry) => entry.title), ["Runs on", "Runs", "Pays with", "Model", "Compact at", "Answers"]);
+  assert.deepEqual(pills.slice(0, 6).map((entry) => entry.title), ["Runs on", "Runs", "Pays with", "Model", "Compact at", "Audience"]);
   assert.deepEqual([pills[2].value, pills[2].options], ["subscription", ["subscription", "key"]]);
   assert.deepEqual(pills[3].options, ["qwen4-max", "qwen3.8-max"]);
   assert.deepEqual([pills[4].value, pills[4].options], ["150000", ["", "50000", "100000", "150000", "250000", "500000"]]);
@@ -584,7 +585,7 @@ test("render: Settings splits into Identity and Settings, each a titled card of 
   assert.doesNotMatch(textIn(identity), /HOST/, "the host's own settings show on the Settings tab only");
   const runtime = await settle(React.createElement(tab.component, { agent: { pubkey: PUBKEY }, settingsHost: host, settingsSection: "runtime", settingsContent: "HOST" }));
   assert.deepEqual(all(runtime, (node) => has(node, "buzz-content-header-title")).map((node) => textIn(node).trim()), ["Machine", "Heartbeat", "Conversations"]);
-  assert.deepEqual(rowsIn(runtime).map((row) => row.title), ["Runs on", "Runs", "Pays with", "API key", "Status", "Answers", "Heartbeat",
+  assert.deepEqual(rowsIn(runtime).map((row) => row.title), ["Runs on", "Runs", "Pays with", "API key", "Status", "Audience", "Heartbeat",
     "Parallel work", "Session per", "New message while working", "Fresh session after", "Max turn length", "Context for replies"]);
   assert.match(textIn(runtime), /HOST$/);
   assert.equal(rowsIn(runtime).find((row) => row.title === "Runs on").description, "");
@@ -596,7 +597,7 @@ test("render: Settings shows how the agent pays and its levers, and a change goe
   const { type, React, settle, asked } = hardwareOn(qwenFleet);
   const tree = await settle(React.createElement(type.tabs[0].component, { agent: { pubkey: PUBKEY } }));
   const pills = pillsIn(tree);
-  assert.deepEqual(pills.map((entry) => [entry.title, entry.value]), [["Model", "qwen3.7-plus"], ["Compact at", "250000"], ["Pays with", "key"], ["Answers", "anyone"],
+  assert.deepEqual(pills.map((entry) => [entry.title, entry.value]), [["Model", "qwen3.7-plus"], ["Compact at", "250000"], ["Pays with", "key"], ["Audience", "anyone"],
     ["Parallel work", ""], ["Session per", "thread"], ["New message while working", ""], ["Fresh session after", ""], ["Max turn length", ""], ["Context for replies", "20"]]);
   assert.deepEqual(pills[0].options, ["qwen4-max", "qwen3.7-plus"], "the key's listing");
   const sent = async () => { await new Promise((resolve) => setTimeout(resolve, 10)); const request = asked.find((entry) => entry.op === "settings.set"); asked.length = 0; return request; };
@@ -614,8 +615,8 @@ test("render: Settings shows how the agent pays and its levers, and a change goe
   pillsIn(more).find((entry) => entry.title === "Max turn length").pick("3600");
   assert.deepEqual(await sent(), { op: "settings.set", pubkey: PUBKEY, maxTurnDuration: 3600 });
   const answers = await settle(React.createElement(type.tabs[0].component, { agent: { pubkey: PUBKEY } }));
-  const pill = pillsIn(answers).find((entry) => entry.title === "Answers");
-  assert.deepEqual(pill.options, ["anyone", "owner-only"]);
+  const pill = pillsIn(answers).find((entry) => entry.title === "Audience");
+  assert.deepEqual(pill.options, ["staff", "owner-only", "anyone"]);
   pill.pick("owner-only");
   assert.deepEqual(await sent(), { op: "settings.set", pubkey: PUBKEY, respondTo: "owner-only" }, "whom it answers is a setting too");
 });
@@ -659,7 +660,7 @@ test("render: Settings shows what an agent with no choice was started with, and 
       modelChosen: false, effortChosen: false, modelProblem: "Claude Code does not offer the model x on this machine. Choose another model for this agent." }
     : fleet(request)));
   const tree = await settle(React.createElement(type.tabs[0].component, { agent: { pubkey: PUBKEY } }));
-  assert.deepEqual(pillsIn(tree).map((entry) => [entry.title, entry.value]), [["Model", "opus"], ["Thinking", "medium"], ["Answers", "anyone"]]);
+  assert.deepEqual(pillsIn(tree).map((entry) => [entry.title, entry.value]), [["Model", "opus"], ["Thinking", "medium"], ["Audience", "anyone"]]);
   assert.match(textIn(find(tree, (node) => has(node, "buzz-field-error"))), /does not offer the model x on this machine/);
   assert.deepEqual(rowsIn(tree).find((row) => row.title === "Status") && textIn(find(tree, (node) => node.props.children?.includes?.("Stopped"))).trim(), "Stopped");
 });
@@ -668,12 +669,12 @@ test("render: Settings shows the agent's own model and effort, and a change is s
   const { type, React, settle, asked } = hardwareOn(fleet);
   const tree = await settle(React.createElement(type.tabs[0].component, { agent: { pubkey: PUBKEY } }));
   const pills = pillsIn(tree);
-  assert.deepEqual(pills.map((entry) => [entry.title, entry.value]), [["Model", "opus"], ["Thinking", "max"], ["Answers", "anyone"]]);
+  assert.deepEqual(pills.map((entry) => [entry.title, entry.value]), [["Model", "opus"], ["Thinking", "max"], ["Audience", "anyone"]]);
   pills[0].pick("claude-fable-5-2");
   await new Promise((resolve) => setTimeout(resolve, 10));
   assert.deepEqual(asked.find((request) => request.op === "settings.set"), { op: "settings.set", pubkey: PUBKEY, model: "", effort: "max" });
-  assert.equal(pillsIn(tree).length, 3, "Model, Thinking, Answers; no Conversations card: this machine lists no levers");
-  assert.deepEqual(buttonsIn(tree).map((button) => button.label), ["Opus 5.5", "Max", "Restart", "Everyone in the community"], "the pills (showing their value), and Restart; Save shows once the instructions change");
+  assert.equal(pillsIn(tree).length, 3, "Model, Thinking, Audience; no Conversations card: this machine lists no levers");
+  assert.deepEqual(buttonsIn(tree).map((button) => button.label), ["Opus 5.5", "Max", "Restart", "Everyone"], "the pills (showing their value), and Restart; Save shows once the instructions change");
 });
 
 test("render: the heartbeat is a switch row, its interval a choice, and a change is sent to its machine", async () => {
@@ -1270,4 +1271,59 @@ test("Black 4 agents: a dock page lists every agent on the machine, whoever made
   const opened = await settle(React.createElement(page.component));
   assert.match(textIn(opened), /Chris Opus/);
   assert.ok(buttonsIn(opened).some((button) => button.label === "Restart"), "the agent's Settings, with its Restart");
+});
+
+// Fictional businesses: no customer names in this repository.
+const BUSINESSES = { data: { businesses: [
+  { businessId: "business-acme", name: "Acme Goods", status: "active" },
+  { businessId: "business-old", name: "Old Shop", status: "retired" },
+  { businessId: "business-plain", status: "active" },
+] } };
+
+test("audience: one choice per audience, and what the machine takes for it", () => {
+  assert.equal(audienceValue("business", "business-acme"), "business:business-acme");
+  assert.equal(audienceValue("business", ""), "business");
+  assert.equal(audienceValue("staff"), "staff");
+  assert.deepEqual(audienceSettings("business:business-acme"), { respondTo: "business", businessId: "business-acme", access: "platform" }, "customer-facing");
+  assert.deepEqual(audienceSettings(""), { respondTo: "staff", businessId: "", access: "full" });
+  assert.deepEqual(businessesOf(BUSINESSES), [{ id: "business-acme", name: "Acme Goods" }, { id: "business-plain", name: "business-plain" }], "retired ones left out");
+  assert.deepEqual(businessesOf({ businesses: "nope" }), []);
+  const rows = businessesOf(BUSINESSES);
+  assert.deepEqual(audienceOptions(rows).map((o) => o.id), ["staff", "business:business-acme", "business:business-plain"], "the form: Staff or one business");
+  assert.deepEqual(audienceOptions(rows, { settings: true }).map((o) => o.id).slice(-2), ["owner-only", "anyone"]);
+  assert.deepEqual(audienceOptions([], { current: "business:business-gone" }).map((o) => o.label), ["Staff", "business-gone"], "a choice the list lacks still shows");
+});
+
+test("render: the Create form's Audience offers Staff or one business, and Create sends the business", async () => {
+  let listed = 0;
+  const { type, React, settle } = hardwareOn(fleet, { businesses: async () => { listed += 1; return BUSINESSES; } });
+  let config = {};
+  const form = () => React.createElement(type.CreateConfiguration, { config: { ...hardwareDefaults(), ...config }, onChange: (next) => { config = next; }, disabled: false });
+  const tree = await settle(form());
+  const pill = pillsIn(tree).find((entry) => entry.title === "Audience");
+  assert.equal(pill.value, "staff");
+  assert.deepEqual(pill.options, ["staff", "business:business-acme", "business:business-plain"]);
+  pill.pick("business:business-acme");
+  assert.deepEqual([config.respondTo, config.businessId, config.access], ["business", "business-acme", "platform"]);
+  await settle(form());
+  assert.equal(listed, 1, "read once");
+  const box = machine((request) => (request.op === "provision" ? { ok: true, pubkey: PUBKEY } : { ok: true }));
+  await hardwareProvider(box.ask).provision({ name: "Account manager", community: "wss://relay.example.com", config });
+  assert.deepEqual([box.seen[0].request.config.respondTo, box.seen[0].request.config.businessId, box.seen[0].request.config.access], ["business", "business-acme", "platform"]);
+});
+
+test("render: Settings sends a business as respondTo and businessId, and a customer-facing agent is offered businesses only", async () => {
+  const platform = (request) => (request.op === "status"
+    ? { ok: true, running: true, activated: true, harness: "claude", access: "platform", respondTo: "business", audience: { respondTo: "business", businessId: "business-acme" } }
+    : fleet(request));
+  const { type, React, settle, asked } = hardwareOn(platform, { businesses: async () => BUSINESSES });
+  const tree = await settle(React.createElement(type.tabs[0].component, { agent: { pubkey: PUBKEY } }));
+  const again = await settle(React.createElement(type.tabs[0].component, { agent: { pubkey: PUBKEY } }));
+  const pill = pillsIn(again).find((entry) => entry.title === "Audience");
+  assert.equal(pill.value, "business:business-acme");
+  assert.deepEqual(pill.options, ["business:business-acme", "business:business-plain"]);
+  pill.pick("business:business-plain");
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(asked.find((request) => request.op === "settings.set"), { op: "settings.set", pubkey: PUBKEY, respondTo: "business", businessId: "business-plain" });
+  void tree;
 });

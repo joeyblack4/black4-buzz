@@ -190,9 +190,20 @@ if [ -f "$SRC/machine/agentctl" ]; then
 fi
 
 if [ -f "$SRC/machine/pins.json" ]; then cp "$SRC/machine/pins.json" "$ROOT/pins.json"; fi
+# The static staff list: whom a staff agent answers until Platform Control
+# answers get_buzz_audience (agentctl, "whom an agent answers").
+if [ -f "$SRC/machine/staff.json" ]; then cp "$SRC/machine/staff.json" "$ROOT/staff.json.tmp"; mv "$ROOT/staff.json.tmp" "$ROOT/staff.json"; fi
 
 if [ -n "${MACHINE_NAME:-}" ]; then
   printf '{"name": "%s"}\n' "$MACHINE_NAME" > "$ROOT/machine.json"
+fi
+
+# RUNNER_PROFILE=platform: the customer-facing runner (agentctl, "the
+# customer-facing profile"), run by its own macOS user. It runs only platform
+# agents and has no door: the main runner forwards to it.
+if [ "${RUNNER_PROFILE:-}" = platform ]; then
+  printf '{"profile": "platform"}\n' > "$ROOT/runner.json.tmp"
+  mv "$ROOT/runner.json.tmp" "$ROOT/runner.json"
 fi
 
 # The hardware door (machine/door.mjs): agentctl over HTTPS for a Platform
@@ -201,7 +212,7 @@ fi
 # comes through it), so it has its own cron lines, apart from the supervisor's,
 # which agentctl drops once no agent is left. Each root has its own mark; the
 # lines are matched on how they end, so one root never touches another's.
-if [ -f "$SRC/machine/door.mjs" ]; then
+if [ -f "$SRC/machine/door.mjs" ] && [ "${RUNNER_PROFILE:-}" != platform ]; then
   cp "$SRC/machine/door.mjs" "$BIN/door.mjs.tmp"
   chmod 644 "$BIN/door.mjs.tmp"
   mv "$BIN/door.mjs.tmp" "$BIN/door.mjs"
@@ -233,3 +244,15 @@ if [ -x "$BIN/agentctl" ]; then
   BLACK4_WORKFORCE_ROOT="$ROOT" "$BIN/agentctl" doctor || { echo "setup finished, but this machine cannot run agents yet (see PROBLEM above)" >&2; exit 1; }
 fi
 echo "setup done"
+
+# The main runner installs the same files for its customer-facing runner,
+# when runner.json names one (machine/platform-user.sh writes it): as that
+# user, through the one sudo rule that script adds, into its own home.
+if [ "${RUNNER_PROFILE:-}" != platform ] && [ -d "$SRC/machine" ] && [ -f "$ROOT/runner.json" ]; then
+  PLATFORM_USER=$(/usr/bin/sed -n 's/.*"user": *"\([a-z_][a-z0-9_-]*\)".*/\1/p' "$ROOT/runner.json" | head -n 1)
+  if [ -n "$PLATFORM_USER" ]; then
+    echo "customer-facing runner ($PLATFORM_USER):"
+    (cd "$SRC" && COPYFILE_DISABLE=1 tar -cf - machine bridge) |
+      /usr/bin/sudo -n -u "$PLATFORM_USER" -H /bin/sh -c 'set -e; cd "$HOME"; R="$HOME/workforce"; S="$R/.staging"; rm -rf "$S"; mkdir -p "$S"; tar -xf - -C "$S"; RUNNER_PROFILE=platform BLACK4_WORKFORCE_ROOT="$R" sh "$S/machine/setup.sh"'
+  fi
+fi

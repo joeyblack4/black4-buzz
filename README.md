@@ -44,8 +44,8 @@ Terminal, Node, Tailscale or an SSH key.
    and in the Black 4 hardware form. You should see **Connected**, your email *(staff)* if you are staff, and a
    number of agent tools. **Agent access** says **Linked**.
 4. **New agent** (staff). Go to **Agents → New agent → Black 4 hardware**.
-   Give it a name, choose what it runs (Claude Code if unsure) and who it
-   answers, then **Create**. If the machine isn't signed in to that harness
+   Give it a name, choose what it runs (Claude Code if unsure) and its
+   **Audience** (Staff, unless it is a customer's account manager), then **Create**. If the machine isn't signed in to that harness
    yet, the form offers **Sign in**.
 
 ### What signing in does
@@ -164,7 +164,7 @@ listed as unavailable, with the reason.
 The form and the agent's tabs are Buzz's own rows. **Identity** holds
 Harness, Model, Thinking, Compact at and Instructions. **Settings** holds the
 machine (Runs on and Runs, fixed for an agent's life; Pays with, Sign-in, Status
-with Restart, Answers), the
+with Restart, Audience), the
 Heartbeat (on or off, how often it wakes, and what it does each time) and
 **Conversations**: buzz-acp's own levers for this agent (Parallel work, Session
 per, New message while working, Fresh session after, Max turn length, Context
@@ -407,6 +407,63 @@ with who made it, and **Open** shows the same Settings its maker sees: any
 staff member changes its instructions, model, heartbeat and how it answers,
 and restarts it. An agent always runs on its maker's own sign-in, whoever
 changes it; only its maker (or an admin) removes it.
+
+## Whom an agent answers
+
+Staff and customers share one Buzz community (Joey, 2026-11-17), so every
+Black 4 hardware agent answers exactly one **Audience**:
+
+- **Staff** (every new agent's): Black 4 staff only.
+- **One business**: staff, plus the people linked to that customer business.
+  This is what a customer's account manager runs.
+- **Only me** and **Everyone** are in Settings only. Everyone is only for an
+  agent that holds no business data, and is never a default.
+
+The machine asks Platform Control (`get_buzz_audience`, signed as the agent)
+whose Buzz keys that audience holds, when the agent starts and about every 10
+minutes, and buzz-acp answers only those keys (`BUZZ_ACP_RESPOND_TO=allowlist`).
+A changed list restarts the agent once its turn ends. A failed check keeps the
+last list. An agent that has never had a list answers only its owner. Until
+Platform Control has `get_buzz_audience`, the staff list in
+[`machine/staff.json`](machine/staff.json) stands in for it.
+
+What buzz-acp 0.5.30 does with the list: channel messages and their threads
+pass when the author is listed, is the agent's owner, or is another agent of
+the same owner. **Direct messages are never opened up by the list:** only the
+owner and the owner's own agents get a DM answered. Reach someone else's agent
+with an @mention in a channel or a thread.
+
+`agentctl list` on the machine prints each agent's audience: for example,
+*Opus Code: staff (allow-list of 4 from machine)*.
+
+## Customer-facing agents
+
+Staff agents keep full access. An agent that customers talk to (an account
+manager) is made with `access: "platform"` instead:
+
+- It runs Claude Code with only the Black 4 MCP and WebFetch. It has no shell,
+  no file tools and no subagents. Two locks each refuse everything else:
+  Claude Code's deny rules, which take those tools off its list, and a
+  `PreToolUse` hook (`agentctl tool-gate`). It never runs in
+  `bypassPermissions`. Checked through claude-agent-acp on the Commerce Mac.
+- **Its Black 4 access is still its owner's.** Black 4 acts as the person whose
+  Buzz key the agent attests. An account manager owned by a staff member can
+  read every business until Platform Control limits a seated agent to its
+  business.
+- Its audience is one business.
+- It runs as a separate macOS user with its own `~/workforce`, so it cannot
+  read the staff agents' keys or sign-ins. The main runner forwards every
+  request about it to that user with `sudo -u`, along with its creator's Claude
+  sign-in.
+
+A Black 4 admin sets up that user once, on the machine, with the admin's
+password:
+
+```bash
+sudo sh ~/workforce/.staging/machine/platform-user.sh
+```
+
+After that, `machine/deploy.sh` installs the release for that user too.
 
 ## Agents on your own Claude or Grok subscription
 

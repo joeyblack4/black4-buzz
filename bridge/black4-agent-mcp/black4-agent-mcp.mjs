@@ -23,7 +23,10 @@
 // BLACK4_MCP_TOOLS (default: every tool, as for any agent), BLACK4_MCP_TIMEOUT_MS
 // (default 15 minutes). Nothing is read from disk. The key, the attestation
 // and the signed header are never logged.
-import { createHash } from "node:crypto";
+//
+// `black4-agent-mcp --call <tool>` makes one call as the agent instead and
+// prints one JSON line (agentctl asks get_buzz_audience this way).
+import { createHash, randomBytes } from "node:crypto";
 import { createInterface } from "node:readline";
 import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
@@ -328,8 +331,54 @@ export function createConnector({ env = process.env, write, fetchFn = fetch, log
     return write({ jsonrpc: "2.0", id: message.id, error: { code: -32000, message: sentence } });
   }
 
+  /** One tool call outside any session, for agentctl (`--call <tool>`):
+   * initialize, tools/list, then tools/call when the server lists the tool.
+   * Answers { ok: true, result } or { ok: false, kind, detail }, where kind
+   * "missing" means the server works and has no such tool (not live yet). */
+  async function callOnce(name, args = {}) {
+    if (setupProblem) return { ok: false, kind: "setup", detail: setupProblem };
+    // Ids of their own, so two calls in the same second never sign the same
+    // body (the server takes each signed event once).
+    const nonce = randomBytes(6).toString("hex");
+    const step = async (name, method, params) => {
+      const id = `${name}-${nonce}`;
+      const result = await post({ jsonrpc: "2.0", id, method, params }, { passThrough: false });
+      if (result.kind !== "ok") return { fail: { ok: false, kind: result.kind, detail: sentenceFor(result) } };
+      const reply = result.messages.find((m) => m?.id === id);
+      if (!reply) return { fail: { ok: false, kind: "error", detail: `Black 4 gave no answer to ${method}.` } };
+      if (reply.error) return { fail: { ok: false, kind: "error", detail: plain(reply.error.message || `JSON-RPC error ${reply.error.code}`), code: reply.error.code } };
+      return { value: reply.result };
+    };
+    const init = await step("init", "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "agentctl", version: VERSION } });
+    if (init.fail) return init.fail;
+    protocolVersion = init.value?.protocolVersion || "2025-06-18";
+    await post({ jsonrpc: "2.0", method: "notifications/initialized" }, { passThrough: false });
+    const listed = await step("list", "tools/list", {});
+    if (listed.fail) return listed.fail;
+    const names = new Set((listed.value?.tools ?? []).map((tool) => tool?.name));
+    // A server that lists only some tools reaches the rest through call_tool.
+    const viaCallTool = !names.has(name) && names.has("call_tool");
+    if (!names.has(name) && !viaCallTool) return { ok: false, kind: "missing", detail: `Black 4 has no ${name} tool for this agent.` };
+    const called = await step("call", "tools/call", viaCallTool ? { name: "call_tool", arguments: { name, arguments: args } } : { name, arguments: args });
+    // What a server answers for a tool it does not have, or does not offer this
+    // agent ("Tool get_buzz_audience not found", -32602): missing, not failed.
+    const unknown = /unknown tool|not found|no such tool|not_found/i;
+    if (called.fail) {
+      return called.fail.kind === "error" && unknown.test(called.fail.detail)
+        ? { ok: false, kind: "missing", detail: `Black 4 has no ${name} tool for this agent.` } : called.fail;
+    }
+    if (called.value?.isError) {
+      const text = (called.value.content ?? []).filter((part) => part?.type === "text").map((part) => part.text).join(" ");
+      if (viaCallTool && unknown.test(text)) {
+        return { ok: false, kind: "missing", detail: `Black 4 has no ${name} tool for this agent.` };
+      }
+      return { ok: false, kind: "refused", detail: plain(text) || `${name} answered with an error.` };
+    }
+    return { ok: true, result: called.value };
+  }
+
   function close() { for (const c of inflight.values()) c.abort(new Error("cancelled")); }
-  return { handle, close, endpoint: endpoint.href, owner };
+  return { handle, close, callOnce, endpoint: endpoint.href, owner };
 }
 
 /** Server-sent events: write each `data:` JSON message as it arrives. */
@@ -363,7 +412,33 @@ async function readEvents(stream, emit) {
 
 // ---------------------------------------------------------------- stdio
 
+/** `black4-agent-mcp --call <tool>`: one call as the agent, its JSON
+ * arguments on stdin (default {}), one JSON line out (see callOnce). The key
+ * and attestation come from the environment, as for the server. */
+async function callMain(name) {
+  const log = (text) => process.stderr.write(`black4-agent-mcp: ${text}\n`);
+  let input = "";
+  if (!process.stdin.isTTY) for await (const chunk of process.stdin) input += chunk;
+  let args = {};
+  try { args = input.trim() ? JSON.parse(input) : {}; } catch { args = null; }
+  const answer = args && typeof args === "object" && !Array.isArray(args)
+    ? await createConnector({ write: () => {}, log }).callOnce(name, args)
+    : { ok: false, kind: "setup", detail: "the arguments on stdin are not a JSON object" };
+  process.stdout.write(`${JSON.stringify(answer)}\n`);
+}
+
 function main() {
+  if (process.argv[2] === "--call") {
+    const name = process.argv[3];
+    if (!/^[a-z][a-z0-9_]{0,63}$/.test(name ?? "")) {
+      process.stdout.write(`${JSON.stringify({ ok: false, kind: "setup", detail: "--call takes a tool name" })}\n`);
+      return;
+    }
+    void callMain(name).catch((error) => {
+      process.stdout.write(`${JSON.stringify({ ok: false, kind: "error", detail: plain(error?.message, 200) })}\n`);
+    });
+    return;
+  }
   const log = (text) => process.stderr.write(`black4-agent-mcp: ${text}\n`);
   const write = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
   const connector = createConnector({ write, log });

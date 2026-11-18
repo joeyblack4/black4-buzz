@@ -1728,6 +1728,19 @@ export const HARNESSES = [
 export const audienceValue = (respondTo, businessId) =>
   (respondTo === "business" && businessId ? `business:${businessId}` : typeof respondTo === "string" ? respondTo : "");
 
+/** One line for the owner about the mentions an agent's gate dropped in the
+ * last day (status's audience.unheard: { count, lastAt, lastServed,
+ * waiting }), or "" when there were none. Someone it serves who was dropped
+ * since its last start is heard after its next restart; anyone else is not
+ * someone it answers, and the machine tells them nothing. */
+export function unheardText(unheard, { time = (seconds) => new Date(seconds * 1000).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }) } = {}) {
+  const count = Number.isInteger(unheard?.count) && unheard.count > 0 ? unheard.count : 0;
+  if (!count) return "";
+  const last = Number.isFinite(unheard.lastAt) && unheard.lastAt > 0 ? `, last at ${time(unheard.lastAt)}` : "";
+  const waiting = Number.isInteger(unheard.waiting) && unheard.waiting > 0 ? unheard.waiting : 0;
+  return `${count} dropped in the last day${last}.${waiting ? ` ${waiting} heard after its restart.` : ""}`;
+}
+
 /** What the machine takes for an Audience choice: { respondTo, businessId,
  * access }. An agent that answers a business is customer-facing: access
  * "platform", with only the Black 4 tools; every other agent is full access. */
@@ -5320,6 +5333,7 @@ export function applyHardware(ctx, { report = () => {}, access, sign, businesses
             access: reply.access === "platform" ? "platform" : "full",
             createdBy: typeof reply.createdBy === "string" ? reply.createdBy : null, yours: reply.yours !== false,
             controls: reply.controls && typeof reply.controls === "object" ? reply.controls : null,
+            unheard: unheardText(reply.audience?.unheard),
             ...("model" in reply ? { model: { pays, model: reply.modelChosen ? reply.model : "", effort: reply.effortChosen ? reply.effort : "",
               compactAt: typeof reply.compactAt === "number" ? reply.compactAt : null,
               shown: reply.model, shownEffort: reply.effort, note: reply.modelNote, problem: reply.modelProblem } } : {}) });
@@ -5454,7 +5468,9 @@ export function applyHardware(ctx, { report = () => {}, access, sign, businesses
               options: run.access === "platform" ? audienceOptions(businessRows, { current: respondTo }).filter((option) => option.id.startsWith("business:"))
                 : audienceOptions([], { settings: true, current: respondTo }),
               onChange: (next) => { const { respondTo: mode, businessId } = audienceSettings(next); void pick({ controls: mode === "business" ? { respondTo: mode, businessId } : { respondTo: mode } }, "machine"); } })
-            : Value(run.loading ? "…" : "Unknown") })),
+            : Value(run.loading ? "…" : "Unknown") }),
+          // What its gate dropped: silent to the sender, so said here.
+          run.unheard && h(Row, { title: "Not heard", description: run.unheard })),
         picked("machine")),
       runtime && h(Stack, null,
         h("div", null,

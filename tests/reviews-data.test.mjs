@@ -5,7 +5,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { freshPlugin, settle } from "./fakes.mjs";
 
-const { reviewData, reviewLocator, reviewLink, reviewOrder, reviewGroups, reviewState, wordDiff, REVIEW_UNDO_MS } = await freshPlugin();
+const { reviewData, reviewLocator, reviewLink, reviewOrder, reviewGroups, reviewState, wordDiff, REVIEW_UNDO_MS,
+  reviewGoalChoices, reviewGoalNow, reviewShown, REVIEW_ALL_GOALS, REVIEW_NO_GOAL } = await freshPlugin();
 
 const token = (n) => `b4rd_${String(n).padEnd(43, "x")}`;
 const tool = (data, meta) => ({ structuredContent: { data }, content: [{ type: "text", text: JSON.stringify({ data }) }], ...(meta ? { _meta: { "ai.black4/review-card": meta } } : {}) });
@@ -280,4 +281,48 @@ test("the queue's captures come from _meta by assetId, onto the review they pict
   await store.readQueue();
   const entry = reviewOrder(store.queue).find((candidate) => candidate.assetId === "rv_bakery");
   assert.deepEqual(entry.capture, { desktop: link });
+});
+
+// ---- the Goal filter ---------------------------------------------------------------
+const SPRING = { path: "goals/spring-orders.md", title: "More spring orders" };
+const LOYAL = { path: "goals/repeat-buyers.md", title: "More repeat buyers" };
+/** Two fictional businesses: reviews serving one goal, two goals, or none. */
+const goalQueue = (goals = true) => ({ kind: "black4_review_queue", total: 6, listed: 6, truncated: false, blocked: [], stalled: [], reviews: [
+  { businessId: "business-crumb", businessName: "Crumb & Co", assetId: "rv_menu", title: "Menu", goals: goals ? [SPRING] : undefined,
+    items: [{ key: "a", version: 1, title: "A" }, { key: "b", version: 1, title: "B" }] },
+  { businessId: "business-crumb", businessName: "Crumb & Co", assetId: "rv_mail", title: "Mail", goals: goals ? [SPRING, LOYAL, { path: "", title: "dropped" }] : undefined,
+    items: [{ key: "c", version: 1, title: "C" }] },
+  { businessId: "business-crumb", businessName: "Crumb & Co", assetId: "rv_hours", title: "Hours", goals: [], items: [{ key: "d", version: 1, title: "D" }] },
+  { businessId: "business-surf", businessName: "Tide Surf", assetId: "rv_ads", title: "Ads", goals: goals ? [{ ...SPRING, title: "Spring, as Tide names it" }] : undefined,
+    items: [{ key: "e", version: 1, title: "E" }] },
+  { businessId: "business-surf", businessName: "Tide Surf", assetId: "rv_post", title: "Post", items: [{ key: "f", version: 1, title: "F" }] },
+] });
+
+test("goal choices count reviews, not items, as the web desk does; a review with two goals counts under each; no goal is counted too", () => {
+  const choices = reviewGoalChoices(reviewShown(goalQueue()));
+  assert.deepEqual(choices, { goals: [
+    { path: "goals/repeat-buyers.md", title: "More repeat buyers", count: 1 },
+    { path: "goals/spring-orders.md", title: "More spring orders", count: 3 }, // rv_menu (two items) counts once; one path once, under its first title
+  ], noGoal: 2 });
+  assert.deepEqual(reviewGoalChoices(reviewShown(goalQueue(), { businessId: "business-surf" })).goals.map((goal) => [goal.title, goal.count]), [["Spring, as Tide names it", 1]]);
+});
+
+test("the Goal filter narrows what is worked through, and with one business too", () => {
+  const ids = (entries) => entries.map((entry) => entry.key).join("");
+  assert.equal(ids(reviewShown(goalQueue())), "abcdef");
+  assert.equal(ids(reviewShown(goalQueue(), { goal: SPRING.path })), "abce");
+  assert.equal(ids(reviewShown(goalQueue(), { goal: LOYAL.path })), "c");
+  assert.equal(ids(reviewShown(goalQueue(), { goal: REVIEW_NO_GOAL })), "df");
+  assert.equal(ids(reviewShown(goalQueue(), { businessId: "business-crumb", goal: SPRING.path })), "abc");
+  assert.equal(ids(reviewShown(goalQueue(), { goal: REVIEW_ALL_GOALS })), "abcdef");
+});
+
+test("no goal anywhere: no filter at all, whatever was chosen; a goal that left the queue falls back to all goals", () => {
+  const none = reviewGoalChoices(reviewShown(goalQueue(false)));
+  assert.deepEqual(none.goals, [], "nothing to offer, so the filter is not drawn");
+  for (const chosen of [SPRING.path, REVIEW_NO_GOAL, undefined]) assert.equal(reviewGoalNow(none, chosen), REVIEW_ALL_GOALS);
+  const crumb = reviewGoalChoices(reviewShown(goalQueue(), { businessId: "business-crumb" }));
+  assert.equal(reviewGoalNow(crumb, LOYAL.path), LOYAL.path);
+  assert.equal(reviewGoalNow(crumb, "goals/decided-away.md"), REVIEW_ALL_GOALS, "its last review was decided");
+  assert.equal(reviewGoalNow(reviewGoalChoices(reviewShown(goalQueue(), { goal: SPRING.path })), REVIEW_NO_GOAL), REVIEW_ALL_GOALS, "no review without a goal left");
 });

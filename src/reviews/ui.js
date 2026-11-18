@@ -156,6 +156,9 @@ function reviewScreens(React, store, bridge) {
     const change = item.change && !item.change.erased ? item.change : null;
     const origin = reviewOrigin(review, item);
     const row = (title, text) => (text ? h(Row, { key: title, title, description: text }) : null);
+    // The goals it serves: the review's own, else as the queue lists them.
+    const own = reviewGoalsOf(item.goals ?? review.goals);
+    const goals = own.length ? own : reviewListed(store.queue).find((entry) => entry.assetId === review.assetId && entry.key === item.key)?.goals ?? [];
     return h(Disclosure, { title: "Details" },
       h(Stack, { gap: 4 },
         h(Group, null,
@@ -173,6 +176,7 @@ function reviewScreens(React, store, bridge) {
           row("Made by", item.madeBy ?? review.madeBy),
           row("Asked by", item.requestedBy),
           row("Job", origin.jobName || origin.jobId),
+          row("Goal", goals.map((goal) => goal.title).join(" · ")),
           row("Version", `${item.version}${review.title ? ` of ${review.title}` : ""}`)),
         change ? h("div", null, h(SectionTitle, { title: "Pinned request" }),
           h(Stack, { gap: 2 },
@@ -339,15 +343,23 @@ function reviewScreens(React, store, bridge) {
 
   /** The list: approved work that needs a push (quiet, at the top), then
    * every waiting item grouped by business. Selection is explicit. */
-  function QueueList({ queue, selectedId, onOpen, picked, onPick, filter, onFilter, notes }) {
+  function QueueList({ queue, selectedId, onOpen, picked, onPick, filter, onFilter, notes, goal = REVIEW_ALL_GOALS, goals, onGoal }) {
     useStore();
-    const groups = reviewGroups(queue).filter((group) => !filter || group.businessId === filter);
+    const groups = reviewGroups(queue).filter((group) => !filter || group.businessId === filter)
+      .map((group) => ({ ...group, items: group.items.filter((entry) => reviewServes(entry, goal)) })).filter((group) => group.items.length);
     const attention = [...(queue.stalled ?? []).map((entry) => ({ ...entry, why: `Not started · ${entry.waitingOn ? `waiting on ${entry.waitingOn}` : "nobody has picked it up"}` })),
       ...(queue.blocked ?? []).map((entry) => ({ ...entry, why: entry.note ? `Blocked · ${entry.note}` : "Blocked" }))]
-      .filter((entry) => !filter || entry.businessId === filter);
-    const filterName = filter ? (groups[0]?.businessName ?? attention[0]?.businessName ?? "this business") : "";
+      .filter((entry) => (!filter || entry.businessId === filter) && (goal === REVIEW_ALL_GOALS || reviewServes({ goals: reviewGoalsOf(entry.goals) }, goal)));
+    const filterName = filter ? (reviewGroups(queue).find((group) => group.businessId === filter)?.businessName ?? attention[0]?.businessName ?? "this business") : "";
+    // The Goal filter, only when some review here serves a goal.
+    const goalPicker = goals?.goals?.length && onGoal ? h(ui.Pill, { key: "goal", label: "Goal", value: goal, onChange: onGoal, title: "Work the decisions behind one goal first",
+      options: [{ id: REVIEW_ALL_GOALS, label: "All goals" },
+        ...goals.goals.map((option) => ({ id: option.path, label: `${option.title} · ${option.count}` })),
+        ...(goals.noGoal ? [{ id: REVIEW_NO_GOAL, label: `No goal · ${goals.noGoal}` }] : [])] }) : null;
+    const goalName = goal === REVIEW_NO_GOAL ? "no goal" : goals?.goals?.find((option) => option.path === goal)?.title;
     return h(Stack, { gap: 4 },
-      filter ? h(Actions, null, Caption(`Only ${filterName}`), h(Button, { size: "sm", variant: "link", onClick: () => onFilter(null) }, "Show all")) : null,
+      goalPicker || filter ? h(Actions, null, goalPicker,
+        filter ? Caption(`Only ${filterName}`) : null, filter ? h(Button, { key: "all", size: "sm", variant: "link", onClick: () => onFilter(null) }, "Show all") : null) : null,
       attention.length ? h(ListGroup, { label: "Approved, not finished", count: attention.length },
         ...attention.map((entry) => h(SelectRow, { key: `a${entry.decisionId}`, title: entry.title, subtitle: entry.why, meta: entry.age, quiet: true,
           selected: selectedId === reviewItemId(entry.businessId, entry.assetId, entry.key),
@@ -367,7 +379,7 @@ function reviewScreens(React, store, bridge) {
             onPick: onPick ? (value) => onPick(entry.id, value) : undefined,
             onOpen: () => onOpen({ businessId: entry.businessId, assetId: entry.assetId, itemKey: entry.key }) });
         }))),
-      !groups.length && !attention.length ? h(EmptyState, { glyph: "inbox", title: filter ? `Nothing waiting for ${filterName}` : "Nothing is waiting for you", frame: "none" }) : null,
+      !groups.length && !attention.length ? h(EmptyState, { glyph: "inbox", title: goalName ? `Nothing waiting for ${goalName}` : filter ? `Nothing waiting for ${filterName}` : "Nothing is waiting for you", frame: "none" }) : null,
       queue.truncated ? Note(`Showing ${queue.listed} of ${queue.total}. Decide some to see the rest.`) : null);
   }
 

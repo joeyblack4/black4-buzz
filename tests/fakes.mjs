@@ -230,7 +230,8 @@ export async function until(ready, { timeoutMs = 2000, what = "the condition" } 
  * ("stale_review", "decision_exists", "decision_token_used", …). Use as
  * fakeMcp's `answer`, or call `handle(name, args)` directly. Fictional
  * businesses only. */
-export function fakeReviews({ decide = ["ok"], cardClient = true, needsBusiness = false } = {}) {
+/** `goals`: the goals each item serves, by key, as the queue lists them (opt in: today's queue has none). */
+export function fakeReviews({ decide = ["ok"], cardClient = true, needsBusiness = false, goals = null } = {}) {
   const item = (key, extra = {}) => ({
     key, version: 1, title: `Change ${key}`, workType: "storefront_content", action: "Update the bakery's menu page.", status: "awaiting_decision", decidable: true, decision: null,
     brief: { why: "The menu changed.", expectedResult: "Fewer wrong orders.", before: "Rye", after: "Sourdough" },
@@ -249,7 +250,8 @@ export function fakeReviews({ decide = ["ok"], cardClient = true, needsBusiness 
   const refusal = (code, message = `fake ${code}`) => ({ result: { isError: true, structuredContent: { error: { code, message } }, content: [{ type: "text", text: JSON.stringify({ error: { code, message } }) }] } });
   self.queue = () => ({ kind: "black4_review_queue", audience: "staff", total: self.review.items.filter((entry) => entry.decidable).length, listed: 2, truncated: false,
     reviews: [{ businessId: self.review.businessId, businessName: self.review.businessName, assetId: self.review.assetId, title: self.review.title, version: 1,
-      items: self.review.items.filter((entry) => entry.decidable).map((entry) => ({ key: entry.key, version: entry.version, title: entry.title, action: entry.action, workType: entry.workType, brief: "The menu changed.", age: "2h" })) }],
+      items: self.review.items.filter((entry) => entry.decidable).map((entry) => ({ key: entry.key, version: entry.version, title: entry.title, action: entry.action, workType: entry.workType, brief: "The menu changed.", age: "2h",
+        ...(goals ? { goals: goals[entry.key] ?? [] } : {}) })) }],
     blocked: [], stalled: [] });
   self.handle = (name, args = {}) => {
     self.calls.push({ name, args });

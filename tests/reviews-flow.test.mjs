@@ -27,7 +27,7 @@ async function app(t, options = {}) {
   apply({
     react: React,
     agents: { snapshot: () => ({ running: [] }), addTool: (tool) => { tools.set(tool.name, tool); return () => tools.delete(tool.name); }, register() {} },
-    settingsCards: { register() {} }, pages: { register: (value) => { registered.page = value; } }, panels: { register: (value) => { registered.panel = value; } },
+    settingsCards: { register() {} }, pages: { register: (value) => { if (value.id === "reviews") registered.page = value; } }, panels: { register: (value) => { registered.panel = value; } },
     conversation: { registerLink() {}, registerAccessory: (value) => { registered.accessory = value; } },
     browser: { available: false },
     effect: (fn) => { const off = fn(); if (off) cleanups.push(off); },
@@ -38,6 +38,7 @@ async function app(t, options = {}) {
   await settle();
   const expand = (node) => {
     if (!node || typeof node !== "object") return node;
+    if (typeof node.type === "function" && node.type.prototype?.render) { const instance = new node.type(node.props); instance.state ??= {}; return expand(instance.render()); }
     if (typeof node.type === "function") return expand(node.type(node.props));
     return { ...node, children: (node.children ?? []).map(expand) };
   };
@@ -50,10 +51,11 @@ async function app(t, options = {}) {
   const text = (node) => typeof node === "string" ? node : !node || typeof node !== "object" ? "" : (node.children ?? []).map(text).join(" ");
   const label = (node) => text(node).replace(/\s+/g, " ").trim();
   const panel = (target = LINK) => expand(registered.panel.component({ target }));
+  const page = () => expand({ type: registered.page.component, props: {}, children: [] });
   const button = (view, words) => find(view, (node) => node.type === "button" && label(node) === words);
   /** The panel once its review is read (the first render asks; the next shows it). */
   const shown = async (target) => { panel(target); await settle(); return panel(target); };
-  return { reviews, mcp, tools, registered, panel, shown, button, find, label, text, expand };
+  return { reviews, mcp, tools, registered, panel, page, shown, button, find, label, text, expand };
 }
 const decided = (a) => a.reviews.calls.filter((call) => call.name === "decide_review_item");
 
@@ -127,6 +129,35 @@ test("without tokens on this connection: one quiet line and Retry, never the web
   assert.ok(a.button(view, "Retry"));
   assert.equal(a.button(view, "Approve"), null);
   assert.doesNotMatch(JSON.stringify(view), /browser-view|app\.black4\.ai\/reviews|text-danger/);
+});
+
+test("the Goal filter: drawn only when a review serves a goal; what it shows is what next, previous and the counts step through", async (t) => {
+  const plain = await app(t);
+  plain.page(); await settle();
+  assert.equal(plain.find(plain.page(), (node) => node.props?.role === "combobox"), null, "today's queue: no goals, no filter, no empty dropdown");
+
+  const SPRING = { path: "goals/spring-orders.md", title: "More spring orders" };
+  const a = await app(t, { reviews: { goals: { hero: [SPRING], price: [] } } });
+  a.page(); await settle(); await settle();
+  let view = a.page();
+  const picker = a.find(view, (node) => node.props?.role === "combobox");
+  assert.ok(picker, "the Goal filter");
+  assert.equal(picker.props["aria-label"], "Goal");
+  const options = [];
+  (function walk(node) { if (!node || typeof node !== "object") return; if (node.props?.role === "option") options.push(node); for (const child of node.children ?? []) walk(child); })(view);
+  assert.deepEqual(options.map((option) => a.label(option)), ["All goals", "More spring orders · 1", "No goal · 1"]);
+  assert.match(a.label(view), /1 of 2/, "all goals: both decisions");
+  options.find((option) => option.props["data-value"] === SPRING.path).props.onClick();
+  await settle();
+  view = a.page();
+  assert.match(a.label(view), /1 of 1/, "the count is the filtered count");
+  assert.match(a.label(view), /Change the hero\?/);
+  assert.doesNotMatch(a.label(a.find(view, (node) => node.props?.role === "region")), /Change (the )?price/, "the list shows only that goal");
+  const next = a.find(view, (node) => node.type === "button" && node.props["aria-label"] === "Next decision (J)");
+  assert.ok(next.props.disabled || next.props["data-disabled"] !== undefined, "nothing after it within the goal: J has nowhere to go");
+  options.find((option) => option.props["data-value"] === "none").props.onClick();
+  await settle();
+  assert.match(a.label(a.page()), /Change the price\?/, "No goal: the other one, opened at once");
 });
 
 test("the message card: one card for every review link in a message, each with its question and live state", async (t) => {

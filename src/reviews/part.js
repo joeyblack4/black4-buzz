@@ -58,9 +58,20 @@ function reviewsPart(ctx, bridge) {
   const own = (dispose) => { if (typeof dispose === "function") disposers.push(dispose); else if (dispose?.dispose) disposers.push(() => dispose.dispose()); };
 
   // ---- what the page shows: shared with the sidebar and notifications ----------
-  let view = { filter: null, entry: null };
+  // `goals`: the goal chosen per business ("" for all of them), for the session.
+  let view = { filter: null, entry: null, goals: {} };
   const viewListeners = new Set();
   const setView = (patch) => { view = { ...view, ...patch }; for (const listener of [...viewListeners]) listener(); };
+  /** What a person works through with this business filter (null: every
+   * business): the Goal filter's choices, the goal in force and the order of
+   * what it shows. Next, previous, bulk approve and the counts all use it. */
+  const worked = (queue, businessId) => {
+    const scoped = reviewShown(queue, { businessId });
+    const choices = reviewGoalChoices(scoped);
+    const goal = reviewGoalNow(choices, view.goals[businessId ?? ""]);
+    return { choices, goal, order: reviewShown(queue, { businessId, goal }) };
+  };
+  const chooseGoal = (businessId, goal) => setView({ goals: { ...view.goals, [businessId ?? ""]: goal } });
   const useView = () => {
     const [, setTick] = React.useState(0);
     React.useEffect(() => { const listener = () => setTick((n) => n + 1); viewListeners.add(listener); return () => viewListeners.delete(listener); }, []);
@@ -79,10 +90,10 @@ function reviewsPart(ctx, bridge) {
     return !!active && (/^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName) || active.isContentEditable);
   };
 
-  /** Next, previous and the position in the queue for `entry`. */
-  function useStepping(entry, setEntry) {
+  /** Next, previous and the position for `entry`, in what the filters show. */
+  function useStepping(entry, setEntry, businessId = null) {
     useStore();
-    const order = reviewOrder(store.queue);
+    const { order } = worked(store.queue, businessId);
     const remembered = React.useRef(0);
     const step = reviewStep(order, entry, remembered.current);
     if (step.found) remembered.current = step.index;
@@ -118,14 +129,22 @@ function reviewsPart(ctx, bridge) {
     const [bulk, setBulk] = React.useState(null);
     const setEntry = (entry) => setView({ entry });
     // The first waiting item is open from the start: one less click per session.
-    const first = reviewOrder(queue)[0];
+    const work = worked(queue, current.filter);
+    const first = work.order[0];
     React.useEffect(() => {
       if (!view.entry && first && !view.filter) setView({ entry: { businessId: first.businessId, assetId: first.assetId, itemKey: first.key } });
     }, [first?.id]);
-    const step = useStepping(current.entry, setEntry);
+    const step = useStepping(current.entry, setEntry, current.filter);
     surface = { next: step.next, previous: step.previous };
     React.useEffect(() => () => { surface = null; surfaceFocused = false; }, []);
-    const order = reviewOrder(queue);
+    const order = work.order;
+    // A new goal: its first decision opens, and picks from the old one drop.
+    const onGoal = (goal) => {
+      chooseGoal(current.filter, goal);
+      setPicked(new Set());
+      const next = worked(store.queue, current.filter).order[0];
+      setView({ entry: next ? { businessId: next.businessId, assetId: next.assetId, itemKey: next.key } : null });
+    };
     // Picks that left the queue (decided) drop out of the selection.
     const live = new Set([...picked].filter((id) => order.some((entry) => entry.id === id)));
     const pick = (id, value) => setPicked((now) => { const next = new Set(now); if (value) next.add(id); else next.delete(id); return next; });
@@ -162,7 +181,7 @@ function reviewsPart(ctx, bridge) {
     else if (error && !queue) list = h(ui.Failure, { message: plain(error.message, 300), retry, retryLabel: "Try again" });
     else if (!queue) list = h(ui.Skeleton, { layout: "list" });
     else list = h(QueueList, { queue, selectedId: current.entry ? order[reviewStep(order, current.entry).index]?.id : null, onOpen: setEntry,
-      picked: live, onPick: pick, notes, filter: current.filter, onFilter: (filter) => setView({ filter }) });
+      picked: live, onPick: pick, notes, filter: current.filter, onFilter: (filter) => setView({ filter }), goal: work.goal, goals: work.choices, onGoal });
     const detail = current.entry
       ? h(ReviewItem, { key: "item", entry: current.entry, step, onCommand, frame: true })
       : link.status === "connected" && queue ? h(ui.EmptyState, { glyph: "decisions", title: order.length ? "Choose a decision" : "Nothing to decide", frame: "none" }) : null;
@@ -182,8 +201,10 @@ function reviewsPart(ctx, bridge) {
       setEntry(next?.kind === "review" ? next : null);
       if (next?.kind === "queue") setFilter(next.businessId ?? null);
     }, [target]);
-    const step = useStepping(entry, setEntry);
+    useView();
+    const step = useStepping(entry, setEntry, filter);
     const { link, queue, error, retry } = useQueue();
+    const work = worked(queue, filter);
     let body;
     if (entry) body = h(ReviewItem, { entry, step, onBack: () => setEntry(null), onCommand });
     else {
@@ -191,8 +212,9 @@ function reviewsPart(ctx, bridge) {
       if (link.status !== "connected") list = h(NotConnected, { link });
       else if (error && !queue) list = h(ui.Failure, { message: plain(error.message, 300), retry, retryLabel: "Try again" });
       else if (!queue) list = h(ui.Skeleton, { layout: "list" });
-      else list = h(QueueList, { queue, onOpen: setEntry, filter, onFilter: setFilter });
-      body = h(ui.Subview, { header: h(ui.PanelHeader, { title: queue?.total ? `${queue.total} waiting` : "Reviews",
+      else list = h(QueueList, { queue, onOpen: setEntry, filter, onFilter: setFilter, goal: work.goal, goals: work.choices, onGoal: (goal) => chooseGoal(filter, goal) });
+      const waiting = work.goal === REVIEW_ALL_GOALS && !filter ? queue?.total : work.order.length;
+      body = h(ui.Subview, { header: h(ui.PanelHeader, { title: waiting ? `${waiting} waiting` : "Reviews",
         actions: [h(ui.IconButton, { key: "refresh", label: "Refresh", glyph: "refresh", large: true, onClick: () => bridge.queue.refresh() })] }) }, h(ui.PanelBody, null, list));
     }
     surface = { next: step.next, previous: step.previous };

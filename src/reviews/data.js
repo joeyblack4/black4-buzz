@@ -85,10 +85,62 @@ function reviewListed(queue) {
         stake: item.stake, age: item.age, brief: item.brief, workType: item.workType, threadId: item.threadId ?? review.threadId ?? null,
         madeBy: item.madeBy ?? review.madeBy ?? null, requestedBy: item.requestedBy ?? review.requestedBy ?? null, job: item.job ?? review.job ?? null,
         producer: item.producer ?? review.producer ?? null, origin: item.origin ?? review.origin ?? null,
-        capture: item.capture && typeof item.capture === "object" ? item.capture : review.capture && typeof review.capture === "object" ? review.capture : null });
+        capture: item.capture && typeof item.capture === "object" ? item.capture : review.capture && typeof review.capture === "object" ? review.capture : null,
+        goals: reviewGoalsOf(item.goals ?? review.goals) });
     }
   }
   return out;
+}
+
+// ---- goals: work the reviews behind one goal first ----------------------------------
+/** The Goal filter's values beside a goal's path (paths start with goals/). */
+const REVIEW_ALL_GOALS = "all";
+const REVIEW_NO_GOAL = "none";
+/** The goals a review serves, as the queue lists them: `[{ path, title }]`. */
+function reviewGoalsOf(value) {
+  if (!Array.isArray(value)) return [];
+  const out = [];
+  for (const goal of value) {
+    const path = typeof goal?.path === "string" ? goal.path.trim().slice(0, 300) : "";
+    if (!path || path === REVIEW_ALL_GOALS || path === REVIEW_NO_GOAL || out.some((known) => known.path === path)) continue;
+    out.push({ path, title: plain(goal.title, 120) || path.replace(/^goals\//, "").replace(/\.md$/, "") });
+  }
+  return out;
+}
+/** The Goal filter's choices for these entries, as the web desk counts them:
+ * reviews (not items) per goal, a review with two goals under each, one path
+ * once (under its first title), in path order; and how many serve none. */
+function reviewGoalChoices(entries) {
+  const goals = new Map();
+  const none = new Set();
+  for (const entry of entries ?? []) {
+    const review = `${entry.businessId}/${entry.assetId}`;
+    if (!entry.goals?.length) { none.add(review); continue; }
+    for (const goal of entry.goals) {
+      if (!goals.has(goal.path)) goals.set(goal.path, { path: goal.path, title: goal.title, reviews: new Set() });
+      goals.get(goal.path).reviews.add(review);
+    }
+  }
+  return { goals: [...goals.values()].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)).map((goal) => ({ path: goal.path, title: goal.title, count: goal.reviews.size })),
+    noGoal: none.size };
+}
+/** The goal in force: the one chosen, while the queue still has it; else all.
+ * With no goal anywhere in these entries there is no filter at all. */
+function reviewGoalNow(choices, chosen) {
+  if (!choices.goals.length || !chosen || chosen === REVIEW_ALL_GOALS) return REVIEW_ALL_GOALS;
+  if (chosen === REVIEW_NO_GOAL) return choices.noGoal ? REVIEW_NO_GOAL : REVIEW_ALL_GOALS;
+  return choices.goals.some((goal) => goal.path === chosen) ? chosen : REVIEW_ALL_GOALS;
+}
+/** Whether an entry serves `goal` (a path, "none" or "all"). */
+function reviewServes(entry, goal) {
+  if (!goal || goal === REVIEW_ALL_GOALS) return true;
+  if (goal === REVIEW_NO_GOAL) return !entry.goals?.length;
+  return !!entry.goals?.some((candidate) => candidate.path === goal);
+}
+/** What a person works through, in queue order: one business (or all), one
+ * goal (or all). Next, previous, bulk approve and the counts use this. */
+function reviewShown(queue, { businessId = null, goal = REVIEW_ALL_GOALS } = {}) {
+  return reviewOrder(queue).filter((entry) => (!businessId || entry.businessId === businessId) && reviewServes(entry, goal));
 }
 
 /** The queue grouped by business, in the order businesses first appear. */

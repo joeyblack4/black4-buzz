@@ -3694,6 +3694,7 @@ def handle(req):
             rows.append({"pubkey": d.name, "name": s.get("name"), "harness": s.get("harness"), "pays": pays_of(s),
                          "respondTo": respond_to(s), "audience": audience_view(d, s), "activated": bool(s.get("auth")), "running": bool(running(d)),
                          "keepsStopping": keeps_stopping(d), "createdBy": s.get("createdBy"), "heartbeat": heartbeat_minutes(s),
+                         "picture": s.get("picture"), "owner": owner_of(s), "yours": bool(CALLER) and s.get("createdBy") == CALLER,
                          "access": access_of(s), **model_fields(s, cache.setdefault(ACCOUNT, {}), d)})
         return {"ok": True, "agents": rows + platform_rows("list")}
 

@@ -23,6 +23,9 @@ function buzzUi(React, { nativeSelect = false } = {}) {
     refresh: ["M20 11a8.1 8.1 0 0 0 -15.5 -2m-.5 -4v4h4", "M4 13a8.1 8.1 0 0 0 15.5 2m.5 4v-4h-4"],
     decisions: ["M3.5 5.5l1.5 1.5l2.5 -2.5", "M3.5 11.5l1.5 1.5l2.5 -2.5", "M3.5 17.5l1.5 1.5l2.5 -2.5", "M11 6l9 0", "M11 12l9 0", "M11 18l9 0"],
     inbox: ["M4 6a2 2 0 0 1 2 -2h12a2 2 0 0 1 2 2v12a2 2 0 0 1 -2 2h-12a2 2 0 0 1 -2 -2z", "M4 13h3l3 3h4l3 -3h3"],
+    dots: ["M4 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0", "M11 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0", "M18 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0"],
+    x: ["M18 6l-12 12", "M6 6l12 12"],
+    robot: ["M6 6a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2l0 -4", "M12 2v2", "M9 12v9", "M15 12v9", "M5 16l4 -2", "M15 14l4 2", "M9 18h6", "M10 8v.01", "M14 8v.01"],
     link: ["M9 15l6 -6", "M11 6l.463 -.536a5 5 0 0 1 7.071 7.072l-.534 .464", "M13 18l-.397 .534a5.068 5.068 0 0 1 -7.127 0a4.972 4.972 0 0 1 0 -7.071l.524 -.463"] };
   const h = React.createElement;
   const Fragment = React.Fragment;
@@ -427,6 +430,383 @@ function buzzUi(React, { nativeSelect = false } = {}) {
   const Pre = (text) => h("pre", { style: { margin: 0, fontFamily: "var(--font-mono)", fontSize: "var(--text-mono)", lineHeight: "var(--text-mono--line-height)",
     whiteSpace: "pre-wrap", overflowWrap: "anywhere", maxHeight: "18rem", overflow: "auto" } }, text);
 
+  // ---- Agents: Buzz's Agents page (src/bundled/agents), drawn with Buzz's own
+  // rules copied under the kit's names (see kit/copy.mjs) ----
+  // ---- copied from Buzz by kit/copy.mjs; the canary checks it; never edit it here ----
+  const COPIED_FROM = "v1.0.5";
+  const COPIED = [
+   {
+    "file": "src/bundled/agents/AgentCard.module.css",
+    "prefix": "card",
+    "rules": [
+     ".grid {\n  display: grid;\n  grid-template-columns: repeat(auto-fill, minmax(min(100%, 12rem), 1fr));\n  gap: var(--space-2);\n  outline: none;\n  position: relative;\n}",
+     ".slot {\n  display: grid;\n  min-width: 0;\n}",
+     ".card {\n  position: relative;\n  isolation: isolate;\n  display: flex;\n  flex-direction: column;\n  align-items: center;\n  justify-content: center;\n  gap: var(--space-3);\n  min-width: 0;\n  min-height: 15.25rem;\n  padding: var(--space-8) var(--space-3) var(--space-4);\n  border: 1px solid transparent;\n  border-radius: var(--radius-container);\n  \n  background: var(--interaction-fill);\n  text-align: center;\n  user-select: none;\n}",
+     ".agentCard {\n  --profile-backdrop-mask: linear-gradient(to bottom, black, 25%, transparent);\n  --profile-backdrop-filter: blur(40px) saturate(4);\n  --profile-backdrop-scale: 2;\n  --profile-backdrop-opacity: 0.64;\n  \n  --profile-backdrop-duration: 0s;\n  gap: var(--space-6);\n  border: 0;\n  justify-content: flex-end;\n  padding: calc(var(--space-8) * 2 + var(--space-2)) var(--space-6)\n    var(--space-6);\n}",
+     ".identity {\n  position: relative;\n  display: flex;\n  flex-direction: column;\n  align-items: center;\n  gap: var(--space-2);\n  min-width: 0;\n  max-width: 100%;\n}",
+     ".card:is([role=\"option\"], [role=\"gridcell\"]) {\n  cursor: pointer;\n}",
+     ".card:is([aria-selected=\"true\"], [data-selected=\"true\"]) {\n  border-color: var(--border-prominent);\n  box-shadow: var(--shadow-sm);\n}",
+     ".agentCard:is([aria-selected=\"true\"], [data-selected=\"true\"]) {\n  --profile-backdrop-opacity: 0.76;\n  box-shadow:\n    inset 0 0 0 1px var(--border-prominent),\n    var(--shadow-sm);\n}",
+     "@media (forced-colors: active) {\n.agentCard:is([aria-selected=\"true\"], [data-selected=\"true\"]) {\n    outline: 2px solid Highlight;\n    outline-offset: -2px;\n  }\n}",
+     "html[data-keyboard-navigation] .card:focus-visible {\n  outline: 2px solid var(--border-focus);\n  outline-offset: 2px;\n}",
+     ".portrait {\n  display: grid;\n  place-items: center;\n  flex-shrink: 0;\n  width: clamp(4rem, 16cqw, 8rem);\n  height: clamp(4rem, 16cqw, 8rem);\n}",
+     ".portrait > [class~=\"buzz-avatar-status\"] {\n  width: 75%;\n  height: 75%;\n}",
+     ".card[data-unavailable] .portrait {\n  opacity: 0.5;\n}",
+     ".portrait > :is(img, video) {\n  width: 100%;\n  height: 100%;\n  object-fit: contain;\n}",
+     ".name {\n  \n  margin-block: calc(-1 * var(--space-2)) var(--space-2);\n  max-width: 100%;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}",
+     ".identity .name {\n  margin-block: 0;\n}",
+     ".agentCard .portrait:has(> [class~=\"buzz-avatar-status\"]) {\n  width: clamp(3rem, 12cqw, 6rem);\n  height: clamp(3rem, 12cqw, 6rem);\n}",
+     ".agentCard .portrait > [class~=\"buzz-avatar-status\"] {\n  width: 100%;\n  height: 100%;\n}",
+     ".detail {\n  display: flex;\n  align-items: center;\n  gap: var(--space-1);\n  max-width: 100%;\n  color: var(--text-secondary);\n  font-size: var(--text-body-sm-size, 0.8125rem);\n}",
+     ".agentCard .detail {\n  min-height: var(--space-6);\n}",
+     ".detailText {\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}",
+     ".actions {\n  --interaction-fill: var(--interaction-selected);\n  --interaction-hover: var(--interaction-pressed);\n  max-width: 100%;\n  display: flex;\n  flex-wrap: wrap;\n  justify-content: center;\n  gap: var(--space-2);\n}",
+     "@media (max-width: 560px) {\n.grid {\n    grid-template-columns: repeat(2, minmax(0, 1fr));\n  }\n}",
+     "@media (max-width: 360px) {\n.grid {\n    grid-template-columns: minmax(0, 1fr);\n  }\n}",
+     ".menu {\n  position: absolute;\n  top: var(--space-2);\n  right: var(--space-2);\n}",
+     ".bestie {\n  position: absolute;\n  top: var(--space-2);\n  left: var(--space-2);\n  pointer-events: none;\n}"
+    ]
+   },
+   {
+    "file": "src/bundled/agents/AgentsPage.module.css",
+    "prefix": "page",
+    "rules": [
+     ".browse {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr);\n  height: 100%;\n  min-height: 0;\n}",
+     ".browse[data-side] {\n  grid-template-columns: minmax(0, 1fr) minmax(\n      20rem,\n      var(--secondary-panel-width, 28rem)\n    );\n}",
+     ".main {\n  container-type: inline-size;\n  min-width: 0;\n  min-height: 0;\n}",
+     ".inventory {\n  height: 100%;\n  min-height: 0;\n  overflow: auto;\n}",
+     ".side {\n  position: relative;\n  border-inline-start: 1px solid var(--border-standard);\n  min-height: 0;\n  min-width: 0;\n}",
+     ".build {\n  position: relative;\n  display: flex;\n  flex-direction: column;\n  height: 100%;\n  min-height: 0;\n  min-width: 0;\n}",
+     ".detailsScroll {\n  --profile-content-inset: var(--space-5);\n  --agent-footer-height: 0px;\n  flex: 1;\n  min-height: 0;\n  overflow: auto;\n  display: flex;\n  flex-direction: column;\n  gap: var(--space-4);\n  padding: var(--space-5) var(--profile-content-inset);\n  padding-block-end: calc(var(--space-5) + var(--agent-footer-height));\n  scroll-padding-block-end: calc(var(--space-5) + var(--agent-footer-height));\n}",
+     "@media (max-width: 30rem) {\n.detailsScroll {\n    --profile-content-inset: var(--space-2);\n  }\n}",
+     ".identityPortrait {\n  position: relative;\n  width: min(8rem, 100%);\n  aspect-ratio: 1;\n}",
+     ".identityCard > :is([aria-hidden=\"true\"], .identityPortrait) {\n  filter: grayscale(var(--agent-artwork-grayscale, 0));\n}",
+     ".identityCard > .identityPortrait {\n  filter: grayscale(var(--agent-artwork-grayscale, 0))\n    blur(var(--agent-artwork-blur, 0px));\n  \n  scale: var(--agent-artwork-scale, 1);\n  opacity: var(--agent-artwork-opacity, 1);\n}",
+     ".work {\n  min-width: 0;\n}",
+     "@media (max-width: 52rem) {\n.browse[data-side] {\n    grid-template-columns: minmax(0, 1fr);\n  }\n.side {\n    border-inline-start: 0;\n  }\n}",
+     "@media (prefers-reduced-motion: reduce) {\n.side {\n    animation: none;\n  }\n}",
+     ".content {\n  display: flex;\n  flex-direction: column;\n  gap: var(--space-6);\n  width: 100%;\n  max-width: 48rem;\n  margin-inline: auto;\n  padding: clamp(var(--space-4), 6vh, calc(var(--space-16) + var(--space-4)))\n    var(--space-6) var(--space-8);\n}",
+     ".nameActions {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: var(--space-2);\n  width: 12rem;\n  max-width: 100%;\n}",
+     ".identityName {\n  position: relative;\n  width: 100%;\n}",
+     ".nameEditor {\n  position: absolute;\n  inset: 0;\n  display: flex;\n  align-items: center;\n  text-align: center;\n}"
+    ]
+   },
+   {
+    "file": "src/features/profiles/ProfileHero.module.css",
+    "prefix": "hero",
+    "rules": [
+     ".hero {\n  --profile-backdrop-mask: linear-gradient(to bottom, black, 25%, transparent);\n  position: relative;\n  isolation: isolate;\n  display: flex;\n  flex-direction: column;\n  align-items: center;\n  gap: var(--space-4);\n  min-width: 0;\n  padding: calc(var(--space-8) + var(--space-4)) var(--space-4);\n  border-radius: var(--radius-container);\n  background: var(--surface-panel);\n}",
+     ".actions {\n  --interaction-fill: var(--interaction-selected);\n  --interaction-hover: var(--interaction-pressed);\n  display: flex;\n  align-items: center;\n  justify-content: center;\n  flex-wrap: wrap;\n  gap: var(--space-2);\n}",
+     ".avatarBackdrop {\n  position: absolute;\n  inset: 0;\n  z-index: -1;\n  overflow: hidden;\n  border-radius: inherit;\n  pointer-events: none;\n  mask-image: var(--profile-backdrop-mask, none);\n}",
+     ".avatarBackdropImage {\n  width: 100%;\n  height: 100%;\n  background-size: cover;\n  background-position: center;\n  filter: var(\n    --profile-backdrop-filter,\n    blur(var(--profile-backdrop-blur, 40px))\n      saturate(var(--profile-backdrop-saturation, 4))\n  );\n  transform: scale(var(--profile-backdrop-scale, 2));\n  opacity: var(--profile-backdrop-opacity, 0.64);\n  transition:\n    opacity var(--profile-backdrop-duration, 0s) var(--easing-state),\n    transform var(--profile-backdrop-duration, 0s) var(--easing-enter);\n}",
+     "@media (prefers-reduced-transparency: reduce), (forced-colors: active) {\n.avatarBackdrop {\n    display: none;\n  }\n}",
+     ".panelHero {\n  margin-inline: calc(\n    var(--space-1) -\n    var(--profile-content-inset, var(--space-5))\n  );\n}",
+     ".panelHero:first-child {\n  margin-top: calc(var(--space-1) - var(--space-5));\n}",
+     ".hero :is(h2, h3) {\n  text-wrap: balance;\n}"
+    ]
+   },
+   {
+    "file": "src/features/panels/Panels.module.css",
+    "prefix": "panels",
+    "rules": [
+     ".workspace {\n  background: var(--surface-panel);\n  display: flex;\n  flex-direction: column;\n  min-width: 0;\n  min-height: 0;\n  height: 100%;\n}",
+     ".workspace > header {\n  flex-wrap: nowrap;\n  flex-shrink: 0;\n}",
+     ".workspaceBody {\n  display: grid;\n  flex: 1;\n  min-height: 0;\n  min-width: 0;\n}",
+     ".workspacePane {\n  display: grid;\n  grid-area: 1 / 1;\n  min-height: 0;\n  min-width: 0;\n}",
+     ".workspaceBody {\n  --workspace-push-duration: 300ms;\n  --workspace-push-easing: cubic-bezier(0.2, 0, 0, 1);\n}"
+    ]
+   }
+  ];
+  const AVATARS = [{"id":"buzzies-1","label":"Buzzies 1","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-1.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/webm/buzzies/buzzies-1.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/hevc/buzzies/buzzies-1.mp4"},
+    {"id":"buzzies-2","label":"Buzzies 2","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-2.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/webm/buzzies/buzzies-2.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/hevc/buzzies/buzzies-2.mp4"},
+    {"id":"buzzies-3","label":"Buzzies 3","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-3.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/webm/buzzies/buzzies-3.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/hevc/buzzies/buzzies-3.mp4"},
+    {"id":"buzzies-4","label":"Buzzies 4","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-4.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/webm/buzzies/buzzies-4.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/hevc/buzzies/buzzies-4.mp4"},
+    {"id":"buzzies-5","label":"Buzzies 5","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-5.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/webm/buzzies/buzzies-5.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/hevc/buzzies/buzzies-5.mp4"},
+    {"id":"buzzies-6","label":"Buzzies 6","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-6.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/webm/buzzies/buzzies-6.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/hevc/buzzies/buzzies-6.mp4"},
+    {"id":"buzzies-7","label":"Buzzies 7","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-7.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/webm/buzzies/buzzies-7.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/hevc/buzzies/buzzies-7.mp4"},
+    {"id":"buzzies-8","label":"Buzzies 8","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-8.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/webm/buzzies/buzzies-8.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/hevc/buzzies/buzzies-8.mp4"},
+    {"id":"buzzies-9","label":"Buzzies 9","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-9.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/webm/buzzies/buzzies-9.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/hevc/buzzies/buzzies-9.mp4"},
+    {"id":"buzzies-10","label":"Buzzies 10","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-10.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/webm/buzzies/buzzies-10.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/hevc/buzzies/buzzies-10.mp4"},
+    {"id":"buzzies-11","label":"Buzzies 11","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-11.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/webm/buzzies/buzzies-11.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/hevc/buzzies/buzzies-11.mp4"},
+    {"id":"buzzies-12","label":"Buzzies 12","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-12.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/webm/buzzies/buzzies-12.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/hevc/buzzies/buzzies-12.mp4"},
+    {"id":"buzzies-13","label":"Buzzies 13","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-13.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/webm/buzzies/buzzies-13.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/hevc/buzzies/buzzies-13.mp4"},
+    {"id":"buzzies-14","label":"Buzzies 14","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-14.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/webm/buzzies/buzzies-14.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/hevc/buzzies/buzzies-14.mp4"},
+    {"id":"buzzies-15","label":"Buzzies 15","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-15.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/webm/buzzies/buzzies-15.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/hevc/buzzies/buzzies-15.mp4"},
+    {"id":"buzzies-16","label":"Buzzies 16","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-16.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/webm/buzzies/buzzies-16.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/hevc/buzzies/buzzies-16.mp4"},
+    {"id":"buzzies-17","label":"Buzzies 17","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-17.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/webm/buzzies/buzzies-17.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/hevc/buzzies/buzzies-17.mp4"},
+    {"id":"buzzies-18","label":"Buzzies 18","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-18.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/webm/buzzies/buzzies-18.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/hevc/buzzies/buzzies-18.mp4"},
+    {"id":"buzzies-19","label":"Buzzies 19","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-19.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/webm/buzzies/buzzies-19.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/hevc/buzzies/buzzies-19.mp4"},
+    {"id":"buzzies-20","label":"Buzzies 20","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-20.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/webm/buzzies/buzzies-20.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/hevc/buzzies/buzzies-20.mp4"},
+    {"id":"buzzies-21","label":"Buzzies 21","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-21.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/webm/buzzies/buzzies-21.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/hevc/buzzies/buzzies-21.mp4"},
+    {"id":"buzzies-22","label":"Buzzies 22","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-22.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/webm/buzzies/buzzies-22.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/hevc/buzzies/buzzies-22.mp4"},
+    {"id":"buzzies-23","label":"Buzzies 23","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-23.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/webm/buzzies/buzzies-23.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/hevc/buzzies/buzzies-23.mp4"},
+    {"id":"buzzies-24","label":"Buzzies 24","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-24.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/webm/buzzies/buzzies-24.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/hevc/buzzies/buzzies-24.mp4"},
+    {"id":"buzzies-25","label":"Buzzies 25","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-25.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/webm/buzzies/buzzies-25.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/hevc/buzzies/buzzies-25.mp4"},
+    {"id":"buzzies-26","label":"Buzzies 26","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-26.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/webm/buzzies/buzzies-26.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/hevc/buzzies/buzzies-26.mp4"},
+    {"id":"buzzies-27","label":"Buzzies 27","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-27.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/webm/buzzies/buzzies-27.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/hevc/buzzies/buzzies-27.mp4"},
+    {"id":"buzzies-28","label":"Buzzies 28","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-28.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/webm/buzzies/buzzies-28.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/hevc/buzzies/buzzies-28.mp4"},
+    {"id":"buzzies-32","label":"Buzzies 32","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-32.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/webm/buzzies/buzzies-32.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/hevc/buzzies/buzzies-32.mp4"},
+    {"id":"buzzies-33","label":"Buzzies 33","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-33.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/webm/buzzies/buzzies-33.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/hevc/buzzies/buzzies-33.mp4"},
+    {"id":"fuzzies-1","label":"Fuzzies 1","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/fuzzies/fuzzies-1.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/fuzzies/fuzzies-1.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/fuzzies/fuzzies-1.mp4"},
+    {"id":"fuzzies-2","label":"Fuzzies 2","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/fuzzies/fuzzies-2.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/fuzzies/fuzzies-2.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/fuzzies/fuzzies-2.mp4"},
+    {"id":"fuzzies-3","label":"Fuzzies 3","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/fuzzies/fuzzies-3.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/fuzzies/fuzzies-3.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/fuzzies/fuzzies-3.mp4"},
+    {"id":"fuzzies-4","label":"Fuzzies 4","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/fuzzies/fuzzies-4.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/fuzzies/fuzzies-4.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/fuzzies/fuzzies-4.mp4"},
+    {"id":"fuzzies-5","label":"Fuzzies 5","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/fuzzies/fuzzies-5.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/fuzzies/fuzzies-5.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/fuzzies/fuzzies-5.mp4"},
+    {"id":"fuzzies-6","label":"Fuzzies 6","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/fuzzies/fuzzies-6.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/fuzzies/fuzzies-6.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/fuzzies/fuzzies-6.mp4"},
+    {"id":"fuzzies-7","label":"Fuzzies 7","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/fuzzies/fuzzies-7.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/fuzzies/fuzzies-7.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/fuzzies/fuzzies-7.mp4"},
+    {"id":"fuzzies-8","label":"Fuzzies 8","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/fuzzies/fuzzies-8.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/fuzzies/fuzzies-8.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/fuzzies/fuzzies-8.mp4"},
+    {"id":"fuzzies-9","label":"Fuzzies 9","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/fuzzies/fuzzies-9.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/fuzzies/fuzzies-9.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/fuzzies/fuzzies-9.mp4"},
+    {"id":"fuzzies-10","label":"Fuzzies 10","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/fuzzies/fuzzies-10.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/fuzzies/fuzzies-10.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/fuzzies/fuzzies-10.mp4"},
+    {"id":"fuzzies-11","label":"Fuzzies 11","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/fuzzies/fuzzies-11.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/fuzzies/fuzzies-11.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/fuzzies/fuzzies-11.mp4"},
+    {"id":"fuzzies-12","label":"Fuzzies 12","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/fuzzies/fuzzies-12.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/fuzzies/fuzzies-12.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/fuzzies/fuzzies-12.mp4"},
+    {"id":"fuzzies-13","label":"Fuzzies 13","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/fuzzies/fuzzies-13.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/fuzzies/fuzzies-13.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/fuzzies/fuzzies-13.mp4"},
+    {"id":"fuzzies-14","label":"Fuzzies 14","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/fuzzies/fuzzies-14.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/fuzzies/fuzzies-14.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/fuzzies/fuzzies-14.mp4"},
+    {"id":"fuzzies-15","label":"Fuzzies 15","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/fuzzies/fuzzies-15.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/fuzzies/fuzzies-15.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/fuzzies/fuzzies-15.mp4"},
+    {"id":"fuzzies-16","label":"Fuzzies 16","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/fuzzies/fuzzies-16.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/fuzzies/fuzzies-16.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/fuzzies/fuzzies-16.mp4"},
+    {"id":"fuzzies-17","label":"Fuzzies 17","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/fuzzies/fuzzies-17.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/fuzzies/fuzzies-17.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/fuzzies/fuzzies-17.mp4"},
+    {"id":"fuzzies-18","label":"Fuzzies 18","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/fuzzies/fuzzies-18.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/fuzzies/fuzzies-18.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/fuzzies/fuzzies-18.mp4"},
+    {"id":"fuzzies-19","label":"Fuzzies 19","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/fuzzies/fuzzies-19.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/fuzzies/fuzzies-19.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/fuzzies/fuzzies-19.mp4"},
+    {"id":"gloopies-1","label":"Gloopies 1","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-1.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-1.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-1.mp4"},
+    {"id":"gloopies-2","label":"Gloopies 2","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-2.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-2.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-2.mp4"},
+    {"id":"gloopies-3","label":"Gloopies 3","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-3.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-3.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-3.mp4"},
+    {"id":"gloopies-4","label":"Gloopies 4","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-4.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-4.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-4.mp4"},
+    {"id":"gloopies-5","label":"Gloopies 5","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-5.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-5.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-5.mp4"},
+    {"id":"gloopies-6","label":"Gloopies 6","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-6.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-6.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-6.mp4"},
+    {"id":"gloopies-7","label":"Gloopies 7","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-7.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-7.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-7.mp4"},
+    {"id":"gloopies-8","label":"Gloopies 8","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-8.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-8.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-8.mp4"},
+    {"id":"gloopies-9","label":"Gloopies 9","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-9.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-9.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-9.mp4"},
+    {"id":"gloopies-10","label":"Gloopies 10","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-10.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-10.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-10.mp4"},
+    {"id":"gloopies-11","label":"Gloopies 11","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-11.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-11.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-11.mp4"},
+    {"id":"gloopies-12","label":"Gloopies 12","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-12.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-12.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-12.mp4"},
+    {"id":"gloopies-13","label":"Gloopies 13","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-13.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-13.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-13.mp4"},
+    {"id":"gloopies-14","label":"Gloopies 14","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-14.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-14.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-14.mp4"},
+    {"id":"gloopies-15","label":"Gloopies 15","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-15.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-15.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-15.mp4"},
+    {"id":"gloopies-16","label":"Gloopies 16","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-16.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-16.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-16.mp4"},
+    {"id":"gloopies-17","label":"Gloopies 17","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-17.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-17.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-17.mp4"},
+    {"id":"gloopies-18","label":"Gloopies 18","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-18.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-18.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-18.mp4"},
+    {"id":"gloopies-19","label":"Gloopies 19","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-19.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-19.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-19.mp4"},
+    {"id":"gloopies-20","label":"Gloopies 20","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-20.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-20.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-20.mp4"},
+    {"id":"gloopies-21","label":"Gloopies 21","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-21.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-21.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-21.mp4"},
+    {"id":"gloopies-22","label":"Gloopies 22","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-22.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-22.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-22.mp4"},
+    {"id":"gloopies-23","label":"Gloopies 23","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-23.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-23.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-23.mp4"},
+    {"id":"pollies-2","label":"Figgies 2","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/pollies/pollies-2.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/pollies/pollies-2.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/pollies/pollies-2.mp4"},
+    {"id":"pollies-9","label":"Figgies 9","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/pollies/pollies-9.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/pollies/pollies-9.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/pollies/pollies-9.mp4"},
+    {"id":"pollies-10","label":"Figgies 10","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/pollies/pollies-10.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/pollies/pollies-10.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/pollies/pollies-10.mp4"},
+    {"id":"pollies-21","label":"Figgies 21","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/pollies/pollies-21.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/pollies/pollies-21.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/pollies/pollies-21.mp4"},
+    {"id":"pollies-23","label":"Figgies 23","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/pollies/pollies-23.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/pollies/pollies-23.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/pollies/pollies-23.mp4"},
+    {"id":"pollies-24","label":"Figgies 24","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/pollies/pollies-24.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/pollies/pollies-24.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/pollies/pollies-24.mp4"},
+    {"id":"pollies-25","label":"Figgies 25","url":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/pollies/pollies-25.png","webm":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/pollies/pollies-25.webm","hevc":"https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/pollies/pollies-25.mp4"}];
+  // ---- end copied from Buzz ----
+  /** The kit's name for a copied Buzz class: `copied("card", "agentCard")`. */
+  const copied = (prefix, ...names) => names.map((name) => `b4copy-${prefix}-${name}`).join(" ");
+  const renameSelectors = (prefix, selectors) => selectors.replace(/\.([a-zA-Z][\w-]*)/g, (match, name) => (name.startsWith("buzz") ? match : `.${copied(prefix, name)}`));
+  const renameRule = (prefix, rule) => (rule.startsWith("@")
+    ? rule.replace(/^([^{]*\{)([\s\S]*)\}$/, (match, head, body) => head + body.replace(/(^|\})([^{}]+)\{/g, (inner, end, selectors) => end + renameSelectors(prefix, selectors) + "{") + "}")
+    : rule.replace(/^[^{]+/, (selectors) => renameSelectors(prefix, selectors)));
+  const COPIED_CSS = COPIED.map((file) => file.rules.map((rule) => renameRule(file.prefix, rule)).join("\n")).join("\n");
+  /** The copied rules, once per page that draws agent parts. */
+  const CopiedStyles = () => h("style", null, COPIED_CSS);
+
+  const appleWebKit = () => typeof navigator !== "undefined" && /^(Mac|iPhone|iPad|iPod)/.test(navigator.platform ?? "")
+    && /AppleWebKit/.test(navigator.userAgent ?? "") && !/Chrome|Chromium|Edg/.test(navigator.userAgent ?? "");
+  const stillMotion = () => typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  /** Buzz's avatar pack for a picture (its poster URL), if it is one. */
+  const packOf = (picture) => AVATARS.find((avatar) => avatar.url === String(picture ?? "").split("#", 1)[0]);
+
+  /** Avatar.tsx, size "fill", squircle: a picture, or its name's first letter. */
+  const AvatarImage = ({ name, picture }) => {
+    const [failed, setFailed] = React.useState(false);
+    const letter = (Array.from(String(name ?? "").trim())[0] ?? "?").toUpperCase();
+    return h("span", { className: "buzz-avatar-status", "data-size": "fill", "data-shape": "squircle" },
+      h("span", { "data-buzz-ui": "", className: "buzz-avatar", "data-size": "fill", "data-avatar-shape": "squircle", "data-fallback-surface": "subtle", "aria-hidden": true },
+        picture && !failed
+          ? h("img", { src: picture, alt: "", loading: "lazy", decoding: "async", referrerPolicy: "no-referrer", "data-loaded": "true", onError: () => setFailed(true) })
+          : h("span", { "data-avatar-fallback": "", "aria-hidden": true }, letter)));
+  };
+  /** AgentPortrait: a pack avatar plays its animation (PackedAgentAvatar),
+   * any other picture shows still. `cover` fills a backdrop. */
+  const AgentPortrait = ({ name, picture, cover = false }) => {
+    const pack = packOf(picture);
+    if (!pack) return h(AvatarImage, { name, picture });
+    const fit = { width: "100%", height: "100%", objectFit: cover ? "cover" : "contain" };
+    if (!pack.webm || stillMotion()) return h("img", { src: pack.url, alt: cover ? "" : pack.label, style: fit });
+    const sources = [h("source", { key: "webm", type: "video/webm", src: pack.webm })];
+    if (pack.hevc) sources[appleWebKit() ? "unshift" : "push"](h("source", { key: "hevc", type: 'video/mp4; codecs="hvc1"', src: pack.hevc }));
+    return h("video", { className: "agent-packed-video", loop: true, playsInline: true, autoPlay: true, preload: "auto", poster: pack.url,
+      "aria-label": cover ? undefined : pack.label, style: fit,
+      ref: (video) => { if (video) { video.muted = true; video.play?.()?.catch?.(() => {}); } } }, ...sources);
+  };
+  /** ProfileBackdrop: the picture, blurred, behind a card or the profile. */
+  const Backdrop = ({ name, picture }) => {
+    if (!picture) return null;
+    const pack = packOf(picture);
+    return h("div", { className: copied("hero", "avatarBackdrop"), "aria-hidden": true },
+      pack && pack.webm && !stillMotion()
+        ? h("div", { className: copied("hero", "avatarBackdropImage") }, h(AgentPortrait, { name, picture, cover: true }))
+        : h("div", { className: copied("hero", "avatarBackdropImage"), style: { backgroundImage: `url("${pack ? pack.url : picture}")` } }));
+  };
+
+  /** A navigation tab in a panel header (Tabs variant "navigation"): the
+   * page's own title (`main`), or a closable tab for what is open beside it. */
+  const HeaderTab = ({ label, art, main = false, onClose }) =>
+    h("div", { "data-buzz-ui": "", className: "buzz-tabs", "data-variant": "navigation", "data-size": "md", "data-orientation": "horizontal" },
+      h("div", { role: "tablist", "aria-label": main ? `${label} header` : "Panel tabs", className: "buzz-tabs-list", "data-orientation": "horizontal" },
+        h("span", { className: "buzz-tabs-item", "data-closable": onClose ? "" : undefined },
+          h("button", { type: "button", role: "tab", "aria-selected": true, "data-selected": main ? undefined : "", title: label,
+              "data-buzz-ui": "", className: "navigation-item", "data-variant": "row" },
+            art ? h("span", { className: "buzz-tabs-icon", "aria-hidden": true }, art) : null,
+            h("span", { className: "navigation-item-label" }, label)),
+          onClose ? h("button", { type: "button", "aria-label": `Close ${label} tab`, title: `Close ${label} tab`, onClick: onClose,
+              "data-buzz-ui": "", className: "buzz-button", "data-variant": "ghost", "data-size": "sm", "data-button-shape": "capsule",
+              "data-icon-variant": "ghost", "data-icon-size": "xs", "data-icon-shape": "control" },
+            h("span", { className: "buzz-button-label" }, icon(ICON.x, 16))) : null)));
+
+  /** The Agents page (AgentsPage.tsx): the page's header tab, a centred
+   * column with `tabs` (and `action` beside them) over the content, and
+   * `side` (an AgentPanel) beside it when something is open. */
+  const AgentBrowse = ({ label, art, tabs, action, side, children }) =>
+    h("div", { className: "h-full min-h-0" },
+      h(CopiedStyles),
+      h("div", { className: copied("page", "browse"), "data-side": side ? "" : undefined },
+        h("div", { className: copied("page", "main") },
+          h("section", { className: "panel", "data-buzz-surface": "", "data-shape": "panel", "aria-label": label },
+            h("div", { className: "flex h-full min-h-0 flex-col" },
+              h("header", { "data-buzz-ui": "", className: "panel-header", "data-variant": "default" },
+                h("div", { className: "panel-header-title" }, h(HeaderTab, { label, art, main: true }))),
+              h("div", { className: "min-h-0 flex-1" },
+                h("div", { className: copied("page", "inventory") },
+                  h("div", { className: copied("page", "content") },
+                    tabs || action ? h("div", { className: "flex flex-wrap items-center justify-between gap-3" }, tabs ?? null, action ?? null) : null,
+                    ...each(children))))))),
+        side ?? null));
+
+  /** The card grid (role grid). */
+  const AgentGrid = ({ label, busy = false, children }) =>
+    h("div", { className: copied("card", "grid") },
+      h("div", { role: "grid", "aria-label": label, "aria-busy": busy || undefined, className: "contents" }, ...each(children)));
+
+  /** AgentCard.tsx: the portrait large, the name, one line about it
+   * (`detail`, after `art`); `badge` top left (where Buzz marks a Bestie),
+   * `menu` top right. */
+  const AgentCard = ({ name, picture, detail, art, badge, menu, selected = false, unavailable = false, onSelect, onOpen }) =>
+    h("div", { role: "row", className: copied("card", "slot") },
+      h("div", { role: "gridcell", "aria-label": name, "aria-selected": selected, "data-selected": String(selected), tabIndex: 0,
+          "data-unavailable": unavailable ? "" : undefined, className: copied("card", "card", "agentCard"),
+          onClick: (event) => { if (!event.target.closest?.("[data-card-control], button, input")) onSelect?.(); },
+          onDoubleClick: () => onOpen?.(),
+          onKeyDown: (event) => { if (event.target !== event.currentTarget) return;
+            if (event.key === "Enter" || event.key === " ") { event.preventDefault(); (onOpen ?? onSelect)?.(); } } },
+        h(Backdrop, { name, picture }),
+        badge ? h("span", { className: copied("card", "bestie") }, badge) : null,
+        menu ? h("div", { className: copied("card", "menu") }, menu) : null,
+        h("span", { className: copied("card", "portrait"), "aria-hidden": true }, h(AgentPortrait, { name, picture })),
+        h("span", { className: copied("card", "identity") },
+          h("span", { className: `${copied("card", "name")} text-label` }, name),
+          detail ? h("span", { className: copied("card", "detail") }, art ?? null, h("span", { className: copied("card", "detailText") }, detail)) : null)));
+
+  /** A picture (a logo) at a glyph's size, for a tab icon or a card's mark. */
+  const Picture = ({ src, size = 16 }) => h("img", { src, alt: "", width: size, height: size, style: { display: "block" } });
+  /** One of the kit's ICONs at Buzz's glyph size. */
+  const Glyph = ({ name, size = 16 }) => icon(ICON[name] ?? ICON.check, size);
+
+  /** A mark on a card, drawn as Buzz draws its Bestie mark (a glass-clear
+   * button shape): `art` (16px) and a word, in `color`. */
+  const CardMark = ({ art, label, color }) =>
+    h("span", { "data-buzz-ui": "", className: "buzz-button", "data-variant": "glass-clear", "data-size": "sm", "data-button-shape": "capsule", "aria-hidden": true },
+      h("span", { className: "buzz-button-label", style: color ? { color } : undefined }, art ?? null, label));
+
+  /** The open agent beside the grid: a Panel whose header is one closable
+   * tab with the agent's portrait (PanelWorkspace). */
+  const AgentPanel = ({ name, picture, onClose, children }) =>
+    h("aside", { className: copied("page", "side"), onKeyDown: (event) => { if (event.key === "Escape" && !event.defaultPrevented) onClose?.(); } },
+      h("section", { className: "panel", "data-buzz-surface": "", "data-shape": "panel", "aria-label": "Agent profile" },
+        h("div", { className: copied("panels", "workspace") },
+          h("header", { "data-buzz-ui": "", className: "panel-header", "data-variant": "default" },
+            h("div", { className: "panel-header-title" },
+              h(HeaderTab, { label: name, onClose, art: h("span", { className: "block h-full w-full" }, h(AgentPortrait, { name, picture })) }))),
+          h("div", { className: copied("panels", "workspaceBody") },
+            h("div", { role: "tabpanel", className: copied("panels", "workspacePane") }, ...each(children))))));
+
+  /** AgentDetails.tsx: the hero (backdrop, portrait, name, `under` it,
+   * `actions`), then the agent's sections. `editing` replaces the name with
+   * its editor. */
+  const AgentProfile = ({ name, picture, under, actions, editing, children }) =>
+    h("div", { className: copied("page", "build") },
+      h("div", { className: copied("page", "detailsScroll") },
+        h("aside", { "aria-label": `${name} identity`, className: `${copied("hero", "hero", "panelHero")} ${copied("page", "identityCard")}` },
+          h(Backdrop, { name, picture }),
+          h("div", { className: copied("page", "identityPortrait") }, h(AgentPortrait, { name, picture })),
+          h("div", { className: copied("page", "identityName") },
+            h("h2", { className: "m-0 text-body-lg text-center break-words", style: editing ? { visibility: "hidden" } : undefined }, name),
+            editing ? h("div", { className: copied("page", "nameEditor") }, editing) : null),
+          under ?? null,
+          actions ? h("div", { className: copied("hero", "actions") }, ...each(actions)) : null),
+        h("section", { "aria-label": `${name} settings`, className: copied("page", "work") }, ...each(children))));
+  /** The name's editor in the hero (Input appearance "heading"). */
+  const NameInput = ({ value, onChange, onSubmit, onCancel, label = "Agent name", placeholder = "Name your agent", invalid }) =>
+    h("input", { "data-buzz-ui": "", className: "buzz-input", "data-appearance": "heading", "aria-label": label, placeholder, value, autoFocus: true,
+      "aria-invalid": invalid || undefined, onChange: (event) => onChange(event.target.value),
+      onKeyDown: (event) => { if (event.key === "Enter") { event.preventDefault(); onSubmit?.(); } else if (event.key === "Escape") { event.preventDefault(); onCancel?.(); } } });
+  /** Cancel and Save under the name while it is edited. */
+  const NameActions = ({ children }) => h("div", { className: copied("page", "nameActions") }, ...each(children));
+
+  /** Menu.tsx: a "…" button (IconButton, `variant` glass-ghost on a card,
+   * glass or subtle in a hero) that opens Buzz's menu of `items`
+   * ({ label, onSelect, tone: "danger" }). */
+  const Menu = ({ label, items, variant = "glass-ghost" }) => {
+    const [open, setOpen] = React.useState(false);
+    const trigger = React.useRef(null);
+    const popup = React.useRef(null);
+    const kind = one(["glass-ghost", "glass", "subtle", "ghost"], variant);
+    React.useLayoutEffect(() => {
+      const list = popup.current, at = trigger.current;
+      if (!list || !at || typeof document === "undefined") return undefined;
+      if (!open) { try { list.hidePopover?.(); } catch {} return undefined; }
+      Object.assign(list.style, { position: "fixed", margin: "0", inset: "auto", top: "0px", left: "0px" });
+      try { list.showPopover?.(); } catch {}
+      const box = at.getBoundingClientRect();
+      list.style.setProperty("--available-width", `${window.innerWidth - 16}px`);
+      list.style.setProperty("--available-height", `${Math.max(120, window.innerHeight - box.bottom - 12)}px`);
+      Object.assign(list.style, { top: `${box.bottom + 4}px`, left: `${Math.max(8, box.right - list.offsetWidth)}px` });
+      list.querySelector('[role="menuitem"]')?.focus({ preventScroll: true });
+      const away = (event) => { if (!list.contains(event.target) && !at.contains(event.target)) setOpen(false); };
+      const keys = (event) => { if (event.key === "Escape") { event.stopPropagation(); event.preventDefault(); setOpen(false); at.focus(); } };
+      document.addEventListener("pointerdown", away, true);
+      document.addEventListener("keydown", keys, true);
+      return () => { document.removeEventListener("pointerdown", away, true); document.removeEventListener("keydown", keys, true); };
+    }, [open]);
+    return h(Fragment, null,
+      h("button", { ref: trigger, type: "button", "aria-label": label, title: label, "aria-haspopup": "menu", "aria-expanded": open,
+          "data-buzz-ui": "", className: "buzz-button", "data-variant": kind, "data-size": "sm", "data-button-shape": "capsule",
+          "data-icon-variant": kind, "data-icon-size": "sm", "data-icon-shape": "control", "data-popup-open": open ? "" : undefined,
+          onClick: () => setOpen((value) => !value) },
+        h("span", { className: "buzz-button-label" }, icon(ICON.dots, 16))),
+      h("div", { ref: popup, popover: "manual", role: "menu", "aria-label": label, "data-buzz-ui": "", className: "buzz-menu-popup text-body-sm",
+          onKeyDown: (event) => {
+            const rows = [...event.currentTarget.querySelectorAll('[role="menuitem"]')];
+            const at = rows.indexOf(document.activeElement);
+            if (event.key === "ArrowDown") { event.preventDefault(); rows[Math.min(at + 1, rows.length - 1)]?.focus(); }
+            else if (event.key === "ArrowUp") { event.preventDefault(); rows[Math.max(at - 1, 0)]?.focus(); }
+            else if (event.key === "Tab") setOpen(false);
+          } },
+        ...items.map((item) => h("div", { key: item.label, role: "menuitem", tabIndex: -1, className: "buzz-menu-item", "data-tone": item.tone === "danger" ? "danger" : "default",
+          onPointerMove: (event) => { if (document.activeElement !== event.currentTarget) event.currentTarget.focus({ preventScroll: true }); },
+          onFocus: (event) => event.currentTarget.setAttribute("data-highlighted", ""),
+          onBlur: (event) => event.currentTarget.removeAttribute("data-highlighted"),
+          onClick: () => { setOpen(false); trigger.current?.focus?.(); item.onSelect?.(); },
+          onKeyDown: (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setOpen(false); trigger.current?.focus?.(); item.onSelect?.(); } } },
+          item.label))));
+  };
+
+  /** Buzz's avatar packs to pick from (the Change avatar dock's posters): `value` is the picture. */
+  const AvatarChoices = ({ value, onChange, disabled }) =>
+    h("fieldset", { "aria-label": "Agent avatars", disabled, className: "flex flex-wrap gap-2 p-0 m-0", style: { border: 0 } },
+      ...AVATARS.map((avatar) => h("button", { key: avatar.id, type: "button", "aria-label": avatar.label, "aria-pressed": avatar.url === value,
+          "data-buzz-ui": "", className: "buzz-surface-button", onClick: () => onChange(avatar.url),
+          style: { width: "var(--size-control)", height: "var(--size-control)", padding: 0, border: 0, background: "transparent", cursor: "pointer",
+            borderRadius: "var(--radius-control)", boxShadow: avatar.url === value ? "inset 0 0 0 2px var(--border-prominent)" : undefined } },
+        h("img", { src: avatar.url, alt: "", loading: "lazy", draggable: false, style: { width: "100%", height: "100%", objectFit: "contain" } }))));
+
   // Lines Buzz writes around its cards.
   const Note = (text) => h("p", { className: "m-0 text-body-sm text-secondary" }, text);
   const ErrorLine = (text) => h("p", { role: "alert", className: "buzz-field-error" }, text);
@@ -441,5 +821,6 @@ function buzzUi(React, { nativeSelect = false } = {}) {
 
   return { VARIANTS, SectionTitle, Group, Row, Button, Input, Switch, SwitchRow, Pill, Popup, Native, TextField, Stack, Column, Actions, Note, ErrorLine, Spinner, Status, Value, Alert, Code,
     Header, IconButton, PanelHeader, Page, Subview, PanelBody, Fill, Toolbar, EmptyState, NavItem, Tabs, Disclosure, CountBadge, Dot, LinkChip, OneTimeCode, CodeColumn, Failure, Notice,
-    Title, Heading, Paragraph, Caption, Strong, Lines, Line, Pre, ICON };
+    Title, Heading, Paragraph, Caption, Strong, Lines, Line, Pre, ICON,
+    AgentBrowse, AgentGrid, AgentCard, CardMark, AgentPortrait, AgentPanel, AgentProfile, NameInput, NameActions, Menu, AvatarChoices, HeaderTab, Picture, Glyph, COPIED, COPIED_FROM, AVATARS };
 }

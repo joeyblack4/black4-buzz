@@ -57,7 +57,9 @@ test("kit: each part draws with Buzz's classes, and Pill draws Buzz's popup or t
   assert.deepEqual(Object.keys(ui).sort(), ["Actions", "Alert", "Button", "Caption", "Code", "CodeColumn", "Column", "CountBadge", "Disclosure", "Dot", "EmptyState",
     "ErrorLine", "Failure", "Fill", "Group", "Header", "Heading", "ICON", "IconButton", "Input", "Line", "Lines", "LinkChip", "Native", "NavItem", "Note", "Notice",
     "OneTimeCode", "Page", "PanelBody", "PanelHeader", "Paragraph", "Pill", "Popup", "Pre", "Row", "SectionTitle", "Spinner", "Stack", "Status", "Strong", "Subview",
-    "Switch", "SwitchRow", "Tabs", "TextField", "Title", "Toolbar", "VARIANTS", "Value"]);
+    "Switch", "SwitchRow", "Tabs", "TextField", "Title", "Toolbar", "VARIANTS", "Value",
+    "AVATARS", "AgentBrowse", "AgentCard", "AgentGrid", "AgentPanel", "AgentPortrait", "AgentProfile", "AvatarChoices", "COPIED", "COPIED_FROM", "CardMark",
+    "Glyph", "HeaderTab", "Menu", "NameActions", "NameInput", "Picture"].sort());
   // A variant Buzz does not style draws the default, never an unstyled control.
   assert.equal(ui.Button({ variant: "glassy", size: "xl", shape: "round", children: "B" }).props["data-variant"], "subtle");
   assert.equal(ui.Button({ variant: "glassy", size: "xl", shape: "round", children: "B" }).props["data-size"], "md");

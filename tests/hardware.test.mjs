@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import {
   askMachine, hardwareProvider, hardwareDefaults, HEARTBEAT_MINUTES, HEARTBEAT_CHOICES, heartbeatChoices, beatFrom, heartbeatRemote, MACHINES, machineOf, statusReader, harnessOptions, signInState, readyToCreate, takesKey, defaultPays, PAYS,
   createLogin, agentDirectory, summaryOf, signInOf, doorTransport, bodySha256, createSession, createMcp, readAnswer, memoryStore,
-  modelsReader, modelChoices, applyPick, setModel, applyHardware, COMPACT_OPTIONS, buzzUi, CONVERSATION_ROWS, controlOptions, controlValue,
+  modelsReader, modelChoices, applyPick, setModel, applyHardware, COMPACT_OPTIONS, buzzUi, CONVERSATION_ROWS, controlOptions, controlValue, BLACK4_MARK,
   audienceValue, audienceSettings, audienceOptions, businessesOf,
 } from "../plugins/black4/plugin.js";
 import { fakeAuthKit, fakeMcp, fakeDoor, https, sha256url, DOOR } from "./fakes.mjs";
@@ -1248,29 +1248,43 @@ test("door: a door that is overloaded or broken says so with its own words", asy
   await assert.rejects(askMachine(d.ask, "commerce", { op: "list" }), /^Error: Could not reach the Commerce Mac: its door answered HTTP 503 \(too many requests in flight\)\.$/);
 });
 
-test("Black 4 agents: a dock page lists every agent on the machine, whoever made it, and opens its Settings", async (t) => {
-  const { pages, React, settle, unmount } = hardwareOn((request) => request.op === "list"
-    ? { ok: true, agents: [
-      { pubkey: "a".repeat(64), name: "Chris Opus", harness: "claude", createdBy: "chris@example.com", running: true, activated: true },
-      { pubkey: "b".repeat(64), name: "Queen Qwen", harness: "qwen", createdBy: "joey@example.com", running: false, activated: true }] }
-    : fleet(request));
+test("Black 4 team: a dock page with Black 4's mark draws every agent as Buzz's Agents page does, with who made it, and opens its profile and settings", async (t) => {
+  const profiles = [];
+  const { pages, React, settle, unmount } = hardwareOn((request) => {
+    if (request.op === "list") return { ok: true, agents: [
+      { pubkey: "a".repeat(64), name: "Chris Opus", harness: "claude", createdBy: "chris@example.com", running: true, activated: true, yours: false,
+        picture: "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-3.png" },
+      { pubkey: "b".repeat(64), name: "Queen Qwen", harness: "qwen", createdBy: "joey@example.com", running: false, activated: true, yours: true }] };
+    if (request.op === "profile") { profiles.push(request); return { ok: true }; }
+    return fleet(request);
+  });
   t.after(unmount);
   const page = pages["black4-agents"];
-  assert.ok(page, "the page is registered");
-  // Buzz lists a plugin page only when it is primary.
-  assert.deepEqual([page.title, page.primary, page.placement], ["Black 4 agents", true, "dock"]);
+  // Buzz lists a plugin page only when it is primary; the dock shows Black 4's own mark.
+  assert.deepEqual([page.title, page.primary, page.placement, page.icon], ["Black 4 team", true, "dock", BLACK4_MARK]);
+  assert.match(BLACK4_MARK, /^data:image\/svg\+xml;base64,/);
   const tree = await settle(React.createElement(page.component));
-  const rows = rowsIn(tree);
-  assert.deepEqual(rows.map((row) => [row.title, row.description]), [
-    ["Chris Opus", "Claude Code · Made by chris@example.com"],
-    ["Queen Qwen", "Qwen Code · Made by joey@example.com"]]);
-  assert.match(textIn(tree), /Running/);
-  assert.match(textIn(tree), /Stopped/);
-  assert.ok(find(tree, (node) => node.props?.className === "panel"), "drawn as a Buzz dock page");
-  buttonsIn(tree).find((button) => button.label === "Open").click();
+  const cards = all(tree, (node) => node.props?.role === "gridcell");
+  assert.deepEqual(cards.map((card) => card.props["aria-label"]), ["Chris Opus", "Queen Qwen"]);
+  assert.match(textIn(cards[0]), /Claude Code · Chris/);
+  assert.match(textIn(cards[0]), /Black 4/, "each card carries Black 4's mark");
+  assert.ok(find(tree, (node) => node.type === "style" && /b4copy-card-agentCard/.test(textIn(node))), "Buzz's own card rules, copied");
+  // Made by you: only the viewer's own.
+  const yours = find(tree, (node) => node.props?.role === "tab" && textIn(node).trim() === "Made by you");
+  yours.props.onClick();
+  const mine = await settle(React.createElement(page.component));
+  assert.deepEqual(all(mine, (node) => node.props?.role === "gridcell").map((card) => card.props["aria-label"]), ["Queen Qwen"]);
+  find(mine, (node) => node.props?.role === "tab" && textIn(node).trim() === "All agents").props.onClick();
+  const again = await settle(React.createElement(page.component));
+  all(again, (node) => node.props?.role === "gridcell")[0].props.onClick({ target: { closest: () => null } });
   const opened = await settle(React.createElement(page.component));
-  assert.match(textIn(opened), /Chris Opus/);
-  assert.ok(buttonsIn(opened).some((button) => button.label === "Restart"), "the agent's Settings, with its Restart");
+  const profile = find(opened, (node) => node.props?.["aria-label"] === "Agent profile");
+  assert.ok(profile, "the profile opens beside the cards");
+  assert.match(textIn(profile), /Made by Chris · Commerce Mac · Running/);
+  assert.match(textIn(profile), /Identity/);
+  find(profile, (node) => node.props?.role === "tab" && textIn(node).trim() === "Settings").props.onClick();
+  const settings = await settle(React.createElement(page.component));
+  assert.ok(buttonsIn(find(settings, (node) => node.props?.["aria-label"] === "Agent profile")).some((button) => button.label === "Restart"), "its Settings, with Restart");
 });
 
 // Fictional businesses: no customer names in this repository.

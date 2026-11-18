@@ -588,6 +588,14 @@ class Identity(Base):
         secret = (active / "key").read_text().strip()
         self.assertNotIn(secret, json.dumps(r))
 
+    def test_list_carries_each_agents_picture_and_owner_key(self):
+        active = self.make_agent()
+        self.assertTrue(self.req(op="profile", pubkey=active.name, name="Test agent", picture="https://example.com/a.png")["ok"])
+        pending = self.make_agent(activate=False)
+        rows = {row["pubkey"]: row for row in self.req(op="list")["agents"]}
+        self.assertEqual((rows[active.name]["picture"], rows[active.name]["owner"]), ("https://example.com/a.png", "a" * 64))
+        self.assertIsNone(rows[pending.name]["owner"])
+
 
 class Callers(Base):
     """A teammate's key forces `agentctl --caller <label>` (machine/teammates.sh)."""
@@ -601,6 +609,9 @@ class Callers(Base):
         d = self.make_agent(activate=False)
         self.assertEqual(self.a.read_settings(d)["createdBy"], "sam")
         self.assertEqual(self.req(op="list")["agents"][0]["createdBy"], "sam")
+        self.assertTrue(self.req(op="list")["agents"][0]["yours"])
+        self.as_caller("lee")
+        self.assertFalse(self.req(op="list")["agents"][0]["yours"], "a teammate sees it is someone else's")
 
     def test_the_owners_agents_are_closed_to_callers(self):
         # Made with the machine owner's own key (no label), or before creators

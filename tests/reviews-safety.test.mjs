@@ -96,3 +96,19 @@ test("an agent never reads _meta: no decision token or preview grant, directly o
   }
   assert.doesNotMatch(agentText(body.result), /b4rd_|grant-secret/);
 });
+
+test("a review an agent raises points back to its conversation: start_review defaults threadId, never overrides it", async (t) => {
+  const seen = [];
+  const app = await harness(t, { tools: [listed("start_review"), listed("call_tool")], answer: (message) => { if (["start_review", "call_tool"].includes(message.params?.name)) seen.push(message.params.arguments); return { result: { content: [{ type: "text", text: "ok" }] } }; } });
+  await app.registered.get("black4_start_review").call({ key: "agent" }, { channel: "chan-1", root: "root-9" }, { businessId: "b" });
+  await app.registered.get("black4_start_review").call({ key: "agent" }, { channel: "chan-1" }, { businessId: "b" });
+  await app.registered.get("black4_start_review").call({ key: "agent" }, { channel: "chan-1", root: "root-9" }, { businessId: "b", threadId: "chosen" });
+  await app.registered.get("black4_call_tool").call({ key: "agent" }, { channel: "chan-1", root: "root-9" }, { name: "start_review", arguments: { businessId: "b" } });
+  await app.registered.get("black4_start_review").call({ key: "agent" }, {}, { businessId: "b" });
+  const args = seen.filter(Boolean);
+  assert.equal(args[0].threadId, "root-9", "the thread it was asked in");
+  assert.equal(args[1].threadId, "chan-1", "else its channel");
+  assert.equal(args[2].threadId, "chosen", "the agent's own choice stands");
+  assert.equal(args[3].arguments.threadId, "root-9", "through call_tool too");
+  assert.equal("threadId" in args[4], false, "outside a conversation, nothing is added");
+});

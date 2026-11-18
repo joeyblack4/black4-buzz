@@ -38,6 +38,7 @@
         "agents.addTool(0).call(0).key",
         "agents.addTool(0).call(0).signal",
         "agents.addTool(0).call(1).channel",
+        "agents.addTool(0).call(1).root",
         "agents.snapshot",
         "agents.snapshot=>.running",
         "agents.snapshot=>.running[].key",

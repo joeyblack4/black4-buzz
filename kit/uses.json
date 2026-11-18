@@ -54,6 +54,19 @@
         4,
         2
       ]
+    },
+    "Tabs": {
+      "variant": [
+        "panel",
+        "segmented"
+      ]
+    },
+    "Avatar": {
+      "size": [
+        "small",
+        "compact",
+        "tiny"
+      ]
     }
   },
   "classes": [
@@ -202,12 +215,20 @@
     "*[data-unavailable]",
     "buzz-accordion[data-buzz-ui]",
     "buzz-accordion[data-variant=\"form\"]",
+    "buzz-avatar-status[data-shape=\"circle\"]",
     "buzz-avatar-status[data-shape=\"squircle\"]",
+    "buzz-avatar-status[data-size=\"compact\"]",
     "buzz-avatar-status[data-size=\"fill\"]",
+    "buzz-avatar-status[data-size=\"small\"]",
+    "buzz-avatar-status[data-size=\"tiny\"]",
+    "buzz-avatar[data-avatar-shape=\"circle\"]",
     "buzz-avatar[data-avatar-shape=\"squircle\"]",
     "buzz-avatar[data-buzz-ui]",
     "buzz-avatar[data-fallback-surface=\"subtle\"]",
+    "buzz-avatar[data-size=\"compact\"]",
     "buzz-avatar[data-size=\"fill\"]",
+    "buzz-avatar[data-size=\"small\"]",
+    "buzz-avatar[data-size=\"tiny\"]",
     "buzz-button[data-button-shape=\"capsule\"]",
     "buzz-button[data-button-shape=\"control\"]",
     "buzz-button[data-buzz-ui]",
@@ -279,6 +300,7 @@
     "buzz-tabs[data-size=\"sm\"]",
     "buzz-tabs[data-variant=\"navigation\"]",
     "buzz-tabs[data-variant=\"panel\"]",
+    "buzz-tabs[data-variant=\"segmented\"]",
     "buzz-textarea[data-appearance=\"outlined\"]",
     "buzz-textarea[data-buzz-ui]",
     "buzz-textarea[data-invalid]",
@@ -362,6 +384,10 @@
   "setOnly": [
     "*[data-tab-value]",
     "buzz-accordion[data-buzz-ui]",
+    "buzz-avatar-status[data-size=\"compact\"]",
+    "buzz-avatar-status[data-size=\"small\"]",
+    "buzz-avatar-status[data-size=\"tiny\"]",
+    "buzz-avatar[data-avatar-shape=\"circle\"]",
     "buzz-avatar[data-avatar-shape=\"squircle\"]",
     "buzz-avatar[data-buzz-ui]",
     "buzz-avatar[data-fallback-surface=\"subtle\"]",

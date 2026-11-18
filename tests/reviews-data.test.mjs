@@ -206,3 +206,28 @@ test("signing out or switching account forgets everything: queue, reviews, token
   await advance(20000);
   assert.equal(decideCalls(calls).length, 0, "the waiting decision was never sent");
 });
+
+test("the byline: who made it and what set it off, from structured fields when sent, madeBy whole otherwise", async () => {
+  const { reviewByline } = await freshPlugin();
+  assert.deepEqual(reviewByline(null, { madeBy: "copy-bot · Mira", requestedBy: "proactive" }),
+    { maker: { name: "copy-bot · Mira", agent: false }, origin: { kind: "proactive", text: "On its own initiative" } });
+  assert.deepEqual(reviewByline(null, { madeBy: "x", requestedBy: "Pat Lee", threadId: "root-1" }).origin, { kind: "request", text: "Asked by Pat Lee", threadId: "root-1" });
+  assert.deepEqual(reviewByline(null, { madeBy: "x", job: { jobId: "j1", jobName: "Competitor watch" } }).origin, { kind: "job", text: "Competitor watch · scheduled run" });
+  const key = "ab".repeat(32);
+  assert.deepEqual(reviewByline(null, { producer: { agentPubkey: key, agentName: "Mira", app: "Buzz" } }).maker, { pubkey: key, name: "Mira", app: "Buzz", agent: true });
+});
+
+test("too many at once (HTTP 429): the same call is sent again with the same token, and saves once", async () => {
+  let refusals = 1;
+  const { store, calls, advance } = data({ decide_review_item: (args) => refusals-- > 0
+    ? Promise.reject(Object.assign(new Error("Black 4 answered HTTP 429: slow down."), { code: "http" }))
+    : tool({ decision: { id: "d1", itemKey: args.itemKey, verdict: args.verdict, reviewer: "Pat", executionStatus: "pending" } }) });
+  const review = await store.open({ assetId: "rv_bakery", businessId: "business-crumb" });
+  const receipt = store.propose({ review, item: review.items[0], verdict: "approved" });
+  await advance(8000);
+  await advance(1500);
+  const sent = decideCalls(calls);
+  assert.equal(sent.length, 2);
+  assert.equal(sent[0].args.decisionToken, sent[1].args.decisionToken, "the same token, safe to repeat");
+  assert.equal(store.receipt(receipt.id).state, "saved");
+});

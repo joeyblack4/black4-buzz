@@ -73,7 +73,10 @@ export function collect() {
       h(ui.Checkbox, { checked: true, label: "L", onCheckedChange() {} }), h(ui.Checkbox, { checked: false, size: "sm", disabled: true, label: "L", onCheckedChange() {} }),
       h(ui.ListGroup, { label: "L", count: 2 }, h(ui.SelectRow, { title: "T", subtitle: "S", meta: "2h", selected: true, picked: true, onPick() {}, onOpen() {} }),
         h(ui.SelectRow, { title: "T", quiet: true, onOpen() {} })),
-      h(ui.Split, { label: "L", list: "l", detail: "d" }), h(ui.Frame, { label: "L" }, "x"),
+      h(ui.Split, { label: "L", list: "l", detail: "d" }), h(ui.Frame, { label: "L" }, "x"), h(ui.Avatar, { name: "N", picture: "p", size: "small" }), h(ui.Avatar, { name: "N", size: "tiny", shape: "squircle", label: "L" }), h(ui.Avatar, { name: "N", size: "compact" }),
+      h(ui.Byline, { avatar: "a", name: "N", app: "A", origin: "O", originGlyph: "clock" }), h(ui.Byline, { name: "N", origin: "O", originGlyph: "message", onOrigin() {} }),
+      h(ui.Canvas, { label: "L", toolbar: ["t"] }, h(ui.CanvasImage, { src: "s", alt: "A" })), h(ui.CanvasImage, { alt: "A" }), h(ui.QuietLine, { glyph: "money" }, "q"), ui.Question("q"), ui.Permits("p"), h(ui.Article, { label: "L" }, "x"),
+      h(ui.Tabs, { label: "L", value: "a", variant: "segmented", items: [{ value: "a", label: "A" }], onChange() {} }),
       h(ui.MessageCard, { label: "L" }, h(ui.MessageRow, { title: "T", subtitle: "S", onOpen() {} }), h(ui.MessageRow, { title: "T", loading: true })),
       ui.Title("t"), ui.Heading("h"), ui.Paragraph("p"), ui.Caption("c"), ui.Strong("s"), ui.Lines("a", "b"), ui.Line("l", { role: "status" }), ui.Line("l", { danger: true }), ui.Pre("p"));
     // The agent parts, with a pack avatar, a photo and no picture.

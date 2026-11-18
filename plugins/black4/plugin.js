@@ -607,7 +607,8 @@ export function apply(ctx) {
     return ctx.host.request(input);
   };
   const session = createSession({ request: hostRequest });
-  const mcp = createMcp({ request: hostRequest, session });
+  // The running revision, so Black 4 can tell which plugin build called it.
+  const mcp = createMcp({ request: hostRequest, session, clientInfo: { name: "black4-buzz", version: `2.0.0+${String(ctx.pluginOwner?.revision ?? "unknown").slice(0, 12)}` } });
   let retry = 0;
   let retryTimer = null;
   let stopped = false;
@@ -712,6 +713,16 @@ export function apply(ctx) {
       );
     }
     let input = args ?? {};
+    // A review an agent raises from a conversation points back to it: when the
+    // agent passes no threadId, it defaults to the thread (else the channel)
+    // the call came from. A default for an optional parameter, never an override.
+    const reviewThread = context?.root ?? context?.channel;
+    if (typeof reviewThread === "string" && reviewThread) {
+      if (name === "start_review" && input && typeof input === "object" && input.threadId == null) input = { ...input, threadId: reviewThread };
+      if (name === "call_tool" && String(input?.name ?? "").trim().toLowerCase() === "start_review" && input.arguments && typeof input.arguments === "object" && input.arguments.threadId == null) {
+        input = { ...input, arguments: { ...input.arguments, threadId: reviewThread } };
+      }
+    }
     if (name === "resolve_channel_business" && context?.channel) {
       const relay = relayFor(client);
       input = {
@@ -1358,6 +1369,15 @@ export function apply(ctx) {
     status: { subscribe: (listener) => { const each = () => listener(state.status); listeners.add(each); each(); return () => listeners.delete(each); } },
     SignInPrompt,
     browser: ctx.browser?.available ? ctx.browser.View : null,
+    // A maker's name and picture from the community's profiles, as Buzz shows a member.
+    profile: (pubkey) => {
+      try {
+        const profiles = ctx.relay?.snapshot?.()?.session?.profiles;
+        const found = profiles?.snapshot?.().get(pubkey);
+        if (!found) void profiles?.ensure?.([pubkey])?.catch?.(() => {});
+        return found ? { name: found.name, picture: found.picture } : null;
+      } catch { return null; }
+    },
     report: (error) => {
       console.warn("[black4] Reviews failed:", error);
       update({ reviewsError: `Reviews is unavailable in this Buzz: ${String(error?.message ?? error).slice(0, 200)}` });
@@ -2320,7 +2340,11 @@ function buzzUi(React, { nativeSelect = false } = {}) {
     money: ["M16.7 8a3 3 0 0 0 -2.7 -2h-4a3 3 0 0 0 0 6h4a3 3 0 0 1 0 6h-4a3 3 0 0 1 -2.7 -2", "M12 3v3m0 12v3"],
     people: ["M5 7a4 4 0 1 0 8 0a4 4 0 1 0 -8 0", "M3 21v-2a4 4 0 0 1 4 -4h4a4 4 0 0 1 4 4v2", "M16 3.13a4 4 0 0 1 0 7.75", "M21 21v-2a4 4 0 0 0 -3 -3.85"],
     alert: ["M12 9v4", "M10.363 3.591l-8.106 13.534a1.914 1.914 0 0 0 1.636 2.871h16.214a1.914 1.914 0 0 0 1.636 -2.87l-8.106 -13.536a1.914 1.914 0 0 0 -3.274 0z", "M12 16h.01"],
-    minus: "M5 12l14 0" };
+    minus: "M5 12l14 0",
+    // clock (a scheduled job), message (asked in a conversation), sparkles (on its own)
+    clock: ["M3 12a9 9 0 1 0 18 0a9 9 0 0 0 -18 0", "M12 7v5l3 3"],
+    message: ["M8 9h8", "M8 13h6", "M18 4a3 3 0 0 1 3 3v8a3 3 0 0 1 -3 3h-5l-5 3v-3h-2a3 3 0 0 1 -3 -3v-8a3 3 0 0 1 3 -3h12z"],
+    sparkles: ["M16 18a2 2 0 0 1 2 2a2 2 0 0 1 2 -2a2 2 0 0 1 -2 -2a2 2 0 0 1 -2 2zm0 -12a2 2 0 0 1 2 2a2 2 0 0 1 2 -2a2 2 0 0 1 -2 -2a2 2 0 0 1 -2 2zm-7 12a6 6 0 0 1 6 -6a6 6 0 0 1 -6 -6a6 6 0 0 1 -6 6a6 6 0 0 1 6 6z"] };
   const h = React.createElement;
   const Fragment = React.Fragment;
   /** The variants each part takes, all ones Buzz styles (kit/uses.json
@@ -2332,6 +2356,8 @@ function buzzUi(React, { nativeSelect = false } = {}) {
     Input: { controlSize: ["md", "sm"] },
     Stack: { gap: [4, 2, "section"] },
     Column: { gap: [4, 2] },
+    Tabs: { variant: ["panel", "segmented"] },
+    Avatar: { size: ["small", "compact", "tiny"] },
   };
   const one = (list, value) => (list.includes(value) ? value : list[0]);
   const icon = (path, size, props = {}) => h("svg", { xmlns: "http://www.w3.org/2000/svg", width: `${size / 16}rem`, height: `${size / 16}rem`,
@@ -2628,7 +2654,7 @@ function buzzUi(React, { nativeSelect = false } = {}) {
 
   /** Tabs.tsx, variant "panel" size "sm": pick one of a few items. The
    * indicator is measured from the selected tab, as Base UI does. */
-  const Tabs = ({ label, value, items, onChange }) => {
+  const Tabs = ({ label, value, items, onChange, variant = "panel" }) => {
     const list = React.useRef(null);
     const bar = React.useRef(null);
     React.useLayoutEffect(() => {
@@ -2653,7 +2679,7 @@ function buzzUi(React, { nativeSelect = false } = {}) {
       onChange(next.value);
       requestAnimationFrame?.(() => list.current?.querySelector?.('[role="tab"][aria-selected="true"]')?.focus());
     };
-    return h("div", { "data-buzz-ui": "", className: "buzz-tabs", "data-variant": "panel", "data-size": "sm", "data-orientation": "horizontal" },
+    return h("div", { "data-buzz-ui": "", className: "buzz-tabs", "data-variant": one(VARIANTS.Tabs.variant, variant), "data-size": "sm", "data-orientation": "horizontal" },
       h("div", { ref: list, role: "tablist", "aria-label": label, "aria-orientation": "horizontal", className: "buzz-tabs-list", "data-orientation": "horizontal", onKeyDown: keys },
         h("span", { ref: bar, className: "buzz-tabs-indicator", hidden: true }),
         ...items.map((item) => {
@@ -2803,18 +2829,21 @@ function buzzUi(React, { nativeSelect = false } = {}) {
    * NavigationCard, so a Checkbox can sit beside it without nesting controls:
    * `title` (the sender's place), `subtitle` (the preview's), `meta` (the
    * date's). `picked`/`onPick`: an explicit selection; `quiet`: muted. */
-  const SelectRow = ({ title, subtitle, meta, selected = false, picked, onPick, pickLabel, onOpen, quiet = false }) =>
+  const SelectRow = ({ title, subtitle, meta, avatar, thumbnail, selected = false, picked, onPick, pickLabel, onOpen, quiet = false }) =>
     h("li", { style: { minWidth: 0, listStyle: "none" } },
       h("div", { "data-buzz-ui": "", "data-navigation-card": "", "data-tone": "default", className: "navigation-card" },
         h("div", { className: "navigation-card-row" },
           h("button", { type: "button", "data-variant": "row", "data-multiline": "", "data-buzz-ui": "", className: "navigation-item",
               "data-selected": selected ? "" : undefined, "aria-current": selected ? "true" : undefined, onClick: onOpen },
+            // MessageListRow's avatar slot (`.rowAvatar`): who made it.
+            avatar ? h("span", { style: { display: "grid", flex: "none", width: "var(--space-8)", height: "var(--space-8)", placeItems: "center", alignSelf: "flex-start", marginBlockStart: "var(--space-row-gap)" } }, avatar) : null,
             h("span", { className: "navigation-item-label" },
               h("span", { style: { display: "flex", flexDirection: "column", gap: "var(--space-1)", minWidth: 0, whiteSpace: "normal", paddingBlock: "var(--space-row-gap)" } },
                 h("span", { style: { display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: "var(--space-1) var(--space-control-inset)" } },
                   h("strong", { className: `text-label-sm ${quiet ? "text-subtle" : "text-standard"}`, style: { minWidth: 0, overflowWrap: "anywhere" } }, title),
                   meta ? h("span", { className: "text-caption text-subtle", style: { flex: "0 0 auto" } }, meta) : null),
-                subtitle ? h("span", { className: "text-body-sm text-subtle", style: { maxInlineSize: "64ch", overflow: "hidden", overflowWrap: "anywhere", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" } }, subtitle) : null))),
+                subtitle ? h("span", { className: "text-body-sm text-subtle", style: { maxInlineSize: "64ch", overflow: "hidden", overflowWrap: "anywhere", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" } }, subtitle) : null,
+                thumbnail ? h("img", { src: thumbnail, alt: "", style: { display: "block", width: "100%", maxHeight: "5rem", objectFit: "cover", objectPosition: "top", borderRadius: "var(--radius-control)", border: "1px solid var(--border-standard)" } }) : null))),
           onPick ? h("span", { style: { order: -1, flex: "none", display: "grid", placeItems: "center", paddingBlock: "calc(var(--space-row-gap) + var(--space-half))", paddingInlineStart: "var(--space-control-inset)" } },
             h(Checkbox, { checked: !!picked, onCheckedChange: onPick, label: pickLabel ?? (typeof title === "string" ? `Select ${title}` : "Select") })) : null)));
 
@@ -2845,6 +2874,54 @@ function buzzUi(React, { nativeSelect = false } = {}) {
       narrow && !showing ? null : h("div", { style: { ...pane, flex: 1 } }, detail));
   };
 
+  /** Avatar.tsx at a row's size: a picture, or its name's first letter.
+   * `shape` squircle for an agent, circle for a person. */
+  const Avatar = ({ name, picture, size = "small", shape = "circle", label }) => {
+    const [failed, setFailed] = React.useState(false);
+    const letter = (Array.from(String(name ?? "").trim())[0] ?? "?").toUpperCase();
+    const dim = one(VARIANTS.Avatar.size, size);
+    return h("span", { className: "buzz-avatar-status", "data-size": dim, "data-shape": shape === "squircle" ? "squircle" : "circle" },
+      h("span", { "data-buzz-ui": "", className: "buzz-avatar", "data-size": dim, "data-avatar-shape": shape === "squircle" ? "squircle" : "circle", "data-fallback-surface": "subtle",
+          role: label ? "img" : undefined, "aria-label": label, "aria-hidden": label ? undefined : true },
+        picture && !failed
+          ? h("img", { src: picture, alt: "", loading: "lazy", decoding: "async", referrerPolicy: "no-referrer", "data-loaded": "true", onError: () => setFailed(true) })
+          : h("span", { "data-avatar-fallback": "", "aria-hidden": true }, letter)));
+  };
+  /** Who made something and what set it off, as Buzz writes a message's
+   * author line: the maker's Avatar and name (and the app they used), then
+   * the origin with its mark. `onOrigin` makes the origin open its thread. */
+  const Byline = ({ avatar, name, app, origin, originGlyph, onOrigin }) =>
+    h("div", { "data-buzz-ui": "", className: "flex flex-wrap items-center gap-2", style: { minWidth: 0 } },
+      avatar ?? null,
+      h("span", { className: "text-label-sm text-standard", style: { minWidth: 0, overflowWrap: "anywhere" } }, name),
+      app ? h("span", { className: "text-caption text-subtle" }, app) : null,
+      origin ? h("span", { className: "text-caption text-subtle", "aria-hidden": true }, "·") : null,
+      origin ? (onOrigin
+        ? h(Button, { variant: "link", size: "text", onClick: onOrigin }, h(Fragment, null, originGlyph && ICON[originGlyph] ? icon(ICON[originGlyph], 12, { style: { marginInlineEnd: "var(--space-1)", verticalAlign: "-1px" } }) : null, origin))
+        : h("span", { className: "flex items-center gap-1 text-caption text-subtle" }, originGlyph && ICON[originGlyph] ? icon(ICON[originGlyph], 12) : null, origin)) : null);
+  /** The work, big: a frame that takes the panel's height (Diffs' card,
+   * `.preview`), its toggle (Now / After) floating at the top. */
+  const Canvas = ({ label, toolbar, children }) =>
+    h("figure", { "aria-label": label, style: { ...card, margin: 0, position: "relative", display: "flex", flexDirection: "column", flex: "1 1 auto", minHeight: "min(34rem, 64vh)" } },
+      toolbar ? h("div", { style: { ...cardHeader, justifyContent: "space-between" } }, ...each(toolbar)) : null,
+      h("div", { style: { flex: 1, minHeight: 0, display: "flex", alignItems: "stretch", justifyContent: "center", overflow: "auto", background: "var(--surface-inset)" } }, ...each(children)));
+  /** A picture of the work filling the canvas (an image, or the platform's capture of a page). */
+  const CanvasImage = ({ src, alt }) => src
+    ? h("img", { src, alt, style: { display: "block", maxWidth: "100%", maxHeight: "100%", objectFit: "contain", margin: "auto" } })
+    : h("div", { role: "img", "aria-label": `${alt} loading`, "aria-busy": true, style: { flex: 1, background: "var(--surface-inset)" } });
+  /** A quiet line of short values (the stake, the facts), one line, cut short. */
+  const QuietLine = ({ glyph, children }) =>
+    h("p", { className: "m-0 text-caption text-subtle", style: { display: "flex", gap: "var(--space-1)", alignItems: "center", minWidth: 0 } },
+      glyph && ICON[glyph] ? icon(ICON[glyph], 12, { style: { flex: "none" } }) : null,
+      h("span", { style: { minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, children));
+  /** What approving permits, in two lines at most (the whole on hover). */
+  const Permits = (text) => h("p", { className: "m-0 text-body-sm text-standard", title: text, style: { display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" } }, text);
+  /** One review item's column: its heading, the canvas taking the rest, then details. */
+  const Article = ({ label, children }) =>
+    h("article", { "aria-label": label, style: { display: "flex", flexDirection: "column", gap: "var(--space-3)", flex: "1 0 auto", minHeight: "100%" } }, ...each(children));
+  /** The question, one or two lines, the heading of the item. */
+  const Question = (text) => h("h2", { className: "m-0 text-label", style: { display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden", overflowWrap: "anywhere" } }, text);
+
   /** The finished work as a page, in Diffs' card (`.preview`: a bounded,
    * scrolling frame) with an embedded view inside. */
   const Frame = ({ label, children }) =>
@@ -2853,8 +2930,10 @@ function buzzUi(React, { nativeSelect = false } = {}) {
   const MessageCard = ({ label, children }) =>
     h("div", { "data-buzz-ui": "", role: "group", "aria-label": label, style: { ...card, display: "grid" } }, ...each(children));
   /** One row in a message's card: the question, its live state, Open. */
-  const MessageRow = ({ title, subtitle, loading = false, onOpen, openLabel = "Open" }) =>
+  const MessageRow = ({ title, subtitle, avatar, thumbnail, loading = false, onOpen, openLabel = "Open" }) =>
     h("div", { style: { display: "flex", alignItems: "center", gap: "var(--space-3)", padding: "var(--space-2) var(--space-3)", minWidth: 0 } },
+      thumbnail ? h("img", { src: thumbnail, alt: "", style: { width: "4.5rem", height: "3.25rem", objectFit: "cover", objectPosition: "top", flex: "none", borderRadius: "var(--radius-control)", border: "1px solid var(--border-standard)" } })
+        : avatar ? h("span", { style: { flex: "none", display: "grid" } }, avatar) : null,
       h("span", { style: { display: "grid", gap: "var(--space-1)", minWidth: 0, flex: 1 } },
         h("span", { className: "text-label-sm text-standard", style: { overflowWrap: "anywhere" } }, title),
         loading ? h("span", { style: { display: "block", width: "40%", height: "var(--space-3)", borderRadius: "var(--space-1)", background: "var(--surface-inset)" } })
@@ -3267,7 +3346,7 @@ function buzzUi(React, { nativeSelect = false } = {}) {
 
   return { VARIANTS, SectionTitle, Group, Row, Button, Input, Switch, SwitchRow, Pill, Popup, Native, TextField, Stack, Column, Actions, Note, ErrorLine, Spinner, Status, Value, Alert, Code,
     Header, IconButton, PanelHeader, Page, Subview, Surface, PanelBody, Fill, Toolbar, EmptyState, NavItem, Tabs, Disclosure, CountBadge, Dot, LinkChip, OneTimeCode, CodeColumn, Failure, Notice,
-    Frame, Chip, ChipRow, DiffText, ChangeTable, MediaPair, DecisionBar, Skeleton, Checkbox, SelectRow, ListGroup, Split, MessageCard, MessageRow,
+    Frame, Avatar, Byline, Canvas, CanvasImage, QuietLine, Question, Permits, Article, Chip, ChipRow, DiffText, ChangeTable, MediaPair, DecisionBar, Skeleton, Checkbox, SelectRow, ListGroup, Split, MessageCard, MessageRow,
     Title, Heading, Paragraph, Caption, Strong, Lines, Line, Pre, ICON,
     AgentBrowse, AgentGrid, AgentCard, CardMark, AgentPortrait, AgentPanel, AgentProfile, NameInput, NameActions, Menu, AvatarChoices, HeaderTab, Picture, Glyph, COPIED, COPIED_FROM, AVATARS };
 }
@@ -3344,7 +3423,9 @@ function reviewListed(queue) {
     for (const item of review.items ?? []) {
       out.push({ id: reviewItemId(review.businessId, review.assetId, item.key), businessId: review.businessId, businessName: review.businessName,
         assetId: review.assetId, reviewTitle: review.title, key: item.key, version: item.version, title: item.title, question: item.question,
-        stake: item.stake, age: item.age, brief: item.brief, workType: item.workType, threadId: item.threadId ?? review.threadId ?? null });
+        stake: item.stake, age: item.age, brief: item.brief, workType: item.workType, threadId: item.threadId ?? review.threadId ?? null,
+        madeBy: item.madeBy ?? review.madeBy ?? null, requestedBy: item.requestedBy ?? review.requestedBy ?? null, job: item.job ?? review.job ?? null,
+        producer: item.producer ?? review.producer ?? null, origin: item.origin ?? review.origin ?? null });
     }
   }
   return out;
@@ -3382,6 +3463,33 @@ function reviewOrigin(review, item) {
   return Object.fromEntries(Object.entries(out).filter(([, value]) => value));
 }
 
+/** Who made a review item and what set it off, for its byline:
+ * `{ maker: { name, pubkey?, app?, agent }, origin: { kind: job | request |
+ * proactive, text, threadId? } }`. Reads Platform Control's structured
+ * `producer` and `origin` when present; until then `madeBy` is shown whole
+ * (nothing is parsed out of it), with `job`, `requestedBy` and `threadId`. */
+function reviewByline(review, item) {
+  const text = (value, max = 160) => (typeof value === "string" && value.trim() ? plain(value, max) : undefined);
+  const key = (value) => (/^[0-9a-f]{64}$/i.test(String(value ?? "")) ? String(value).toLowerCase() : undefined);
+  const producer = item?.producer ?? review?.producer;
+  const said = item?.origin ?? review?.origin;
+  const job = item?.job ?? review?.job;
+  const threadId = text(item?.threadId ?? review?.threadId, 200);
+  const requestedBy = text(item?.requestedBy ?? review?.requestedBy, 120);
+  const maker = producer && typeof producer === "object"
+    ? { pubkey: key(producer.agentPubkey ?? producer.pubkey), name: text(producer.agentName ?? producer.name ?? producer.person, 80) ?? "Unknown",
+        app: text(producer.app ?? producer.harness, 60), agent: !!(producer.agentPubkey ?? producer.pubkey ?? producer.agentName) }
+    : { name: text(item?.madeBy ?? review?.madeBy, 160) ?? "Unknown maker", agent: false };
+  let origin;
+  if (said && typeof said === "object" && ["job", "request", "proactive"].includes(said.kind)) {
+    origin = { kind: said.kind, text: text(said.label ?? said.text, 120) ?? (said.kind === "job" ? "Scheduled run" : said.kind === "request" ? "Asked for" : "Proactive") };
+  } else if (job && (job.jobName || job.jobId)) origin = { kind: "job", text: `${text(job.jobName, 80) ?? "A job"} · scheduled run` };
+  else if (requestedBy && !/^proactive$/i.test(requestedBy)) origin = { kind: "request", text: `Asked by ${requestedBy}` };
+  else origin = { kind: "proactive", text: "On its own initiative" };
+  if (threadId) origin.threadId = threadId;
+  return { maker, origin };
+}
+
 /** An item's state in words, from its own decision fields: approval is never
  * shown as completion. */
 function reviewState(item, receipt) {
@@ -3410,12 +3518,14 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
   undoMs = REVIEW_UNDO_MS, timeoutMs = REVIEW_DECIDE_TIMEOUT_MS } = {}) {
   const tokens = new Map(); // item id -> { token, version, expiresAt }: this closure only
   const previews = new Map(); // item id -> { after, before }: { url, contentType }
+  const captures = new Map(); // item id -> { url, contentType }: the platform's picture of the work, when it sends one
   const reviews = new Map(); // asset key -> { data, readAt }
   const flights = new Map(); // asset key -> a read in flight
   const businesses = new Map(); // assetId -> businessId (locators only)
   const receipts = new Map(); // item id -> receipt
   const timers = new Map(); // item id -> undo timer
   const images = new Map(); // `${id}/${which}` -> Promise<data URL | null>
+  const pictures = new Map(); // `${id}/${which}` -> data URL, once read
   const listeners = new Set();
   let queue = null;
   let queueFlight = null;
@@ -3468,6 +3578,8 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
       const after = meta?.previews?.[item.key];
       const before = meta?.beforePreviews?.[item.key];
       if (after || before) previews.set(id, { after, before });
+      const capture = meta?.captures?.[item.key]?.desktop ?? meta?.captures?.[item.key];
+      if (typeof capture?.url === "string") captures.set(id, { url: capture.url, contentType: capture.contentType ?? "image/png" });
       // A decision the server now shows replaces a receipt still unsure of it.
       const receipt = receipts.get(id);
       if (receipt && item.decision && ["unknown", "conflict"].includes(receipt.state)) receipts.set(id, { ...receipt, state: "saved", decision: item.decision });
@@ -3530,7 +3642,7 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
     const id = reviewItemId(businessId, assetId, key);
     const cacheKey = `${id}/${which}`;
     if (images.has(cacheKey)) return images.get(cacheKey);
-    const link = previews.get(id)?.[which];
+    const link = which === "capture" ? captures.get(id) : previews.get(id)?.[which];
     const read = (async () => {
       if (!link?.url || !/^image\//.test(String(link.contentType ?? ""))) return null;
       // The link names the file; only its path is used, never the link itself.
@@ -3546,6 +3658,7 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
     })().catch(() => null);
     if (images.size >= 60) images.delete(images.keys().next().value);
     images.set(cacheKey, read);
+    read.then((src) => { if (src) { if (pictures.size >= 60) pictures.delete(pictures.keys().next().value); pictures.set(cacheKey, src); changed(); } });
     return read;
   };
 
@@ -3625,11 +3738,23 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
     try {
       let timer;
       const late = new Promise((_, reject) => { timer = setTimer(() => reject(Object.assign(new Error("No answer in time."), { code: "timeout" })), timeoutMs); });
+      const ask = () => call("decide_review_item", {
+        businessId: receipt.businessId, assetId: receipt.assetId, version: receipt.version, itemKey: receipt.key,
+        verdict: receipt.verdict, decisionToken: token.token, ...(receipt.feedback ? { feedback: receipt.feedback } : {}),
+      }, { timeoutMs });
+      // Too many at once (HTTP 429): the same call with the same token is safe
+      // to repeat (Platform Control returns the saved decision), after a pause.
+      const attempt = async (left) => {
+        try { return await ask(); } catch (error) {
+          if (left > 0 && /HTTP 429/.test(String(error?.message)) && !stale()) {
+            await new Promise((resolve) => setTimer(resolve, 1500));
+            return attempt(left - 1);
+          }
+          throw error;
+        }
+      };
       try {
-        result = await Promise.race([call("decide_review_item", {
-          businessId: receipt.businessId, assetId: receipt.assetId, version: receipt.version, itemKey: receipt.key,
-          verdict: receipt.verdict, decisionToken: token.token, ...(receipt.feedback ? { feedback: receipt.feedback } : {}),
-        }, { timeoutMs }), late]);
+        result = await Promise.race([attempt(3), late]);
       } finally { clearTimer(timer); }
     } catch (error) {
       if (stale()) return;
@@ -3718,6 +3843,15 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
     get revision() { return revision; },
     get queue() { return queue; },
     noteQueue, readQueue, open, cachedReview, peek, canDecide, image,
+    /** An image of the work already read (`after`, `before` or `capture`), or null. */
+    picture: (businessId, assetId, key, which = "after") => pictures.get(`${reviewItemId(businessId, assetId, key)}/${which}`) ?? null,
+    /** Which picture of the work there is to show: the platform's capture, else an image preview. */
+    pictureKind: (businessId, assetId, key) => {
+      const id = reviewItemId(businessId, assetId, key);
+      if (captures.has(id)) return "capture";
+      return /^image\//.test(String(previews.get(id)?.after?.contentType ?? "")) ? "after" : null;
+    },
+    hasBefore: (businessId, assetId, key) => /^image\//.test(String(previews.get(reviewItemId(businessId, assetId, key))?.before?.contentType ?? "")),
     /** The work's own preview link (a page or file the server shared for
      * showing the work), or null. Never a decision token. */
     preview: (businessId, assetId, key) => {
@@ -3731,7 +3865,7 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
       for (const timer of timers.values()) clearTimer(timer);
       timers.clear();
       waiting.length = 0;
-      for (const map of [tokens, previews, reviews, flights, businesses, receipts, images]) map.clear();
+      for (const map of [tokens, previews, captures, reviews, flights, businesses, receipts, images, pictures]) map.clear();
       queue = null;
       queueFlight = null;
       serverNeedsBusiness = false;
@@ -3772,9 +3906,10 @@ function wordDiff(before, after) {
 }
 
 // ---- Reviews: the screens ------------------------------------------------------
-// Drawn only with the Buzz UI kit. Work first: the question, the stake and
-// facts as chips, then the change itself; the reasons sit in one closed
-// disclosure. Deciding happens in place, in a bar at the bottom.
+// Drawn only with the Buzz UI kit. The work is the hero: the agent's artifact,
+// live, filling a canvas, under one line with who made it and the question.
+// A thin strip at the bottom says what approving permits and decides; every
+// reason, the evidence and the exact request sit in one closed disclosure.
 
 /** The screens over one reviewData store. `bridge`: { use, SignInPrompt,
  * browser, openThread? }. */
@@ -3782,7 +3917,8 @@ function reviewScreens(React, store, bridge) {
   const h = React.createElement;
   const ui = buzzUi(React);
   const { Button, IconButton, PanelHeader, Subview, PanelBody, EmptyState, Column, Actions, Stack, SectionTitle, Title, Caption, Strong, Lines, Line, Note, Status,
-    Disclosure, Group, Row, Pre, Failure, TextField, CountBadge, Chip, ChipRow, DiffText, ChangeTable, MediaPair, DecisionBar, Skeleton, SelectRow, ListGroup, Split, Toolbar } = ui;
+    Disclosure, Group, Row, Pre, Failure, TextField, CountBadge, Chip, ChipRow, DiffText, ChangeTable, MediaPair, DecisionBar, Skeleton, SelectRow, ListGroup, Split, Toolbar,
+    Avatar, Byline: BylineLine, Canvas, CanvasImage, QuietLine, Question, Tabs } = ui;
 
   const CONNECTION_TEXT = {
     starting: "Connecting to Black 4…",
@@ -3816,11 +3952,6 @@ function reviewScreens(React, store, bridge) {
       return () => clearInterval(timer);
     }, [active]);
   };
-  /** "grok-bot · Grok Bot (SEO & AEO Desk)" → "Grok Bot". */
-  const agentName = (madeBy) => {
-    const text = String(madeBy ?? "").split(" · ").slice(-1)[0].replace(/\s*\[.*$/, "").replace(/\s+via\s+.*$/, "").replace(/\s*\(.*\)$/, "").trim();
-    return text || "The agent";
-  };
   const capital = (text) => (text ? text.charAt(0).toUpperCase() + text.slice(1) : text);
   const STAKE_GLYPH = { money: "money", customers: "people", risk: "alert", none: null };
 
@@ -3833,43 +3964,81 @@ function reviewScreens(React, store, bridge) {
       link.connect && (link.status === "failed" || link.status === "stopped") ? h(Button, { variant: "prominent", size: compact ? "sm" : "md", onClick: link.connect }, "Connect Black 4") : null);
   }
 
-  // ---- the work itself -----------------------------------------------------------
-  function Media({ review, item }) {
-    const [images, setImages] = React.useState({ after: undefined, before: undefined });
+  // ---- who made it -----------------------------------------------------------------
+  const ORIGIN_GLYPH = { job: "clock", request: "message", proactive: "sparkles" };
+  /** The maker (a Buzz identity when the review names an agent key) and what
+   * set it off. `size`: the avatar's. */
+  function Byline({ review, item, size = "small" }) {
+    const { maker, origin } = reviewByline(review, item);
+    const profile = maker.pubkey ? bridge.profile?.(maker.pubkey) : null;
+    const name = profile?.name || maker.name;
+    const canOpen = origin.threadId && bridge.openThread;
+    return h(BylineLine, {
+      avatar: h(Avatar, { name, picture: profile?.picture, size, shape: maker.agent ? "squircle" : "circle" }),
+      name, app: maker.app, origin: origin.text, originGlyph: ORIGIN_GLYPH[origin.kind],
+      onOrigin: canOpen ? () => bridge.openThread(origin) : undefined,
+    });
+  }
+  /** The same, as one line of words (queue rows, message cards). */
+  const bylineWords = (review, item) => { const { maker, origin } = reviewByline(review, item); return `${maker.name} · ${origin.text}`; };
+
+  // ---- the work itself: a canvas, by kind of work -------------------------------------
+  /** An image of the work (or the platform's capture of a page), loaded through the MCP. */
+  function usePicture(review, item, which) {
+    const [src, setSrc] = React.useState(() => (which ? store.picture(review.businessId, review.assetId, item.key, which) : null));
     React.useEffect(() => {
       let live = true;
-      for (const which of ["after", "before"]) {
-        store.image(review.businessId, review.assetId, item.key, which).then((src) => { if (live) setImages((now) => ({ ...now, [which]: src })); });
-      }
+      if (!which) return undefined;
+      setSrc(store.picture(review.businessId, review.assetId, item.key, which));
+      store.image(review.businessId, review.assetId, item.key, which).then((value) => { if (live) setSrc(value); });
       return () => { live = false; };
-    }, [review.assetId, item.key, item.version]);
-    if (images.after === null && !images.before) return h(Page_, { review, item });
-    return h(MediaPair, { before: images.before ?? null, after: images.after, loading: images.after === undefined, label: item.title });
+    }, [review.assetId, item.key, item.version, which]);
+    return src ?? store.picture(review.businessId, review.assetId, item.key, which ?? "after");
   }
-  /** The change, as the card's `show` says, else the brief's before and after. */
+  /** Canvas renderers, by kind: the artifact page; an image (Now / After); else
+   * the plain fallback for reviews that carry no work to show. */
+  const CANVAS = {
+    /** The agent's artifact, live: the review's own preview of the work (never
+     * the review application), with the platform's capture behind it while it loads. */
+    page({ review, item, link }) {
+      const capture = usePicture(review, item, store.pictureKind(review.businessId, review.assetId, item.key) === "capture" ? "capture" : null);
+      return h(Canvas, { label: `The work: ${item.title}` },
+        bridge.browser
+          ? h(bridge.browser, { key: link, url: link, storage: "black4-review-work", label: `The work: ${item.title}` })
+          : h(CanvasImage, { src: capture, alt: item.title }));
+    },
+    /** An image, large, with Now / After when there is a before. */
+    media({ review, item }) {
+      const before = store.hasBefore(review.businessId, review.assetId, item.key);
+      const [which, setWhich] = React.useState("after");
+      const shown = before ? which : "after";
+      const src = usePicture(review, item, shown);
+      return h(Canvas, { label: `The work: ${item.title}`,
+        toolbar: before ? [Caption(item.card?.show?.label ?? item.title), h(Tabs, { key: "toggle", variant: "segmented", label: "Show", value: shown, onChange: setWhich,
+          items: [{ value: "before", label: "Now" }, { value: "after", label: "After" }] })] : null },
+        h(CanvasImage, { src, alt: `${item.title}: ${shown === "before" ? "now" : "after"}` }));
+    },
+    /** Older reviews with no work to show: plain and quiet. */
+    fallback({ item }) {
+      const show = item.card?.show;
+      const brief = item.brief ?? {};
+      let change = null;
+      if (show?.type === "fields" && show.rows?.length) {
+        change = h(ChangeTable, { rows: show.rows.map((row) => ({ label: row.label, before: row.before ?? "", after: row.after ?? "", changed: (row.before ?? "") !== (row.after ?? "") })) });
+      } else if (show?.type === "text") change = h(DiffText, { label: show.label, runs: wordDiff(show.before ?? "", show.after ?? "") });
+      else if (show?.type === "list" && show.rows?.length) {
+        change = h("div", null, show.label ? h(SectionTitle, { title: show.label }) : null,
+          h(Group, null, ...show.rows.map((row, index) => h(Row, { key: `${index}`, title: row.label, description: row.detail }))));
+      } else if (brief.before || brief.after) change = h(ChangeTable, { rows: [{ label: "", before: brief.before ?? "", after: brief.after ?? "", changed: brief.before !== brief.after }] });
+      return change ?? Note(item.action || "No change was attached.");
+    },
+  };
+  /** Which canvas a review item gets: its artifact page, its image, else the fallback. */
   function Work({ review, item }) {
-    const show = item.card?.show;
-    if (show?.type === "fields" && show.rows?.length) {
-      return h(ChangeTable, { rows: show.rows.map((row) => ({ label: row.label, before: row.before ?? "", after: row.after ?? "", changed: (row.before ?? "") !== (row.after ?? "") })) });
-    }
-    if (show?.type === "text") return h(DiffText, { label: show.label, runs: wordDiff(show.before ?? "", show.after ?? "") });
-    if (show?.type === "list" && show.rows?.length) {
-      return h("div", null, show.label ? h(SectionTitle, { title: show.label }) : null,
-        h(Group, null, ...show.rows.map((row, index) => h(Row, { key: `${index}`, title: row.label, description: row.detail }))));
-    }
-    if (show?.type === "media") return h(Media, { review, item });
-    // No card: the finished page or file itself, when there is one (documents).
-    if (store.preview(review.businessId, review.assetId, item.key)) return h(Page_, { review, item });
-    const brief = item.brief ?? {};
-    if (brief.before || brief.after) return h(ChangeTable, { rows: [{ label: "", before: brief.before ?? "", after: brief.after ?? "", changed: brief.before !== brief.after }] });
-    return Note(item.action || "No change was attached.");
-  }
-  /** The finished work when it is a page or file: its own preview, shown in
-   * place (never the review application around it). */
-  function Page_({ review, item }) {
     const link = store.preview(review.businessId, review.assetId, item.key);
-    if (!link || !bridge.browser) return Note(item.action || "The work has no preview here.");
-    return h(ui.Frame, { label: item.title }, h(bridge.browser, { url: link, storage: "black4-review-work", label: `The work: ${item.title}` }));
+    if (link) return CANVAS.page({ review, item, link });
+    if (store.pictureKind(review.businessId, review.assetId, item.key) || item.card?.show?.type === "media") return h(CANVAS.media, { review, item });
+    return h(CANVAS.fallback, { item });
   }
 
   /** Why, evidence, provenance and the pinned request: one closed disclosure. */
@@ -3882,16 +4051,18 @@ function reviewScreens(React, store, bridge) {
     return h(Disclosure, { title: "Details" },
       h(Stack, { gap: 4 },
         h(Group, null,
-          row("Approving permits", item.action),
+          row("Recommendation", card.recommend?.answer ? `${capital(String(card.recommend.answer))}${card.recommend.why ? `: ${card.recommend.why}` : ""}` : ""),
+          row("Stake", card.stake?.text),
+          row("Facts", (card.facts ?? []).join(" · ")),
           row("If yes", card.ifYes || brief.expectedResult),
           row("If no", card.ifNo),
           row("Tradeoff", card.tradeoff),
           row("Why", brief.why),
-          !card.show ? row("Before", brief.before) : null,
-          !card.show ? row("After", brief.after) : null,
+          row("Before", brief.before),
+          row("After", brief.after),
           row("Success looks like", brief.successMeasure),
           row("Evidence", brief.baselineSource ? `${brief.baselineSource}${brief.baselineObservedAt ? ` · ${brief.baselineObservedAt}` : ""}` : ""),
-          row("Made by", item.madeBy),
+          row("Made by", item.madeBy ?? review.madeBy),
           row("Asked by", item.requestedBy),
           row("Job", origin.jobName || origin.jobId),
           row("Version", `${item.version}${review.title ? ` of ${review.title}` : ""}`)),
@@ -3950,7 +4121,10 @@ function reviewScreens(React, store, bridge) {
           h(Button, { key: "send", variant: compose === "rejected" ? "destructive" : "prominent", disabled: !feedback.trim(), onClick: send }, words.send),
           h(Button, { key: "cancel", variant: "outline", onClick: () => setCompose(null) }, "Cancel")));
     }
-    return h(DecisionBar, null,
+    const card = item.card ?? {};
+    return h(DecisionBar, { status: h(Stack, { gap: 2 },
+        h(QuietLine, { glyph: STAKE_GLYPH[card.stake?.kind] ?? null }, card.stake?.text || (card.facts ?? []).join(" · ") || review.businessName),
+        item.action ? ui.Permits(item.action) : null) },
       h(Button, { key: "approve", variant: "prominent", autoFocus, "aria-keyshortcuts": "A", onClick: () => store.propose({ review, item, verdict: "approved" }) }, "Approve"),
       h(Button, { key: "changes", variant: "outline", "aria-keyshortcuts": "C", onClick: () => setCompose("changes_requested") }, "Ask for changes"),
       h(Button, { key: "reject", variant: "ghost", onClick: () => setCompose("rejected") }, "Reject"));
@@ -3982,7 +4156,14 @@ function reviewScreens(React, store, bridge) {
     // The next item is read while this one is on screen, so stepping is instant.
     const upcoming = step?.upcoming;
     React.useEffect(() => {
-      if (link.status === "connected" && upcoming?.assetId && upcoming.assetId !== review?.assetId) store.open(upcoming).catch(() => {});
+      // Its review, and the picture of its work, so the canvas swaps at once.
+      if (link.status === "connected" && upcoming?.assetId && upcoming.assetId !== review?.assetId) {
+        store.open(upcoming).then((next) => {
+          const key = upcoming.itemKey ?? next.focusItemKey ?? next.items?.[0]?.key;
+          const kind = key ? store.pictureKind(next.businessId, next.assetId, key) : null;
+          if (kind) store.image(next.businessId, next.assetId, key, kind);
+        }, () => {});
+      }
     }, [upcoming?.assetId, review?.assetId, link.status]);
     const item = review ? (review.items.find((candidate) => candidate.key === entry.itemKey) ?? review.items.find((candidate) => candidate.key === review.focusItemKey) ?? review.items[0]) : null;
     const id = review && item ? reviewItemId(review.businessId, review.assetId, item.key) : null;
@@ -4029,25 +4210,13 @@ function reviewScreens(React, store, bridge) {
         ? Line("This review isn't waiting for you.")
         : h(Failure, { message: plain(state.error.message, 300), retry: () => setRevision((n) => n + 1), retryLabel: "Try again" }));
     }
-    if (!review) return wrap("Reviews", h(Skeleton, { layout: "item" }));
+    // While the next item loads, the strip keeps its place under a placeholder.
+    if (!review) return wrap("Reviews", h(Skeleton, { layout: "item" }), h(DecisionBar, { status: Caption("Loading…") }));
     if (!item) return wrap(review.businessName, Line("Nothing in this review is shown to you."));
     const card = item.card ?? {};
-    const origin = reviewOrigin(review, item);
-    const facts = [
-      card.stake?.text ? h(Chip, { key: "stake", glyph: STAKE_GLYPH[card.stake.kind] ?? null, label: card.stake.text, emphasis: card.stake.kind !== "none" }) : null,
-      ...(card.facts ?? []).map((fact, index) => h(Chip, { key: `f${index}`, label: fact })),
-    ].filter(Boolean);
-    const recommendation = card.recommend?.answer
-      ? `${agentName(item.madeBy)} recommends ${String(card.recommend.answer).toLowerCase()}${card.recommend.why ? `: ${card.recommend.why}` : ""}`
-      : "";
-    const body = h(Stack, { key: id, as: "article", gap: 4 },
-      h(Stack, { gap: 2 },
-        Caption([review.businessName, review.items.length > 1 ? `Item ${review.items.indexOf(item) + 1} of ${review.items.length}` : null, item.title !== card.question ? item.title : null].filter(Boolean).join(" · ")),
-        Title(card.question || item.title),
-        facts.length ? h(ChipRow, null, ...facts) : null),
+    const body = h(ui.Article, { key: id, label: card.question || item.title },
+      h(Stack, { gap: 2 }, h(Byline, { review, item }), Question(card.question || item.title)),
       h(Work, { review, item }),
-      recommendation ? Line(recommendation) : null,
-      origin.threadId && bridge.openThread ? h(Actions, null, h(Button, { size: "sm", variant: "outline", onClick: () => bridge.openThread(origin) }, "Open thread")) : null,
       h(Details, { review, item }));
     return wrap(review.businessName, body, h(Decide, { review, item, compose, setCompose, onReload: () => setRevision((n) => n + 1) }));
   }
@@ -4079,7 +4248,12 @@ function reviewScreens(React, store, bridge) {
         ...group.items.map((entry) => {
           const { question, stake } = questionOf(entry);
           const receipt = store.receipt(entry.id);
-          return h(SelectRow, { key: entry.id, title: question, subtitle: notes?.get(entry.id) || receiptWords(receipt) || stake, meta: entry.age,
+          const { maker } = reviewByline(null, entry);
+          const profile = maker.pubkey ? bridge.profile?.(maker.pubkey) : null;
+          const kind = store.pictureKind(entry.businessId, entry.assetId, entry.key);
+          return h(SelectRow, { key: entry.id, title: question, subtitle: notes?.get(entry.id) || receiptWords(receipt) || `${bylineWords(null, entry)}${stake ? ` · ${stake}` : ""}`, meta: entry.age,
+            avatar: h(Avatar, { name: profile?.name || maker.name, picture: profile?.picture, size: "small", shape: maker.agent ? "squircle" : "circle" }),
+            thumbnail: kind ? store.picture(entry.businessId, entry.assetId, entry.key, kind) : null,
             selected: selectedId === entry.id,
             picked: onPick ? picked?.has(entry.id) : undefined, pickLabel: `Select ${question}`,
             onPick: onPick ? (value) => onPick(entry.id, value) : undefined,
@@ -4111,7 +4285,7 @@ function reviewScreens(React, store, bridge) {
     return { proposed, refused };
   };
 
-  return { useStore, useConnection, NotConnected, ReviewItem, QueueList, Work, Decide, approveTogether, questionOf, receiptWords, agentName };
+  return { useStore, useConnection, NotConnected, ReviewItem, QueueList, Work, Decide, Byline, bylineWords, approveTogether, questionOf, receiptWords };
 }
 
 // ---- Reviews: what it gives Buzz -----------------------------------------------
@@ -4168,7 +4342,7 @@ function reviewsPart(ctx, bridge) {
   const optional = (name) => { try { return ctx.reflect?.get?.(name) ?? undefined; } catch { return undefined; } };
   const pluginId = ctx.pluginOwner?.id ?? "ai.black4";
   const pageTarget = (params) => ({ version: 1, kind: "page", pluginId, pageId: REVIEWS_PAGE, ...(params && Object.keys(params).length ? { route: { version: 1, params } } : {}) });
-  const screens = reviewScreens(React, store, { use: bridge.use, SignInPrompt: bridge.SignInPrompt, browser: bridge.browser, openThread: bridge.openThread });
+  const screens = reviewScreens(React, store, { use: bridge.use, SignInPrompt: bridge.SignInPrompt, browser: bridge.browser, openThread: bridge.openThread, profile: bridge.profile });
   const { ReviewItem, QueueList, useStore, useConnection, NotConnected, approveTogether } = screens;
   const disposers = [];
   const own = (dispose) => { if (typeof dispose === "function") disposers.push(dispose); else if (dispose?.dispose) disposers.push(() => dispose.dispose()); };
@@ -4362,8 +4536,15 @@ function reviewsPart(ctx, bridge) {
     const receipt = review && item ? store.receipt(reviewItemId(review.businessId, review.assetId, item.key)) : null;
     const state = item ? reviewState(item, receipt) : null;
     const title = item ? (item.card?.question || item.title) : failed?.code === "elsewhere" ? "A Black 4 review" : failed ? "A Black 4 review" : "Loading the review…";
-    return h(ui.MessageRow, { title, subtitle: state ? `${review.businessName} · ${state.text}` : failed ? (failed.code === "elsewhere" ? "Not in your queue" : "Couldn't read it") : "",
-      tone: state?.tone ?? "quiet", loading: !item && !failed && link.status === "connected", onOpen: open, openLabel: "Open" });
+    const { maker } = item ? reviewByline(review, item) : { maker: null };
+    const profile = maker?.pubkey ? bridge.profile?.(maker.pubkey) : null;
+    const kind = item ? store.pictureKind(review.businessId, review.assetId, item.key) : null;
+    React.useEffect(() => { if (kind) store.image(review.businessId, review.assetId, item.key, kind); }, [kind, item?.key]);
+    return h(ui.MessageRow, { title,
+      subtitle: state ? `${review.businessName} · ${screens.bylineWords(review, item)} · ${state.text}` : failed ? (failed.code === "elsewhere" ? "Not in your queue" : "Couldn't read it") : "",
+      avatar: maker ? h(ui.Avatar, { name: profile?.name || maker.name, picture: profile?.picture, size: "small", shape: maker.agent ? "squircle" : "circle" }) : null,
+      thumbnail: kind ? store.picture(review.businessId, review.assetId, item.key, kind) : null,
+      loading: !item && !failed && link.status === "connected", onOpen: open, openLabel: "Open" });
   }
   function ReviewPreview({ url, open }) {
     const link = useConnection();
@@ -4516,7 +4697,7 @@ function reviewsSlot(ctx, bridge) {
   };
 }
 // ---- end reviews ----
-export { reviewLocator, reviewLink, reviewOrder, reviewGroups, reviewState, reviewData, wordDiff, reviewsPart, reviewsSlot, REVIEW_UNDO_MS };
+export { reviewByline, reviewLocator, reviewLink, reviewOrder, reviewGroups, reviewState, reviewData, wordDiff, reviewsPart, reviewsSlot, REVIEW_UNDO_MS };
 
 /** buzz-acp's own conversation levers, by the names the machine lists them
  * under (`controls` in its models reply: the bounds or values of each, and

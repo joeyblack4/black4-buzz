@@ -135,6 +135,6 @@ test("the message card: one card for every review link in a message, each with i
   a.expand(a.registered.accessory.component({ message, open: () => true }));
   await settle();
   const card = a.expand(a.registered.accessory.component({ message, open: () => true }));
-  assert.match(a.label(card), /Change the hero\?.*Crumb & Co · Waiting for you.*Change the price\?/);
+  assert.match(a.label(card), /Change the hero\?.*Crumb & Co · copy-bot · Mira · Asked by Weekly refresh · Waiting for you.*Change the price\?/, "question, business, who made it and what set it off, live state");
   assert.equal(a.expand(a.registered.accessory.component({ message: { content: "no links here" }, open: () => true })), null);
 });

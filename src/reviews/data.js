@@ -67,7 +67,9 @@ function reviewListed(queue) {
     for (const item of review.items ?? []) {
       out.push({ id: reviewItemId(review.businessId, review.assetId, item.key), businessId: review.businessId, businessName: review.businessName,
         assetId: review.assetId, reviewTitle: review.title, key: item.key, version: item.version, title: item.title, question: item.question,
-        stake: item.stake, age: item.age, brief: item.brief, workType: item.workType, threadId: item.threadId ?? review.threadId ?? null });
+        stake: item.stake, age: item.age, brief: item.brief, workType: item.workType, threadId: item.threadId ?? review.threadId ?? null,
+        madeBy: item.madeBy ?? review.madeBy ?? null, requestedBy: item.requestedBy ?? review.requestedBy ?? null, job: item.job ?? review.job ?? null,
+        producer: item.producer ?? review.producer ?? null, origin: item.origin ?? review.origin ?? null });
     }
   }
   return out;
@@ -105,6 +107,33 @@ function reviewOrigin(review, item) {
   return Object.fromEntries(Object.entries(out).filter(([, value]) => value));
 }
 
+/** Who made a review item and what set it off, for its byline:
+ * `{ maker: { name, pubkey?, app?, agent }, origin: { kind: job | request |
+ * proactive, text, threadId? } }`. Reads Platform Control's structured
+ * `producer` and `origin` when present; until then `madeBy` is shown whole
+ * (nothing is parsed out of it), with `job`, `requestedBy` and `threadId`. */
+function reviewByline(review, item) {
+  const text = (value, max = 160) => (typeof value === "string" && value.trim() ? plain(value, max) : undefined);
+  const key = (value) => (/^[0-9a-f]{64}$/i.test(String(value ?? "")) ? String(value).toLowerCase() : undefined);
+  const producer = item?.producer ?? review?.producer;
+  const said = item?.origin ?? review?.origin;
+  const job = item?.job ?? review?.job;
+  const threadId = text(item?.threadId ?? review?.threadId, 200);
+  const requestedBy = text(item?.requestedBy ?? review?.requestedBy, 120);
+  const maker = producer && typeof producer === "object"
+    ? { pubkey: key(producer.agentPubkey ?? producer.pubkey), name: text(producer.agentName ?? producer.name ?? producer.person, 80) ?? "Unknown",
+        app: text(producer.app ?? producer.harness, 60), agent: !!(producer.agentPubkey ?? producer.pubkey ?? producer.agentName) }
+    : { name: text(item?.madeBy ?? review?.madeBy, 160) ?? "Unknown maker", agent: false };
+  let origin;
+  if (said && typeof said === "object" && ["job", "request", "proactive"].includes(said.kind)) {
+    origin = { kind: said.kind, text: text(said.label ?? said.text, 120) ?? (said.kind === "job" ? "Scheduled run" : said.kind === "request" ? "Asked for" : "Proactive") };
+  } else if (job && (job.jobName || job.jobId)) origin = { kind: "job", text: `${text(job.jobName, 80) ?? "A job"} · scheduled run` };
+  else if (requestedBy && !/^proactive$/i.test(requestedBy)) origin = { kind: "request", text: `Asked by ${requestedBy}` };
+  else origin = { kind: "proactive", text: "On its own initiative" };
+  if (threadId) origin.threadId = threadId;
+  return { maker, origin };
+}
+
 /** An item's state in words, from its own decision fields: approval is never
  * shown as completion. */
 function reviewState(item, receipt) {
@@ -133,12 +162,14 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
   undoMs = REVIEW_UNDO_MS, timeoutMs = REVIEW_DECIDE_TIMEOUT_MS } = {}) {
   const tokens = new Map(); // item id -> { token, version, expiresAt }: this closure only
   const previews = new Map(); // item id -> { after, before }: { url, contentType }
+  const captures = new Map(); // item id -> { url, contentType }: the platform's picture of the work, when it sends one
   const reviews = new Map(); // asset key -> { data, readAt }
   const flights = new Map(); // asset key -> a read in flight
   const businesses = new Map(); // assetId -> businessId (locators only)
   const receipts = new Map(); // item id -> receipt
   const timers = new Map(); // item id -> undo timer
   const images = new Map(); // `${id}/${which}` -> Promise<data URL | null>
+  const pictures = new Map(); // `${id}/${which}` -> data URL, once read
   const listeners = new Set();
   let queue = null;
   let queueFlight = null;
@@ -191,6 +222,8 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
       const after = meta?.previews?.[item.key];
       const before = meta?.beforePreviews?.[item.key];
       if (after || before) previews.set(id, { after, before });
+      const capture = meta?.captures?.[item.key]?.desktop ?? meta?.captures?.[item.key];
+      if (typeof capture?.url === "string") captures.set(id, { url: capture.url, contentType: capture.contentType ?? "image/png" });
       // A decision the server now shows replaces a receipt still unsure of it.
       const receipt = receipts.get(id);
       if (receipt && item.decision && ["unknown", "conflict"].includes(receipt.state)) receipts.set(id, { ...receipt, state: "saved", decision: item.decision });
@@ -253,7 +286,7 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
     const id = reviewItemId(businessId, assetId, key);
     const cacheKey = `${id}/${which}`;
     if (images.has(cacheKey)) return images.get(cacheKey);
-    const link = previews.get(id)?.[which];
+    const link = which === "capture" ? captures.get(id) : previews.get(id)?.[which];
     const read = (async () => {
       if (!link?.url || !/^image\//.test(String(link.contentType ?? ""))) return null;
       // The link names the file; only its path is used, never the link itself.
@@ -269,6 +302,7 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
     })().catch(() => null);
     if (images.size >= 60) images.delete(images.keys().next().value);
     images.set(cacheKey, read);
+    read.then((src) => { if (src) { if (pictures.size >= 60) pictures.delete(pictures.keys().next().value); pictures.set(cacheKey, src); changed(); } });
     return read;
   };
 
@@ -348,11 +382,23 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
     try {
       let timer;
       const late = new Promise((_, reject) => { timer = setTimer(() => reject(Object.assign(new Error("No answer in time."), { code: "timeout" })), timeoutMs); });
+      const ask = () => call("decide_review_item", {
+        businessId: receipt.businessId, assetId: receipt.assetId, version: receipt.version, itemKey: receipt.key,
+        verdict: receipt.verdict, decisionToken: token.token, ...(receipt.feedback ? { feedback: receipt.feedback } : {}),
+      }, { timeoutMs });
+      // Too many at once (HTTP 429): the same call with the same token is safe
+      // to repeat (Platform Control returns the saved decision), after a pause.
+      const attempt = async (left) => {
+        try { return await ask(); } catch (error) {
+          if (left > 0 && /HTTP 429/.test(String(error?.message)) && !stale()) {
+            await new Promise((resolve) => setTimer(resolve, 1500));
+            return attempt(left - 1);
+          }
+          throw error;
+        }
+      };
       try {
-        result = await Promise.race([call("decide_review_item", {
-          businessId: receipt.businessId, assetId: receipt.assetId, version: receipt.version, itemKey: receipt.key,
-          verdict: receipt.verdict, decisionToken: token.token, ...(receipt.feedback ? { feedback: receipt.feedback } : {}),
-        }, { timeoutMs }), late]);
+        result = await Promise.race([attempt(3), late]);
       } finally { clearTimer(timer); }
     } catch (error) {
       if (stale()) return;
@@ -441,6 +487,15 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
     get revision() { return revision; },
     get queue() { return queue; },
     noteQueue, readQueue, open, cachedReview, peek, canDecide, image,
+    /** An image of the work already read (`after`, `before` or `capture`), or null. */
+    picture: (businessId, assetId, key, which = "after") => pictures.get(`${reviewItemId(businessId, assetId, key)}/${which}`) ?? null,
+    /** Which picture of the work there is to show: the platform's capture, else an image preview. */
+    pictureKind: (businessId, assetId, key) => {
+      const id = reviewItemId(businessId, assetId, key);
+      if (captures.has(id)) return "capture";
+      return /^image\//.test(String(previews.get(id)?.after?.contentType ?? "")) ? "after" : null;
+    },
+    hasBefore: (businessId, assetId, key) => /^image\//.test(String(previews.get(reviewItemId(businessId, assetId, key))?.before?.contentType ?? "")),
     /** The work's own preview link (a page or file the server shared for
      * showing the work), or null. Never a decision token. */
     preview: (businessId, assetId, key) => {
@@ -454,7 +509,7 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
       for (const timer of timers.values()) clearTimer(timer);
       timers.clear();
       waiting.length = 0;
-      for (const map of [tokens, previews, reviews, flights, businesses, receipts, images]) map.clear();
+      for (const map of [tokens, previews, captures, reviews, flights, businesses, receipts, images, pictures]) map.clear();
       queue = null;
       queueFlight = null;
       serverNeedsBusiness = false;

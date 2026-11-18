@@ -1,7 +1,8 @@
 // ---- Reviews: the screens ------------------------------------------------------
-// Drawn only with the Buzz UI kit. Work first: the question, the stake and
-// facts as chips, then the change itself; the reasons sit in one closed
-// disclosure. Deciding happens in place, in a bar at the bottom.
+// Drawn only with the Buzz UI kit. The work is the hero: the agent's artifact,
+// live, filling a canvas, under one line with who made it and the question.
+// A thin strip at the bottom says what approving permits and decides; every
+// reason, the evidence and the exact request sit in one closed disclosure.
 
 /** The screens over one reviewData store. `bridge`: { use, SignInPrompt,
  * browser, openThread? }. */
@@ -9,7 +10,8 @@ function reviewScreens(React, store, bridge) {
   const h = React.createElement;
   const ui = buzzUi(React);
   const { Button, IconButton, PanelHeader, Subview, PanelBody, EmptyState, Column, Actions, Stack, SectionTitle, Title, Caption, Strong, Lines, Line, Note, Status,
-    Disclosure, Group, Row, Pre, Failure, TextField, CountBadge, Chip, ChipRow, DiffText, ChangeTable, MediaPair, DecisionBar, Skeleton, SelectRow, ListGroup, Split, Toolbar } = ui;
+    Disclosure, Group, Row, Pre, Failure, TextField, CountBadge, Chip, ChipRow, DiffText, ChangeTable, MediaPair, DecisionBar, Skeleton, SelectRow, ListGroup, Split, Toolbar,
+    Avatar, Byline: BylineLine, Canvas, CanvasImage, QuietLine, Question, Tabs } = ui;
 
   const CONNECTION_TEXT = {
     starting: "Connecting to Black 4…",
@@ -43,11 +45,6 @@ function reviewScreens(React, store, bridge) {
       return () => clearInterval(timer);
     }, [active]);
   };
-  /** "grok-bot · Grok Bot (SEO & AEO Desk)" → "Grok Bot". */
-  const agentName = (madeBy) => {
-    const text = String(madeBy ?? "").split(" · ").slice(-1)[0].replace(/\s*\[.*$/, "").replace(/\s+via\s+.*$/, "").replace(/\s*\(.*\)$/, "").trim();
-    return text || "The agent";
-  };
   const capital = (text) => (text ? text.charAt(0).toUpperCase() + text.slice(1) : text);
   const STAKE_GLYPH = { money: "money", customers: "people", risk: "alert", none: null };
 
@@ -60,43 +57,81 @@ function reviewScreens(React, store, bridge) {
       link.connect && (link.status === "failed" || link.status === "stopped") ? h(Button, { variant: "prominent", size: compact ? "sm" : "md", onClick: link.connect }, "Connect Black 4") : null);
   }
 
-  // ---- the work itself -----------------------------------------------------------
-  function Media({ review, item }) {
-    const [images, setImages] = React.useState({ after: undefined, before: undefined });
+  // ---- who made it -----------------------------------------------------------------
+  const ORIGIN_GLYPH = { job: "clock", request: "message", proactive: "sparkles" };
+  /** The maker (a Buzz identity when the review names an agent key) and what
+   * set it off. `size`: the avatar's. */
+  function Byline({ review, item, size = "small" }) {
+    const { maker, origin } = reviewByline(review, item);
+    const profile = maker.pubkey ? bridge.profile?.(maker.pubkey) : null;
+    const name = profile?.name || maker.name;
+    const canOpen = origin.threadId && bridge.openThread;
+    return h(BylineLine, {
+      avatar: h(Avatar, { name, picture: profile?.picture, size, shape: maker.agent ? "squircle" : "circle" }),
+      name, app: maker.app, origin: origin.text, originGlyph: ORIGIN_GLYPH[origin.kind],
+      onOrigin: canOpen ? () => bridge.openThread(origin) : undefined,
+    });
+  }
+  /** The same, as one line of words (queue rows, message cards). */
+  const bylineWords = (review, item) => { const { maker, origin } = reviewByline(review, item); return `${maker.name} · ${origin.text}`; };
+
+  // ---- the work itself: a canvas, by kind of work -------------------------------------
+  /** An image of the work (or the platform's capture of a page), loaded through the MCP. */
+  function usePicture(review, item, which) {
+    const [src, setSrc] = React.useState(() => (which ? store.picture(review.businessId, review.assetId, item.key, which) : null));
     React.useEffect(() => {
       let live = true;
-      for (const which of ["after", "before"]) {
-        store.image(review.businessId, review.assetId, item.key, which).then((src) => { if (live) setImages((now) => ({ ...now, [which]: src })); });
-      }
+      if (!which) return undefined;
+      setSrc(store.picture(review.businessId, review.assetId, item.key, which));
+      store.image(review.businessId, review.assetId, item.key, which).then((value) => { if (live) setSrc(value); });
       return () => { live = false; };
-    }, [review.assetId, item.key, item.version]);
-    if (images.after === null && !images.before) return h(Page_, { review, item });
-    return h(MediaPair, { before: images.before ?? null, after: images.after, loading: images.after === undefined, label: item.title });
+    }, [review.assetId, item.key, item.version, which]);
+    return src ?? store.picture(review.businessId, review.assetId, item.key, which ?? "after");
   }
-  /** The change, as the card's `show` says, else the brief's before and after. */
+  /** Canvas renderers, by kind: the artifact page; an image (Now / After); else
+   * the plain fallback for reviews that carry no work to show. */
+  const CANVAS = {
+    /** The agent's artifact, live: the review's own preview of the work (never
+     * the review application), with the platform's capture behind it while it loads. */
+    page({ review, item, link }) {
+      const capture = usePicture(review, item, store.pictureKind(review.businessId, review.assetId, item.key) === "capture" ? "capture" : null);
+      return h(Canvas, { label: `The work: ${item.title}` },
+        bridge.browser
+          ? h(bridge.browser, { key: link, url: link, storage: "black4-review-work", label: `The work: ${item.title}` })
+          : h(CanvasImage, { src: capture, alt: item.title }));
+    },
+    /** An image, large, with Now / After when there is a before. */
+    media({ review, item }) {
+      const before = store.hasBefore(review.businessId, review.assetId, item.key);
+      const [which, setWhich] = React.useState("after");
+      const shown = before ? which : "after";
+      const src = usePicture(review, item, shown);
+      return h(Canvas, { label: `The work: ${item.title}`,
+        toolbar: before ? [Caption(item.card?.show?.label ?? item.title), h(Tabs, { key: "toggle", variant: "segmented", label: "Show", value: shown, onChange: setWhich,
+          items: [{ value: "before", label: "Now" }, { value: "after", label: "After" }] })] : null },
+        h(CanvasImage, { src, alt: `${item.title}: ${shown === "before" ? "now" : "after"}` }));
+    },
+    /** Older reviews with no work to show: plain and quiet. */
+    fallback({ item }) {
+      const show = item.card?.show;
+      const brief = item.brief ?? {};
+      let change = null;
+      if (show?.type === "fields" && show.rows?.length) {
+        change = h(ChangeTable, { rows: show.rows.map((row) => ({ label: row.label, before: row.before ?? "", after: row.after ?? "", changed: (row.before ?? "") !== (row.after ?? "") })) });
+      } else if (show?.type === "text") change = h(DiffText, { label: show.label, runs: wordDiff(show.before ?? "", show.after ?? "") });
+      else if (show?.type === "list" && show.rows?.length) {
+        change = h("div", null, show.label ? h(SectionTitle, { title: show.label }) : null,
+          h(Group, null, ...show.rows.map((row, index) => h(Row, { key: `${index}`, title: row.label, description: row.detail }))));
+      } else if (brief.before || brief.after) change = h(ChangeTable, { rows: [{ label: "", before: brief.before ?? "", after: brief.after ?? "", changed: brief.before !== brief.after }] });
+      return change ?? Note(item.action || "No change was attached.");
+    },
+  };
+  /** Which canvas a review item gets: its artifact page, its image, else the fallback. */
   function Work({ review, item }) {
-    const show = item.card?.show;
-    if (show?.type === "fields" && show.rows?.length) {
-      return h(ChangeTable, { rows: show.rows.map((row) => ({ label: row.label, before: row.before ?? "", after: row.after ?? "", changed: (row.before ?? "") !== (row.after ?? "") })) });
-    }
-    if (show?.type === "text") return h(DiffText, { label: show.label, runs: wordDiff(show.before ?? "", show.after ?? "") });
-    if (show?.type === "list" && show.rows?.length) {
-      return h("div", null, show.label ? h(SectionTitle, { title: show.label }) : null,
-        h(Group, null, ...show.rows.map((row, index) => h(Row, { key: `${index}`, title: row.label, description: row.detail }))));
-    }
-    if (show?.type === "media") return h(Media, { review, item });
-    // No card: the finished page or file itself, when there is one (documents).
-    if (store.preview(review.businessId, review.assetId, item.key)) return h(Page_, { review, item });
-    const brief = item.brief ?? {};
-    if (brief.before || brief.after) return h(ChangeTable, { rows: [{ label: "", before: brief.before ?? "", after: brief.after ?? "", changed: brief.before !== brief.after }] });
-    return Note(item.action || "No change was attached.");
-  }
-  /** The finished work when it is a page or file: its own preview, shown in
-   * place (never the review application around it). */
-  function Page_({ review, item }) {
     const link = store.preview(review.businessId, review.assetId, item.key);
-    if (!link || !bridge.browser) return Note(item.action || "The work has no preview here.");
-    return h(ui.Frame, { label: item.title }, h(bridge.browser, { url: link, storage: "black4-review-work", label: `The work: ${item.title}` }));
+    if (link) return CANVAS.page({ review, item, link });
+    if (store.pictureKind(review.businessId, review.assetId, item.key) || item.card?.show?.type === "media") return h(CANVAS.media, { review, item });
+    return h(CANVAS.fallback, { item });
   }
 
   /** Why, evidence, provenance and the pinned request: one closed disclosure. */
@@ -109,16 +144,18 @@ function reviewScreens(React, store, bridge) {
     return h(Disclosure, { title: "Details" },
       h(Stack, { gap: 4 },
         h(Group, null,
-          row("Approving permits", item.action),
+          row("Recommendation", card.recommend?.answer ? `${capital(String(card.recommend.answer))}${card.recommend.why ? `: ${card.recommend.why}` : ""}` : ""),
+          row("Stake", card.stake?.text),
+          row("Facts", (card.facts ?? []).join(" · ")),
           row("If yes", card.ifYes || brief.expectedResult),
           row("If no", card.ifNo),
           row("Tradeoff", card.tradeoff),
           row("Why", brief.why),
-          !card.show ? row("Before", brief.before) : null,
-          !card.show ? row("After", brief.after) : null,
+          row("Before", brief.before),
+          row("After", brief.after),
           row("Success looks like", brief.successMeasure),
           row("Evidence", brief.baselineSource ? `${brief.baselineSource}${brief.baselineObservedAt ? ` · ${brief.baselineObservedAt}` : ""}` : ""),
-          row("Made by", item.madeBy),
+          row("Made by", item.madeBy ?? review.madeBy),
           row("Asked by", item.requestedBy),
           row("Job", origin.jobName || origin.jobId),
           row("Version", `${item.version}${review.title ? ` of ${review.title}` : ""}`)),
@@ -177,7 +214,10 @@ function reviewScreens(React, store, bridge) {
           h(Button, { key: "send", variant: compose === "rejected" ? "destructive" : "prominent", disabled: !feedback.trim(), onClick: send }, words.send),
           h(Button, { key: "cancel", variant: "outline", onClick: () => setCompose(null) }, "Cancel")));
     }
-    return h(DecisionBar, null,
+    const card = item.card ?? {};
+    return h(DecisionBar, { status: h(Stack, { gap: 2 },
+        h(QuietLine, { glyph: STAKE_GLYPH[card.stake?.kind] ?? null }, card.stake?.text || (card.facts ?? []).join(" · ") || review.businessName),
+        item.action ? ui.Permits(item.action) : null) },
       h(Button, { key: "approve", variant: "prominent", autoFocus, "aria-keyshortcuts": "A", onClick: () => store.propose({ review, item, verdict: "approved" }) }, "Approve"),
       h(Button, { key: "changes", variant: "outline", "aria-keyshortcuts": "C", onClick: () => setCompose("changes_requested") }, "Ask for changes"),
       h(Button, { key: "reject", variant: "ghost", onClick: () => setCompose("rejected") }, "Reject"));
@@ -209,7 +249,14 @@ function reviewScreens(React, store, bridge) {
     // The next item is read while this one is on screen, so stepping is instant.
     const upcoming = step?.upcoming;
     React.useEffect(() => {
-      if (link.status === "connected" && upcoming?.assetId && upcoming.assetId !== review?.assetId) store.open(upcoming).catch(() => {});
+      // Its review, and the picture of its work, so the canvas swaps at once.
+      if (link.status === "connected" && upcoming?.assetId && upcoming.assetId !== review?.assetId) {
+        store.open(upcoming).then((next) => {
+          const key = upcoming.itemKey ?? next.focusItemKey ?? next.items?.[0]?.key;
+          const kind = key ? store.pictureKind(next.businessId, next.assetId, key) : null;
+          if (kind) store.image(next.businessId, next.assetId, key, kind);
+        }, () => {});
+      }
     }, [upcoming?.assetId, review?.assetId, link.status]);
     const item = review ? (review.items.find((candidate) => candidate.key === entry.itemKey) ?? review.items.find((candidate) => candidate.key === review.focusItemKey) ?? review.items[0]) : null;
     const id = review && item ? reviewItemId(review.businessId, review.assetId, item.key) : null;
@@ -256,25 +303,13 @@ function reviewScreens(React, store, bridge) {
         ? Line("This review isn't waiting for you.")
         : h(Failure, { message: plain(state.error.message, 300), retry: () => setRevision((n) => n + 1), retryLabel: "Try again" }));
     }
-    if (!review) return wrap("Reviews", h(Skeleton, { layout: "item" }));
+    // While the next item loads, the strip keeps its place under a placeholder.
+    if (!review) return wrap("Reviews", h(Skeleton, { layout: "item" }), h(DecisionBar, { status: Caption("Loading…") }));
     if (!item) return wrap(review.businessName, Line("Nothing in this review is shown to you."));
     const card = item.card ?? {};
-    const origin = reviewOrigin(review, item);
-    const facts = [
-      card.stake?.text ? h(Chip, { key: "stake", glyph: STAKE_GLYPH[card.stake.kind] ?? null, label: card.stake.text, emphasis: card.stake.kind !== "none" }) : null,
-      ...(card.facts ?? []).map((fact, index) => h(Chip, { key: `f${index}`, label: fact })),
-    ].filter(Boolean);
-    const recommendation = card.recommend?.answer
-      ? `${agentName(item.madeBy)} recommends ${String(card.recommend.answer).toLowerCase()}${card.recommend.why ? `: ${card.recommend.why}` : ""}`
-      : "";
-    const body = h(Stack, { key: id, as: "article", gap: 4 },
-      h(Stack, { gap: 2 },
-        Caption([review.businessName, review.items.length > 1 ? `Item ${review.items.indexOf(item) + 1} of ${review.items.length}` : null, item.title !== card.question ? item.title : null].filter(Boolean).join(" · ")),
-        Title(card.question || item.title),
-        facts.length ? h(ChipRow, null, ...facts) : null),
+    const body = h(ui.Article, { key: id, label: card.question || item.title },
+      h(Stack, { gap: 2 }, h(Byline, { review, item }), Question(card.question || item.title)),
       h(Work, { review, item }),
-      recommendation ? Line(recommendation) : null,
-      origin.threadId && bridge.openThread ? h(Actions, null, h(Button, { size: "sm", variant: "outline", onClick: () => bridge.openThread(origin) }, "Open thread")) : null,
       h(Details, { review, item }));
     return wrap(review.businessName, body, h(Decide, { review, item, compose, setCompose, onReload: () => setRevision((n) => n + 1) }));
   }
@@ -306,7 +341,12 @@ function reviewScreens(React, store, bridge) {
         ...group.items.map((entry) => {
           const { question, stake } = questionOf(entry);
           const receipt = store.receipt(entry.id);
-          return h(SelectRow, { key: entry.id, title: question, subtitle: notes?.get(entry.id) || receiptWords(receipt) || stake, meta: entry.age,
+          const { maker } = reviewByline(null, entry);
+          const profile = maker.pubkey ? bridge.profile?.(maker.pubkey) : null;
+          const kind = store.pictureKind(entry.businessId, entry.assetId, entry.key);
+          return h(SelectRow, { key: entry.id, title: question, subtitle: notes?.get(entry.id) || receiptWords(receipt) || `${bylineWords(null, entry)}${stake ? ` · ${stake}` : ""}`, meta: entry.age,
+            avatar: h(Avatar, { name: profile?.name || maker.name, picture: profile?.picture, size: "small", shape: maker.agent ? "squircle" : "circle" }),
+            thumbnail: kind ? store.picture(entry.businessId, entry.assetId, entry.key, kind) : null,
             selected: selectedId === entry.id,
             picked: onPick ? picked?.has(entry.id) : undefined, pickLabel: `Select ${question}`,
             onPick: onPick ? (value) => onPick(entry.id, value) : undefined,
@@ -338,5 +378,5 @@ function reviewScreens(React, store, bridge) {
     return { proposed, refused };
   };
 
-  return { useStore, useConnection, NotConnected, ReviewItem, QueueList, Work, Decide, approveTogether, questionOf, receiptWords, agentName };
+  return { useStore, useConnection, NotConnected, ReviewItem, QueueList, Work, Decide, Byline, bylineWords, approveTogether, questionOf, receiptWords };
 }

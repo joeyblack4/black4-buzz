@@ -52,7 +52,7 @@ function reviewsPart(ctx, bridge) {
   const optional = (name) => { try { return ctx.reflect?.get?.(name) ?? undefined; } catch { return undefined; } };
   const pluginId = ctx.pluginOwner?.id ?? "ai.black4";
   const pageTarget = (params) => ({ version: 1, kind: "page", pluginId, pageId: REVIEWS_PAGE, ...(params && Object.keys(params).length ? { route: { version: 1, params } } : {}) });
-  const screens = reviewScreens(React, store, { use: bridge.use, SignInPrompt: bridge.SignInPrompt, browser: bridge.browser, openThread: bridge.openThread });
+  const screens = reviewScreens(React, store, { use: bridge.use, SignInPrompt: bridge.SignInPrompt, browser: bridge.browser, openThread: bridge.openThread, profile: bridge.profile });
   const { ReviewItem, QueueList, useStore, useConnection, NotConnected, approveTogether } = screens;
   const disposers = [];
   const own = (dispose) => { if (typeof dispose === "function") disposers.push(dispose); else if (dispose?.dispose) disposers.push(() => dispose.dispose()); };
@@ -246,8 +246,15 @@ function reviewsPart(ctx, bridge) {
     const receipt = review && item ? store.receipt(reviewItemId(review.businessId, review.assetId, item.key)) : null;
     const state = item ? reviewState(item, receipt) : null;
     const title = item ? (item.card?.question || item.title) : failed?.code === "elsewhere" ? "A Black 4 review" : failed ? "A Black 4 review" : "Loading the review…";
-    return h(ui.MessageRow, { title, subtitle: state ? `${review.businessName} · ${state.text}` : failed ? (failed.code === "elsewhere" ? "Not in your queue" : "Couldn't read it") : "",
-      tone: state?.tone ?? "quiet", loading: !item && !failed && link.status === "connected", onOpen: open, openLabel: "Open" });
+    const { maker } = item ? reviewByline(review, item) : { maker: null };
+    const profile = maker?.pubkey ? bridge.profile?.(maker.pubkey) : null;
+    const kind = item ? store.pictureKind(review.businessId, review.assetId, item.key) : null;
+    React.useEffect(() => { if (kind) store.image(review.businessId, review.assetId, item.key, kind); }, [kind, item?.key]);
+    return h(ui.MessageRow, { title,
+      subtitle: state ? `${review.businessName} · ${screens.bylineWords(review, item)} · ${state.text}` : failed ? (failed.code === "elsewhere" ? "Not in your queue" : "Couldn't read it") : "",
+      avatar: maker ? h(ui.Avatar, { name: profile?.name || maker.name, picture: profile?.picture, size: "small", shape: maker.agent ? "squircle" : "circle" }) : null,
+      thumbnail: kind ? store.picture(review.businessId, review.assetId, item.key, kind) : null,
+      loading: !item && !failed && link.status === "connected", onOpen: open, openLabel: "Open" });
   }
   function ReviewPreview({ url, open }) {
     const link = useConnection();

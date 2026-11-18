@@ -13,12 +13,16 @@
 // - a Tailwind utility in Buzz's own sources. Tailwind writes only the
 //   utilities Buzz's code uses, never a plugin's, so one Buzz stops using is
 //   gone from the app even though nothing was renamed;
-// - a custom property read by a stylesheet.
+// - a custom property read by a stylesheet;
+// - each Buzz rule the kit copies (kit/copy.mjs) still in its Buzz
+//   stylesheet, word for word, and each avatar it offers still in Buzz's packs.
 // Exit 0: unchanged. Exit 1: one sentence per entry Buzz no longer has.
 // Exit 2: the canary could not run.
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join, resolve } from "node:path";
+import { loadKit } from "../kit/uses.mjs";
+import { CATALOG, bare, blocks, flat } from "../kit/copy.mjs";
 
 const args = process.argv.slice(2);
 const labelAt = args.indexOf("--label");
@@ -95,6 +99,31 @@ for (const name of uses.utilities) {
 for (const name of uses.customProperties) {
   checks++;
   if (!css.includes(`var(${name}`)) missing(`the custom property ${name}`, "no longer reads it in any stylesheet");
+}
+
+// Buzz's own rules the kit copies, and the avatar packs it offers.
+const kit = loadKit()({ createElement: () => null, Fragment: "fragment", useState: (v) => [v, () => {}], useRef: (current) => ({ current }), useId: () => "id", useEffect() {}, useLayoutEffect() {} });
+const recopy = `Run node kit/copy.mjs on this Buzz checkout, read what changed, then npm run kit.`;
+for (const { file, rules } of kit.COPIED) {
+  const path = join(buzz, file);
+  if (!existsSync(path)) { checks++; problems.push(`The Buzz UI kit copies rules from ${file}, but Buzz ${label} has no such file. ${recopy}`); continue; }
+  const source = flat(bare(readFileSync(path, "utf8")));
+  for (const rule of rules) {
+    const inner = rule.startsWith("@") ? blocks(blocks(rule)[0].body).map((block) => block.text) : [rule];
+    const head = rule.startsWith("@") ? `${flat(blocks(rule)[0].head)}{` : "";
+    for (const text of inner) {
+      checks++;
+      if (!source.includes(flat(text)) || (head && !source.includes(head))) {
+        problems.push(`The Buzz UI kit copies this rule from ${file}, but Buzz ${label} no longer has it word for word: ${flat(head + text).slice(0, 160)}. ${recopy}`);
+      }
+    }
+  }
+}
+const catalogPath = join(buzz, CATALOG);
+const packs = existsSync(catalogPath) ? JSON.parse(readFileSync(catalogPath, "utf8")).assets.map((asset) => asset.url) : [];
+for (const avatar of kit.AVATARS) {
+  checks++;
+  if (!packs.includes(avatar.url)) problems.push(`The Buzz UI kit offers the avatar ${avatar.id}, but Buzz ${label}'s avatar packs no longer have ${avatar.url}. ${recopy}`);
 }
 
 if (problems.length) {

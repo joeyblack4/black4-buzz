@@ -27,7 +27,7 @@ async function harness(t, { tools, answer } = {}) {
   let cleanup;
   const h = (type, props, ...children) => ({ type, props: { ...(props ?? {}), children: children.flat() }, children: children.flat() });
   const ctx = {
-    react: { createElement: h, useState: (v) => [v, () => {}], useEffect: () => {}, useLayoutEffect: () => {}, useRef: (v) => ({ current: v }), useId: () => "id", useMemo: (fn) => fn(), useCallback: (fn) => fn, Fragment: "f" },
+    react: { createElement: h, useState: (v) => [v, () => {}], useEffect: () => {}, useLayoutEffect: () => {}, useRef: (v) => ({ current: v }), useId: () => "id", useMemo: (fn) => fn(), useCallback: (fn) => fn, Fragment: "f", Component: class { constructor(props) { this.props = props; } } },
     agents: { snapshot: () => ({ running: [] }), addTool: (tool) => { registered.set(tool.name, tool); return () => registered.delete(tool.name); }, register: () => {} },
     settingsCards: { register() {} }, pages: { register() {} }, panels: { register() {} },
     conversation: { registerLink() {}, registerLinkPreview() {} },

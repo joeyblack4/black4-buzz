@@ -22,7 +22,7 @@ async function app(t, options = {}) {
   const effects = [];
   const h = (type, props, ...children) => { const kids = children.flat(); return { type, props: { ...(props ?? {}), children: kids }, children: kids }; };
   // Effects run as each render happens; their cleanups at the end.
-  const React = { createElement: h, Fragment: "fragment", useState: (v) => [typeof v === "function" ? v() : v, () => {}], useRef: (v) => ({ current: v }), useId: () => "id",
+  const React = { createElement: h, Fragment: "fragment", Component: class { constructor(props) { this.props = props; } }, useState: (v) => [typeof v === "function" ? v() : v, () => {}], useRef: (v) => ({ current: v }), useId: () => "id",
     useLayoutEffect: () => {}, useEffect: (fn) => { const off = fn(); if (typeof off === "function") effects.push(off); } };
   apply({
     react: React,

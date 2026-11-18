@@ -76,12 +76,26 @@ export function collect() {
       h(ui.Split, { label: "L", list: "l", detail: "d" }), h(ui.Frame, { label: "L" }, "x"),
       h(ui.MessageCard, { label: "L" }, h(ui.MessageRow, { title: "T", subtitle: "S", onOpen() {} }), h(ui.MessageRow, { title: "T", loading: true })),
       ui.Title("t"), ui.Heading("h"), ui.Paragraph("p"), ui.Caption("c"), ui.Strong("s"), ui.Lines("a", "b"), ui.Line("l", { role: "status" }), ui.Line("l", { danger: true }), ui.Pre("p"));
+    // The agent parts, with a pack avatar, a photo and no picture.
+    const pack = ui.AVATARS[0].url;
+    for (const picture of [pack, "https://example.com/a.png", undefined]) {
+      parts.push(h(ui.AgentCard, { name: "N", picture, detail: "d", art: "i", badge: h(ui.CardMark, { label: "B", color: "red" }), menu: h(ui.Menu, { label: "M", items: [{ label: "A" }, { label: "D", tone: "danger" }] }), selected: true, unavailable: true }),
+        h(ui.AgentProfile, { name: "N", picture, under: "u", actions: ["a"], editing: h(ui.NameInput, { value: "v", onChange() {}, invalid: true }) }, "x"));
+    }
+    for (const variant of ["glass-ghost", "glass", "subtle", "ghost"]) parts.push(h(ui.Menu, { label: "M", variant, items: [{ label: "A" }] }));
+    parts.push(h(ui.AgentBrowse, { label: "L", art: "a", tabs: "t", action: "a", side: h(ui.AgentPanel, { name: "N", picture: pack, onClose() {} }, "x") }, h(ui.AgentGrid, { label: "G", busy: true }, "x")),
+      h(ui.NameActions, null, "x"), h(ui.AvatarChoices, { value: pack, onChange() {} }), h(ui.HeaderTab, { label: "L", main: true }),
+      h(ui.Picture, { src: "data:image/png;base64,", size: 16 }), h(ui.Glyph, { name: "robot" }));
   }
   const classes = new Set(), utilities = new Set(), attributes = new Set();
   for (const part of parts) walk(part, (node) => {
     const own = String(node.props.className ?? "").split(/\s+/).filter(Boolean);
-    for (const name of own) (COMPONENT.test(name) ? classes : utilities).add(name);
-    const owner = own.find((name) => COMPONENT.test(name)) ?? node.type;
+    // Copied Buzz rules paint the kit's own `b4copy-` classes; the canary checks those rules.
+    const copiedOnly = own.length > 0 && own.every((name) => name.startsWith("b4copy-"));
+    for (const name of own) if (!name.startsWith("b4copy-")) (COMPONENT.test(name) ? classes : utilities).add(name);
+    if (copiedOnly) return;
+    // A bare element's attribute is checked wherever Buzz styles it.
+    const owner = own.find((name) => COMPONENT.test(name)) ?? (own.length ? node.type : "*");
     for (const [key, value] of Object.entries(node.props)) {
       if (!key.startsWith("data-") || value === undefined || value === false || key === "data-value" || key === "data-tab-value") continue;
       attributes.add(value === "" || value === true ? `${owner}[${key}]` : `${owner}[${key}="${value}"]`);

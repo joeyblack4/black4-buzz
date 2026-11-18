@@ -192,3 +192,17 @@ test("word diff keeps whole words", () => {
   assert.deepEqual(wordDiff("Fresh rye bread daily", "Fresh sourdough bread daily"),
     [{ kind: "same", text: "Fresh " }, { kind: "removed", text: "rye" }, { kind: "added", text: "sourdough" }, { kind: "same", text: " bread daily" }]);
 });
+
+test("signing out or switching account forgets everything: queue, reviews, tokens, and a decision still in its Undo window", async () => {
+  const { store, calls, advance } = data();
+  store.noteQueue(QUEUE);
+  const review = await store.open({ assetId: "rv_bakery", businessId: "business-crumb" });
+  const receipt = store.propose({ review, item: review.items[0], verdict: "approved" });
+  store.reset();
+  assert.equal(store.queue, null);
+  assert.equal(store.cachedReview("business-crumb", "rv_bakery"), null);
+  assert.equal(store.receipt(receipt.id), null);
+  assert.equal(store.canDecide(review, review.items[0]), false, "no token survives");
+  await advance(20000);
+  assert.equal(decideCalls(calls).length, 0, "the waiting decision was never sent");
+});

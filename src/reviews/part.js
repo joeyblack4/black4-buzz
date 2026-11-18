@@ -47,7 +47,7 @@ function reviewsPart(ctx, bridge) {
   const React = ctx.react;
   const h = React.createElement;
   const ui = buzzUi(React);
-  const store = reviewData(bridge.call);
+  const store = reviewData(bridge.call, bridge.timing ?? {});
   /** A service Buzz may not have: undefined when it is missing. */
   const optional = (name) => { try { return ctx.reflect?.get?.(name) ?? undefined; } catch { return undefined; } };
   const pluginId = ctx.pluginOwner?.id ?? "ai.black4";
@@ -87,7 +87,8 @@ function reviewsPart(ctx, bridge) {
     const step = reviewStep(order, entry, remembered.current);
     if (step.found) remembered.current = step.index;
     const go = (target) => target ? () => setEntry({ businessId: target.businessId, assetId: target.assetId, itemKey: target.key }) : null;
-    return { position: step.found ? step.index + 1 : 0, total: order.length, next: go(step.next), previous: go(step.previous) };
+    const upcoming = step.next ? { businessId: step.next.businessId, assetId: step.next.assetId, itemKey: step.next.key } : null;
+    return { position: step.found ? step.index + 1 : 0, total: order.length, next: go(step.next), previous: go(step.previous), upcoming };
   }
 
   /** A queue read on demand, for surfaces opened before the badge's first read. */
@@ -113,7 +114,8 @@ function reviewsPart(ctx, bridge) {
       setView({ filter: params.business ?? null, entry: params.asset ? { businessId: params.business, assetId: params.asset, itemKey: params.item } : view.entry });
     }, [pageNavigation?.entryId]);
     const [picked, setPicked] = React.useState(() => new Set());
-    const [bulk, setBulk] = React.useState(null); // { ids } while approving together
+    // { ids, refused, preparing } for the last Approve N: its countdown and what it couldn't do.
+    const [bulk, setBulk] = React.useState(null);
     const setEntry = (entry) => setView({ entry });
     // The first waiting item is open from the start: one less click per session.
     const first = reviewOrder(queue)[0];
@@ -122,26 +124,37 @@ function reviewsPart(ctx, bridge) {
     }, [first?.id]);
     const step = useStepping(current.entry, setEntry);
     surface = { next: step.next, previous: step.previous };
+    React.useEffect(() => () => { surface = null; surfaceFocused = false; }, []);
     const order = reviewOrder(queue);
     // Picks that left the queue (decided) drop out of the selection.
     const live = new Set([...picked].filter((id) => order.some((entry) => entry.id === id)));
     const pick = (id, value) => setPicked((now) => { const next = new Set(now); if (value) next.add(id); else next.delete(id); return next; });
-    const pending = [...live].map((id) => store.receipt(id)).filter((receipt) => receipt?.state === "pending");
+    const pending = (bulk?.ids ?? []).map((id) => store.receipt(id)).filter((receipt) => receipt?.state === "pending");
+    const [, tick] = React.useState(0);
+    React.useEffect(() => {
+      if (!pending.length) return undefined;
+      const timer = setInterval(() => tick((n) => n + 1), 250);
+      return () => clearInterval(timer);
+    }, [pending.length > 0]);
     const approve = async () => {
       const ids = new Set(live);
-      setBulk({ ids });
-      await approveTogether(ids, order);
+      setBulk({ ids: [], refused: [], preparing: true });
+      const { proposed, refused } = await approveTogether(ids, order);
       setPicked(new Set());
-      setBulk(null);
+      setBulk({ ids: proposed, refused, preparing: false });
     };
     const undoAll = () => { for (const receipt of pending) store.undo(receipt.id); };
+    const notes = new Map((bulk?.refused ?? []).map((id) => [id, "Can't be approved here: open it to see why"]));
     let toolbar = null;
     if (pending.length) {
-      toolbar = h(ui.Toolbar, { key: "bulk" }, ui.Status(`Approving ${pending.length} in ${Math.max(1, Math.ceil((pending[0].deadline - Date.now()) / 1000))} s`),
+      toolbar = h(ui.Toolbar, { key: "bulk" }, ui.Status(`Approving ${pending.length} in ${Math.max(1, Math.ceil((Math.min(...pending.map((receipt) => receipt.deadline)) - Date.now()) / 1000))} s`),
         h(ui.Button, { size: "sm", variant: "outline", onClick: undoAll }, "Undo"));
+    } else if (bulk?.refused?.length && !live.size) {
+      toolbar = h(ui.Toolbar, { key: "bulk" }, ui.Line(`${bulk.refused.length} couldn't be approved here.`),
+        h(ui.Button, { size: "sm", variant: "ghost", onClick: () => setBulk(null) }, "Dismiss"));
     } else if (live.size) {
       toolbar = h(ui.Toolbar, { key: "bulk" }, ui.Strong(`${live.size} selected`),
-        h(ui.Button, { size: "sm", variant: "prominent", loading: !!bulk, onClick: () => void approve() }, `Approve ${live.size}`),
+        h(ui.Button, { size: "sm", variant: "prominent", loading: !!bulk?.preparing, onClick: () => void approve() }, `Approve ${live.size}`),
         h(ui.Button, { size: "sm", variant: "ghost", onClick: () => setPicked(new Set()) }, "Clear"));
     }
     let list;
@@ -149,7 +162,7 @@ function reviewsPart(ctx, bridge) {
     else if (error && !queue) list = h(ui.Failure, { message: plain(error.message, 300), retry, retryLabel: "Try again" });
     else if (!queue) list = h(ui.Skeleton, { layout: "list" });
     else list = h(QueueList, { queue, selectedId: current.entry ? order[reviewStep(order, current.entry).index]?.id : null, onOpen: setEntry,
-      picked: live, onPick: pick, filter: current.filter, onFilter: (filter) => setView({ filter }) });
+      picked: live, onPick: pick, notes, filter: current.filter, onFilter: (filter) => setView({ filter }) });
     const detail = current.entry
       ? h(ReviewItem, { key: "item", entry: current.entry, step, onCommand, frame: true })
       : link.status === "connected" && queue ? h(ui.EmptyState, { glyph: "decisions", title: order.length ? "Choose a decision" : "Nothing to decide", frame: "none" }) : null;
@@ -183,6 +196,7 @@ function reviewsPart(ctx, bridge) {
         actions: [h(ui.IconButton, { key: "refresh", label: "Refresh", glyph: "refresh", large: true, onClick: () => bridge.queue.refresh() })] }) }, h(ui.PanelBody, null, list));
     }
     surface = { next: step.next, previous: step.previous };
+    React.useEffect(() => () => { surface = null; surfaceFocused = false; }, []);
     return h(ui.Surface, { label: "Black 4 Reviews", onFocus: focusIn, onBlur: focusOut }, body);
   }
 
@@ -221,13 +235,13 @@ function reviewsPart(ctx, bridge) {
     const link = useConnection();
     const locator = reviewLocator(url);
     const [failed, setFailed] = React.useState(null);
+    const [opened, setOpened] = React.useState(null); // { businessId, assetId } once read
     React.useEffect(() => {
       if (link.status !== "connected" || !locator?.assetId) return;
-      store.open(locator).then(() => setFailed(null), (error) => setFailed(error));
+      store.open(locator).then((review) => { setFailed(null); setOpened({ businessId: review.businessId, assetId: review.assetId }); }, (error) => setFailed(error));
     }, [url, link.status]);
-    const businessId = locator?.businessId ?? reviewOrder(store.queue).find((entry) => entry.assetId === locator?.assetId)?.businessId;
-    const cached = locator?.assetId ? (businessId ? store.cachedReview(businessId, locator.assetId) : null) : null;
-    const review = cached ?? null;
+    const businessId = opened?.businessId ?? locator?.businessId ?? reviewOrder(store.queue).find((entry) => entry.assetId === locator?.assetId)?.businessId;
+    const review = locator?.assetId && businessId ? store.cachedReview(businessId, locator.assetId) : null;
     const item = review ? (review.items.find((candidate) => candidate.key === locator.itemKey) ?? review.items[0]) : null;
     const receipt = review && item ? store.receipt(reviewItemId(review.businessId, review.assetId, item.key)) : null;
     const state = item ? reviewState(item, receipt) : null;
@@ -326,6 +340,16 @@ function reviewsPart(ctx, bridge) {
     blockedNotes = notifications?.register?.({ id: "decisions-blocked", label: "Black 4 approved work blocked" }) ?? null;
   } catch (error) { bridge.report?.(error); }
   own(bridge.queue.subscribe((queue) => { store.noteQueue(queue); notify(queue); }));
+  // Signed out, reconnecting or another account: nothing of the last one stays.
+  let lastStatus = null;
+  own(bridge.status?.subscribe?.((status) => {
+    if (status !== "connected" && lastStatus === "connected") {
+      store.reset();
+      seen.started = false; seen.waiting.clear(); seen.blocked.clear();
+      setView({ entry: null, filter: null });
+    }
+    lastStatus = status;
+  }));
 
   return {
     store,

@@ -144,6 +144,7 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
   let queueFlight = null;
   let serverNeedsBusiness = false;
   let revision = 0;
+  let epoch = 0; // moves on at reset: answers to an older connection go nowhere
   let disposed = false;
 
   const changed = () => { revision += 1; for (const listener of [...listeners]) { try { listener(); } catch {} } };
@@ -241,6 +242,8 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
   };
 
   const cachedReview = (businessId, assetId) => reviews.get(reviewAssetKey(businessId, assetId))?.data ?? null;
+  /** A review already read for this locator, its business found from what is known. */
+  const peek = (locator) => { const businessId = locator?.assetId ? businessOf(locator) : null; return businessId ? cachedReview(businessId, locator.assetId) : null; };
   const canDecide = (review, item) => !!review && !!item && review.decideIn === "card" && item.decidable === true
     && tokens.has(reviewItemId(review.businessId, review.assetId, item.key));
 
@@ -315,11 +318,14 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
   const send = async (id) => {
     const receipt = receipts.get(id);
     if (!receipt || disposed) return;
+    const mine = epoch;
+    const stale = () => mine !== epoch || disposed;
     setReceipt(id, { ...receipt, state: "sending", message: "" });
     let token = tokens.get(id);
     try {
       if (!token || token.expiresAt - now() < REVIEW_TOKEN_RENEW_MS) {
         await open({ assetId: receipt.assetId, businessId: receipt.businessId }, { fresh: true });
+        if (stale()) return;
         token = tokens.get(id);
         const item = cachedReview(receipt.businessId, receipt.assetId)?.items?.find((entry) => entry.key === receipt.key);
         if (item?.decision) return settle(id);
@@ -349,7 +355,7 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
         }, { timeoutMs }), late]);
       } finally { clearTimer(timer); }
     } catch (error) {
-      if (disposed) return;
+      if (stale()) return;
       // It may or may not have arrived: read before claiming anything.
       if (["timeout", "offline", "http"].includes(error?.code) || !error?.code) {
         setReceipt(id, { ...receipt, state: "unknown", message: "Checking whether it saved…" });
@@ -358,6 +364,7 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
       setReceipt(id, { ...receipt, state: "failed", message: plain(error?.message ?? error, 200) });
       return;
     }
+    if (stale()) return;
     let data;
     try { data = answer(result).data; } catch (error) {
       const code = error?.serverCode;
@@ -433,7 +440,7 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
     get revision() { return revision; },
     get queue() { return queue; },
-    noteQueue, readQueue, open, cachedReview, canDecide, image,
+    noteQueue, readQueue, open, cachedReview, peek, canDecide, image,
     /** The work's own preview link (a page or file the server shared for
      * showing the work), or null. Never a decision token. */
     preview: (businessId, assetId, key) => {
@@ -441,6 +448,19 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
       return typeof link?.url === "string" && /^https:\/\//.test(link.url) && !/^image\//.test(String(link.contentType ?? "")) ? link.url : null;
     },
     receipt: (id) => receipts.get(id) ?? null,
+    /** Forgets everything of the last connection: cancels any decision still in
+     * its Undo window (nothing is sent) and drops tokens, reviews and receipts. */
+    reset() {
+      for (const timer of timers.values()) clearTimer(timer);
+      timers.clear();
+      waiting.length = 0;
+      for (const map of [tokens, previews, reviews, flights, businesses, receipts, images]) map.clear();
+      queue = null;
+      queueFlight = null;
+      serverNeedsBusiness = false;
+      epoch += 1;
+      changed();
+    },
     receipts: () => [...receipts.values()],
     propose, undo, retry, recheck, clear,
     dispose() {

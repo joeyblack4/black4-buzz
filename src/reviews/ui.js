@@ -84,9 +84,10 @@ function reviewScreens(React, store, bridge) {
       return h(ListGroup, { label: show.label }, ...show.rows.map((row, index) => h(Row, { key: `${index}`, title: row.label, description: row.detail })));
     }
     if (show?.type === "media") return h(Media, { review, item });
+    // No card: the finished page or file itself, when there is one (documents).
+    if (store.preview(review.businessId, review.assetId, item.key)) return h(Page_, { review, item });
     const brief = item.brief ?? {};
     if (brief.before || brief.after) return h(ChangeTable, { rows: [{ label: "", before: brief.before ?? "", after: brief.after ?? "", changed: brief.before !== brief.after }] });
-    if (store.preview(review.businessId, review.assetId, item.key)) return h(Page_, { review, item });
     return Note(item.action || "No change was attached.");
   }
   /** The finished work when it is a page or file: its own preview, shown in
@@ -112,6 +113,8 @@ function reviewScreens(React, store, bridge) {
           row("If no", card.ifNo),
           row("Tradeoff", card.tradeoff),
           row("Why", brief.why),
+          !card.show ? row("Before", brief.before) : null,
+          !card.show ? row("After", brief.after) : null,
           row("Success looks like", brief.successMeasure),
           row("Evidence", brief.baselineSource ? `${brief.baselineSource}${brief.baselineObservedAt ? ` · ${brief.baselineObservedAt}` : ""}` : ""),
           row("Made by", item.madeBy),
@@ -200,7 +203,13 @@ function reviewScreens(React, store, bridge) {
       store.open(entry, { fresh: revision > 0 }).then((review) => { if (live) setState({ review, error: null }); }, (error) => { if (live) setState({ review: null, error }); });
       return () => { live = false; };
     }, [key, link.status, revision]);
-    const review = state.review && entry?.assetId === state.review.assetId ? (store.cachedReview(state.review.businessId, state.review.assetId) ?? state.review) : null;
+    const shown = state.review && entry?.assetId === state.review.assetId ? state.review : store.peek(entry);
+    const review = shown ? (store.cachedReview(shown.businessId, shown.assetId) ?? shown) : null;
+    // The next item is read while this one is on screen, so stepping is instant.
+    const upcoming = step?.upcoming;
+    React.useEffect(() => {
+      if (link.status === "connected" && upcoming?.assetId && upcoming.assetId !== review?.assetId) store.open(upcoming).catch(() => {});
+    }, [upcoming?.assetId, review?.assetId, link.status]);
     const item = review ? (review.items.find((candidate) => candidate.key === entry.itemKey) ?? review.items.find((candidate) => candidate.key === review.focusItemKey) ?? review.items[0]) : null;
     const id = review && item ? reviewItemId(review.businessId, review.assetId, item.key) : null;
     const receipt = id ? store.receipt(id) : null;
@@ -279,7 +288,7 @@ function reviewScreens(React, store, bridge) {
 
   /** The list: approved work that needs a push (quiet, at the top), then
    * every waiting item grouped by business. Selection is explicit. */
-  function QueueList({ queue, selectedId, onOpen, picked, onPick, filter, onFilter }) {
+  function QueueList({ queue, selectedId, onOpen, picked, onPick, filter, onFilter, notes }) {
     useStore();
     const groups = reviewGroups(queue).filter((group) => !filter || group.businessId === filter);
     const attention = [...(queue.stalled ?? []).map((entry) => ({ ...entry, why: `Not started · ${entry.waitingOn ? `waiting on ${entry.waitingOn}` : "nobody has picked it up"}` })),
@@ -296,7 +305,7 @@ function reviewScreens(React, store, bridge) {
         ...group.items.map((entry) => {
           const { question, stake } = questionOf(entry);
           const receipt = store.receipt(entry.id);
-          return h(SelectRow, { key: entry.id, title: question, subtitle: receiptWords(receipt) || stake, meta: entry.age,
+          return h(SelectRow, { key: entry.id, title: question, subtitle: notes?.get(entry.id) || receiptWords(receipt) || stake, meta: entry.age,
             selected: selectedId === entry.id,
             picked: onPick ? picked?.has(entry.id) : undefined, pickLabel: `Select ${question}`,
             onPick: onPick ? (value) => onPick(entry.id, value) : undefined,
@@ -307,17 +316,25 @@ function reviewScreens(React, store, bridge) {
   }
 
   /** Approves the picked items together: each its own call, token and receipt. */
+  // First every review is read (for its tokens), then every approval starts
+  // at once, so one Undo stops them all and nothing starts after it.
   const approveTogether = async (ids, order) => {
     const entries = order.filter((entry) => ids.has(entry.id));
+    const ready = [];
     const refused = [];
-    for (const entry of entries) {
+    await Promise.all(entries.map(async (entry) => {
       try {
         const review = await store.open({ businessId: entry.businessId, assetId: entry.assetId });
         const item = review.items.find((candidate) => candidate.key === entry.key);
-        if (!store.propose({ review, item, verdict: "approved" })) refused.push(entry.id);
+        if (item && store.canDecide(review, item)) ready.push({ entry, review, item });
+        else refused.push(entry.id);
       } catch { refused.push(entry.id); }
+    }));
+    const proposed = [];
+    for (const { entry, review, item } of entries.map((entry) => ready.find((candidate) => candidate.entry === entry)).filter(Boolean)) {
+      if (store.propose({ review, item, verdict: "approved" })) proposed.push(entry.id); else refused.push(entry.id);
     }
-    return refused;
+    return { proposed, refused };
   };
 
   return { useStore, useConnection, NotConnected, ReviewItem, QueueList, Work, Decide, approveTogether, questionOf, receiptWords, agentName };

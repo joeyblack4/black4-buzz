@@ -436,6 +436,11 @@ export function createSession({ request, store = signInStore, now = () => Date.n
  * POST), as the signed-in person. A 401 refreshes the sign-in and asks once
  * more; a lost MCP session is opened again. Errors carry `code`: "signin"
  * when the sign-in is the problem, "offline" when Black 4 could not be reached. */
+/** What this client declares at initialize: MCP Apps (the review card's
+ * extension), so Black 4 may hand Reviews its decision tokens in `_meta`.
+ * The plugin keeps `_meta` from every agent (agentText), as MCP Apps hosts must. */
+export const CLIENT_CAPABILITIES = Object.freeze({ extensions: Object.freeze({ "io.modelcontextprotocol/ui": Object.freeze({ mimeTypes: Object.freeze(["text/html;profile=mcp-app"]) }) }) });
+
 export function createMcp({ request, session, url = MCP_URL, clientInfo = { name: "black4-buzz", version: "2.0.0" } } = {}) {
   let sessionId = null;
   let opening = null;
@@ -507,7 +512,7 @@ export function createMcp({ request, session, url = MCP_URL, clientInfo = { name
 
   const open = () => opening ??= (async () => {
     try {
-      const result = await post({ jsonrpc: "2.0", id: nextId++, method: "initialize", params: { protocolVersion: MCP_PROTOCOL, capabilities: {}, clientInfo } });
+      const result = await post({ jsonrpc: "2.0", id: nextId++, method: "initialize", params: { protocolVersion: MCP_PROTOCOL, capabilities: CLIENT_CAPABILITIES, clientInfo } });
       await post({ jsonrpc: "2.0", method: "notifications/initialized" }).catch(() => {});
       opened = result ?? {};
       return opened;
@@ -1349,6 +1354,8 @@ export function apply(ctx) {
       return result;
     },
     queue: { subscribe: (listener) => { queueListeners.add(listener); return () => queueListeners.delete(listener); }, refresh: () => { clearTimeout(queueTimer); void pollQueue(); } },
+    // Every status change: Reviews forgets the last connection's data when it ends.
+    status: { subscribe: (listener) => { const each = () => listener(state.status); listeners.add(each); each(); return () => listeners.delete(each); } },
     SignInPrompt,
     browser: ctx.browser?.available ? ctx.browser.View : null,
     report: (error) => {
@@ -3026,6 +3033,7 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
   let queueFlight = null;
   let serverNeedsBusiness = false;
   let revision = 0;
+  let epoch = 0; // moves on at reset: answers to an older connection go nowhere
   let disposed = false;
 
   const changed = () => { revision += 1; for (const listener of [...listeners]) { try { listener(); } catch {} } };
@@ -3123,6 +3131,8 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
   };
 
   const cachedReview = (businessId, assetId) => reviews.get(reviewAssetKey(businessId, assetId))?.data ?? null;
+  /** A review already read for this locator, its business found from what is known. */
+  const peek = (locator) => { const businessId = locator?.assetId ? businessOf(locator) : null; return businessId ? cachedReview(businessId, locator.assetId) : null; };
   const canDecide = (review, item) => !!review && !!item && review.decideIn === "card" && item.decidable === true
     && tokens.has(reviewItemId(review.businessId, review.assetId, item.key));
 
@@ -3197,11 +3207,14 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
   const send = async (id) => {
     const receipt = receipts.get(id);
     if (!receipt || disposed) return;
+    const mine = epoch;
+    const stale = () => mine !== epoch || disposed;
     setReceipt(id, { ...receipt, state: "sending", message: "" });
     let token = tokens.get(id);
     try {
       if (!token || token.expiresAt - now() < REVIEW_TOKEN_RENEW_MS) {
         await open({ assetId: receipt.assetId, businessId: receipt.businessId }, { fresh: true });
+        if (stale()) return;
         token = tokens.get(id);
         const item = cachedReview(receipt.businessId, receipt.assetId)?.items?.find((entry) => entry.key === receipt.key);
         if (item?.decision) return settle(id);
@@ -3231,7 +3244,7 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
         }, { timeoutMs }), late]);
       } finally { clearTimer(timer); }
     } catch (error) {
-      if (disposed) return;
+      if (stale()) return;
       // It may or may not have arrived: read before claiming anything.
       if (["timeout", "offline", "http"].includes(error?.code) || !error?.code) {
         setReceipt(id, { ...receipt, state: "unknown", message: "Checking whether it saved…" });
@@ -3240,6 +3253,7 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
       setReceipt(id, { ...receipt, state: "failed", message: plain(error?.message ?? error, 200) });
       return;
     }
+    if (stale()) return;
     let data;
     try { data = answer(result).data; } catch (error) {
       const code = error?.serverCode;
@@ -3315,7 +3329,7 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
     get revision() { return revision; },
     get queue() { return queue; },
-    noteQueue, readQueue, open, cachedReview, canDecide, image,
+    noteQueue, readQueue, open, cachedReview, peek, canDecide, image,
     /** The work's own preview link (a page or file the server shared for
      * showing the work), or null. Never a decision token. */
     preview: (businessId, assetId, key) => {
@@ -3323,6 +3337,19 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
       return typeof link?.url === "string" && /^https:\/\//.test(link.url) && !/^image\//.test(String(link.contentType ?? "")) ? link.url : null;
     },
     receipt: (id) => receipts.get(id) ?? null,
+    /** Forgets everything of the last connection: cancels any decision still in
+     * its Undo window (nothing is sent) and drops tokens, reviews and receipts. */
+    reset() {
+      for (const timer of timers.values()) clearTimer(timer);
+      timers.clear();
+      waiting.length = 0;
+      for (const map of [tokens, previews, reviews, flights, businesses, receipts, images]) map.clear();
+      queue = null;
+      queueFlight = null;
+      serverNeedsBusiness = false;
+      epoch += 1;
+      changed();
+    },
     receipts: () => [...receipts.values()],
     propose, undo, retry, recheck, clear,
     dispose() {
@@ -3442,9 +3469,10 @@ function reviewScreens(React, store, bridge) {
       return h(ListGroup, { label: show.label }, ...show.rows.map((row, index) => h(Row, { key: `${index}`, title: row.label, description: row.detail })));
     }
     if (show?.type === "media") return h(Media, { review, item });
+    // No card: the finished page or file itself, when there is one (documents).
+    if (store.preview(review.businessId, review.assetId, item.key)) return h(Page_, { review, item });
     const brief = item.brief ?? {};
     if (brief.before || brief.after) return h(ChangeTable, { rows: [{ label: "", before: brief.before ?? "", after: brief.after ?? "", changed: brief.before !== brief.after }] });
-    if (store.preview(review.businessId, review.assetId, item.key)) return h(Page_, { review, item });
     return Note(item.action || "No change was attached.");
   }
   /** The finished work when it is a page or file: its own preview, shown in
@@ -3470,6 +3498,8 @@ function reviewScreens(React, store, bridge) {
           row("If no", card.ifNo),
           row("Tradeoff", card.tradeoff),
           row("Why", brief.why),
+          !card.show ? row("Before", brief.before) : null,
+          !card.show ? row("After", brief.after) : null,
           row("Success looks like", brief.successMeasure),
           row("Evidence", brief.baselineSource ? `${brief.baselineSource}${brief.baselineObservedAt ? ` · ${brief.baselineObservedAt}` : ""}` : ""),
           row("Made by", item.madeBy),
@@ -3558,7 +3588,13 @@ function reviewScreens(React, store, bridge) {
       store.open(entry, { fresh: revision > 0 }).then((review) => { if (live) setState({ review, error: null }); }, (error) => { if (live) setState({ review: null, error }); });
       return () => { live = false; };
     }, [key, link.status, revision]);
-    const review = state.review && entry?.assetId === state.review.assetId ? (store.cachedReview(state.review.businessId, state.review.assetId) ?? state.review) : null;
+    const shown = state.review && entry?.assetId === state.review.assetId ? state.review : store.peek(entry);
+    const review = shown ? (store.cachedReview(shown.businessId, shown.assetId) ?? shown) : null;
+    // The next item is read while this one is on screen, so stepping is instant.
+    const upcoming = step?.upcoming;
+    React.useEffect(() => {
+      if (link.status === "connected" && upcoming?.assetId && upcoming.assetId !== review?.assetId) store.open(upcoming).catch(() => {});
+    }, [upcoming?.assetId, review?.assetId, link.status]);
     const item = review ? (review.items.find((candidate) => candidate.key === entry.itemKey) ?? review.items.find((candidate) => candidate.key === review.focusItemKey) ?? review.items[0]) : null;
     const id = review && item ? reviewItemId(review.businessId, review.assetId, item.key) : null;
     const receipt = id ? store.receipt(id) : null;
@@ -3637,7 +3673,7 @@ function reviewScreens(React, store, bridge) {
 
   /** The list: approved work that needs a push (quiet, at the top), then
    * every waiting item grouped by business. Selection is explicit. */
-  function QueueList({ queue, selectedId, onOpen, picked, onPick, filter, onFilter }) {
+  function QueueList({ queue, selectedId, onOpen, picked, onPick, filter, onFilter, notes }) {
     useStore();
     const groups = reviewGroups(queue).filter((group) => !filter || group.businessId === filter);
     const attention = [...(queue.stalled ?? []).map((entry) => ({ ...entry, why: `Not started · ${entry.waitingOn ? `waiting on ${entry.waitingOn}` : "nobody has picked it up"}` })),
@@ -3654,7 +3690,7 @@ function reviewScreens(React, store, bridge) {
         ...group.items.map((entry) => {
           const { question, stake } = questionOf(entry);
           const receipt = store.receipt(entry.id);
-          return h(SelectRow, { key: entry.id, title: question, subtitle: receiptWords(receipt) || stake, meta: entry.age,
+          return h(SelectRow, { key: entry.id, title: question, subtitle: notes?.get(entry.id) || receiptWords(receipt) || stake, meta: entry.age,
             selected: selectedId === entry.id,
             picked: onPick ? picked?.has(entry.id) : undefined, pickLabel: `Select ${question}`,
             onPick: onPick ? (value) => onPick(entry.id, value) : undefined,
@@ -3665,17 +3701,25 @@ function reviewScreens(React, store, bridge) {
   }
 
   /** Approves the picked items together: each its own call, token and receipt. */
+  // First every review is read (for its tokens), then every approval starts
+  // at once, so one Undo stops them all and nothing starts after it.
   const approveTogether = async (ids, order) => {
     const entries = order.filter((entry) => ids.has(entry.id));
+    const ready = [];
     const refused = [];
-    for (const entry of entries) {
+    await Promise.all(entries.map(async (entry) => {
       try {
         const review = await store.open({ businessId: entry.businessId, assetId: entry.assetId });
         const item = review.items.find((candidate) => candidate.key === entry.key);
-        if (!store.propose({ review, item, verdict: "approved" })) refused.push(entry.id);
+        if (item && store.canDecide(review, item)) ready.push({ entry, review, item });
+        else refused.push(entry.id);
       } catch { refused.push(entry.id); }
+    }));
+    const proposed = [];
+    for (const { entry, review, item } of entries.map((entry) => ready.find((candidate) => candidate.entry === entry)).filter(Boolean)) {
+      if (store.propose({ review, item, verdict: "approved" })) proposed.push(entry.id); else refused.push(entry.id);
     }
-    return refused;
+    return { proposed, refused };
   };
 
   return { useStore, useConnection, NotConnected, ReviewItem, QueueList, Work, Decide, approveTogether, questionOf, receiptWords, agentName };
@@ -3730,7 +3774,7 @@ function reviewsPart(ctx, bridge) {
   const React = ctx.react;
   const h = React.createElement;
   const ui = buzzUi(React);
-  const store = reviewData(bridge.call);
+  const store = reviewData(bridge.call, bridge.timing ?? {});
   /** A service Buzz may not have: undefined when it is missing. */
   const optional = (name) => { try { return ctx.reflect?.get?.(name) ?? undefined; } catch { return undefined; } };
   const pluginId = ctx.pluginOwner?.id ?? "ai.black4";
@@ -3770,7 +3814,8 @@ function reviewsPart(ctx, bridge) {
     const step = reviewStep(order, entry, remembered.current);
     if (step.found) remembered.current = step.index;
     const go = (target) => target ? () => setEntry({ businessId: target.businessId, assetId: target.assetId, itemKey: target.key }) : null;
-    return { position: step.found ? step.index + 1 : 0, total: order.length, next: go(step.next), previous: go(step.previous) };
+    const upcoming = step.next ? { businessId: step.next.businessId, assetId: step.next.assetId, itemKey: step.next.key } : null;
+    return { position: step.found ? step.index + 1 : 0, total: order.length, next: go(step.next), previous: go(step.previous), upcoming };
   }
 
   /** A queue read on demand, for surfaces opened before the badge's first read. */
@@ -3796,7 +3841,8 @@ function reviewsPart(ctx, bridge) {
       setView({ filter: params.business ?? null, entry: params.asset ? { businessId: params.business, assetId: params.asset, itemKey: params.item } : view.entry });
     }, [pageNavigation?.entryId]);
     const [picked, setPicked] = React.useState(() => new Set());
-    const [bulk, setBulk] = React.useState(null); // { ids } while approving together
+    // { ids, refused, preparing } for the last Approve N: its countdown and what it couldn't do.
+    const [bulk, setBulk] = React.useState(null);
     const setEntry = (entry) => setView({ entry });
     // The first waiting item is open from the start: one less click per session.
     const first = reviewOrder(queue)[0];
@@ -3805,26 +3851,37 @@ function reviewsPart(ctx, bridge) {
     }, [first?.id]);
     const step = useStepping(current.entry, setEntry);
     surface = { next: step.next, previous: step.previous };
+    React.useEffect(() => () => { surface = null; surfaceFocused = false; }, []);
     const order = reviewOrder(queue);
     // Picks that left the queue (decided) drop out of the selection.
     const live = new Set([...picked].filter((id) => order.some((entry) => entry.id === id)));
     const pick = (id, value) => setPicked((now) => { const next = new Set(now); if (value) next.add(id); else next.delete(id); return next; });
-    const pending = [...live].map((id) => store.receipt(id)).filter((receipt) => receipt?.state === "pending");
+    const pending = (bulk?.ids ?? []).map((id) => store.receipt(id)).filter((receipt) => receipt?.state === "pending");
+    const [, tick] = React.useState(0);
+    React.useEffect(() => {
+      if (!pending.length) return undefined;
+      const timer = setInterval(() => tick((n) => n + 1), 250);
+      return () => clearInterval(timer);
+    }, [pending.length > 0]);
     const approve = async () => {
       const ids = new Set(live);
-      setBulk({ ids });
-      await approveTogether(ids, order);
+      setBulk({ ids: [], refused: [], preparing: true });
+      const { proposed, refused } = await approveTogether(ids, order);
       setPicked(new Set());
-      setBulk(null);
+      setBulk({ ids: proposed, refused, preparing: false });
     };
     const undoAll = () => { for (const receipt of pending) store.undo(receipt.id); };
+    const notes = new Map((bulk?.refused ?? []).map((id) => [id, "Can't be approved here: open it to see why"]));
     let toolbar = null;
     if (pending.length) {
-      toolbar = h(ui.Toolbar, { key: "bulk" }, ui.Status(`Approving ${pending.length} in ${Math.max(1, Math.ceil((pending[0].deadline - Date.now()) / 1000))} s`),
+      toolbar = h(ui.Toolbar, { key: "bulk" }, ui.Status(`Approving ${pending.length} in ${Math.max(1, Math.ceil((Math.min(...pending.map((receipt) => receipt.deadline)) - Date.now()) / 1000))} s`),
         h(ui.Button, { size: "sm", variant: "outline", onClick: undoAll }, "Undo"));
+    } else if (bulk?.refused?.length && !live.size) {
+      toolbar = h(ui.Toolbar, { key: "bulk" }, ui.Line(`${bulk.refused.length} couldn't be approved here.`),
+        h(ui.Button, { size: "sm", variant: "ghost", onClick: () => setBulk(null) }, "Dismiss"));
     } else if (live.size) {
       toolbar = h(ui.Toolbar, { key: "bulk" }, ui.Strong(`${live.size} selected`),
-        h(ui.Button, { size: "sm", variant: "prominent", loading: !!bulk, onClick: () => void approve() }, `Approve ${live.size}`),
+        h(ui.Button, { size: "sm", variant: "prominent", loading: !!bulk?.preparing, onClick: () => void approve() }, `Approve ${live.size}`),
         h(ui.Button, { size: "sm", variant: "ghost", onClick: () => setPicked(new Set()) }, "Clear"));
     }
     let list;
@@ -3832,7 +3889,7 @@ function reviewsPart(ctx, bridge) {
     else if (error && !queue) list = h(ui.Failure, { message: plain(error.message, 300), retry, retryLabel: "Try again" });
     else if (!queue) list = h(ui.Skeleton, { layout: "list" });
     else list = h(QueueList, { queue, selectedId: current.entry ? order[reviewStep(order, current.entry).index]?.id : null, onOpen: setEntry,
-      picked: live, onPick: pick, filter: current.filter, onFilter: (filter) => setView({ filter }) });
+      picked: live, onPick: pick, notes, filter: current.filter, onFilter: (filter) => setView({ filter }) });
     const detail = current.entry
       ? h(ReviewItem, { key: "item", entry: current.entry, step, onCommand, frame: true })
       : link.status === "connected" && queue ? h(ui.EmptyState, { glyph: "decisions", title: order.length ? "Choose a decision" : "Nothing to decide", frame: "none" }) : null;
@@ -3866,6 +3923,7 @@ function reviewsPart(ctx, bridge) {
         actions: [h(ui.IconButton, { key: "refresh", label: "Refresh", glyph: "refresh", large: true, onClick: () => bridge.queue.refresh() })] }) }, h(ui.PanelBody, null, list));
     }
     surface = { next: step.next, previous: step.previous };
+    React.useEffect(() => () => { surface = null; surfaceFocused = false; }, []);
     return h(ui.Surface, { label: "Black 4 Reviews", onFocus: focusIn, onBlur: focusOut }, body);
   }
 
@@ -3904,13 +3962,13 @@ function reviewsPart(ctx, bridge) {
     const link = useConnection();
     const locator = reviewLocator(url);
     const [failed, setFailed] = React.useState(null);
+    const [opened, setOpened] = React.useState(null); // { businessId, assetId } once read
     React.useEffect(() => {
       if (link.status !== "connected" || !locator?.assetId) return;
-      store.open(locator).then(() => setFailed(null), (error) => setFailed(error));
+      store.open(locator).then((review) => { setFailed(null); setOpened({ businessId: review.businessId, assetId: review.assetId }); }, (error) => setFailed(error));
     }, [url, link.status]);
-    const businessId = locator?.businessId ?? reviewOrder(store.queue).find((entry) => entry.assetId === locator?.assetId)?.businessId;
-    const cached = locator?.assetId ? (businessId ? store.cachedReview(businessId, locator.assetId) : null) : null;
-    const review = cached ?? null;
+    const businessId = opened?.businessId ?? locator?.businessId ?? reviewOrder(store.queue).find((entry) => entry.assetId === locator?.assetId)?.businessId;
+    const review = locator?.assetId && businessId ? store.cachedReview(businessId, locator.assetId) : null;
     const item = review ? (review.items.find((candidate) => candidate.key === locator.itemKey) ?? review.items[0]) : null;
     const receipt = review && item ? store.receipt(reviewItemId(review.businessId, review.assetId, item.key)) : null;
     const state = item ? reviewState(item, receipt) : null;
@@ -4009,6 +4067,16 @@ function reviewsPart(ctx, bridge) {
     blockedNotes = notifications?.register?.({ id: "decisions-blocked", label: "Black 4 approved work blocked" }) ?? null;
   } catch (error) { bridge.report?.(error); }
   own(bridge.queue.subscribe((queue) => { store.noteQueue(queue); notify(queue); }));
+  // Signed out, reconnecting or another account: nothing of the last one stays.
+  let lastStatus = null;
+  own(bridge.status?.subscribe?.((status) => {
+    if (status !== "connected" && lastStatus === "connected") {
+      store.reset();
+      seen.started = false; seen.waiting.clear(); seen.blocked.clear();
+      setView({ entry: null, filter: null });
+    }
+    lastStatus = status;
+  }));
 
   return {
     store,

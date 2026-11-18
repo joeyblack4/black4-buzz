@@ -2811,7 +2811,7 @@ class Audience(Base):
         d = self.make_agent()
         self.started(d)
         applied = []
-        self.a.defer_apply = lambda agent: applied.append(agent.name)
+        self.a.defer_apply = lambda agent, audience=False: applied.append(agent.name)
         self.a.refresh_audience(d)
         self.assertEqual(applied, [], "same keys: nothing to do")
         self.answer(platform_answer())
@@ -2837,7 +2837,7 @@ class Audience(Base):
         d = self.make_agent()
         self.started(d)
         before = self.a.running(d)
-        self.a.defer_apply = lambda agent: self.fail("an idle agent does not wait for a turn")
+        self.a.defer_apply = lambda agent, audience=False: self.fail("an idle agent does not wait for a turn")
         STAFF.append("5" * 64)
         self.addCleanup(STAFF.pop)
         self.answer(platform_answer())
@@ -3015,3 +3015,252 @@ class Platform(Base):
         self.req(op="logout", harness="claude")
         self.assertFalse((home2 / "workforce" / "accounts" / OWNER / "secrets" / "claude").exists(), "a sign-out there too")
         self.assertIn("unknown op", self.req(op="signin.sync")["error"], "only the customer-facing runner takes one")
+
+
+# ---------------------------------------------------------------- a mention the gate drops
+
+NEWCOMER = "e4" * 32  # a staff member who has just linked their Buzz key
+STRANGER = "c3" * 32  # a key Platform Control does not name for this agent
+FAKE_BUZZ_CLI = f"""#!{PY}
+# The stock buzz CLI as the runner uses it: `messages get` prints messages.json
+# from the test home; every call is noted, with whose key and which relay.
+import json, os, sys
+home = os.environ["HOME"]
+with open(os.path.join(home, "buzz-calls.txt"), "a") as f:
+    f.write(json.dumps({{"argv": sys.argv[1:], "key": bool(os.environ.get("BUZZ_PRIVATE_KEY")), "relay": os.environ.get("BUZZ_RELAY_URL")}}) + "\\n")
+if sys.argv[1:3] == ["messages", "get"]:
+    path = os.path.join(home, "messages.json")
+    print(open(path).read() if os.path.exists(path) else "[]")
+elif sys.argv[1:3] == ["messages", "send"]:
+    print(json.dumps({{"event_id": "f" * 64, "accepted": True}}))
+"""
+
+
+def drop_line(author, at="2026-11-18T09:00:12.000000Z", dm=False, channel="6f1c7c1e-1d5b-4c55-9d43-0c1f0b6a2f10", colour=True):
+    """The line buzz-acp 0.5.30 writes when its author gate drops an event."""
+    target = "\x1b[2mbuzz_acp::inbound_author_gate\x1b[0m\x1b[2m:\x1b[0m" if colour else "buzz_acp::inbound_author_gate:"
+    return (f"{at}  INFO {target} inbound author gate \u2014 dropping event channel_id={channel} raw_author={author} "
+            f"effective_author={author} mode=allowlist is_dm={'true' if dm else 'false'}\n")
+
+
+class DroppedMentions(Base):
+    """This morning: a staff member linked his key, the 10-minute refresh took
+    six minutes to see it, and the restart then waited on a long parallel turn;
+    his three mentions were dropped without a sign."""
+
+    answer, calls, started = Audience.answer, Audience.calls, Audience.started
+
+    def setUp(self):
+        super().setUp()
+        self.sign_in()
+        self.a.BLACK4_MCP.parent.mkdir(parents=True)
+        write_exe(self.a.BLACK4_MCP, FAKE_CONNECTOR)
+        write_exe(self.a.BIN / "buzz", FAKE_BUZZ_CLI)
+        self.answer(platform_answer())
+        self.d = self.make_agent()
+        self.started(self.d)
+        self.log = self.d / "agent.log"
+
+    def buzz_calls(self):
+        p = self.home / "buzz-calls.txt"
+        return [json.loads(line) for line in p.read_text().splitlines()] if p.exists() else []
+
+    def sends(self):
+        return [c for c in self.buzz_calls() if c["argv"][:2] == ["messages", "send"]]
+
+    def message(self, author, at, event_id="9" * 64, dm=False):
+        tags = [["h", "6f1c7c1e-1d5b-4c55-9d43-0c1f0b6a2f10"], ["p", self.d.name]]
+        (self.home / "messages.json").write_text(json.dumps([
+            {"id": "8" * 64, "pubkey": STAFF[0], "kind": 9, "created_at": at - 30, "content": "earlier", "tags": [["p", self.d.name]]},
+            {"id": event_id, "pubkey": author, "kind": 9, "created_at": at, "content": "@Agent hello", "tags": tags}]))
+
+    def link(self, key):
+        STAFF.append(key)
+        self.addCleanup(STAFF.remove, key)
+        self.answer(platform_answer())
+
+    def test_turns_that_end_without_a_result_still_end(self):
+        # buzz-acp ends a prompt with no stopReason when the model process
+        # exits, errors or hits the hard cap (pool.rs): counted as open, it
+        # would hold every restart to the 10-minute hard stop.
+        start = "2026-11-18T00:00:00Z  INFO buzz_acp: buzz-acp starting: relay=wss://r pubkey=x\n"
+        opened, closed = "2026-11-18T00:00:01Z  INFO agentctl: turn opened\n", "2026-11-18T00:00:02Z  INFO agentctl: turn closed\n"
+        self.log.write_text(start + opened * 3)
+        self.assertEqual(self.a.turns_in_flight(self.d), 3)
+        self.log.write_text(self.log.read_text() + "2026-11-18T00:00:03Z ERROR \x1b[2mpool::prompt\x1b[0m\x1b[2m:\x1b[0m agent 1 exited during prompt\n")
+        self.log.write_text(self.log.read_text() + "2026-11-18T00:00:03Z ERROR pool::prompt: session_prompt error: agent error\n")
+        self.assertEqual(self.a.turns_in_flight(self.d), 1)
+        self.log.write_text(self.log.read_text() + "2026-11-18T00:00:04Z ERROR pool::prompt: hard timeout (7200s cap, silence 30s, recently_active=false) \u2014 agent process is unrecoverable, invalidating all sessions\n")
+        self.assertEqual(self.a.turns_in_flight(self.d), 0)
+        self.log.write_text(self.log.read_text() + closed + closed)
+        self.assertEqual(self.a.turns_in_flight(self.d), 0, "never below none")
+        self.log.write_text(self.log.read_text() + opened)
+        self.assertEqual(self.a.turns_in_flight(self.d), 1, "an extra end does not hide a turn that opens later")
+        self.log.write_text(self.log.read_text() + "2026-11-18T00:00:05Z  WARN pool::prompt: idle timeout (1500s) \u2014 cancelling session s\n")
+        self.assertEqual(self.a.turns_in_flight(self.d), 1, "an idle timeout cancels: its result closes it, not this line")
+
+    def test_an_audience_restart_needs_no_turn_to_end_after_it_was_asked(self):
+        # The last turn may close between the count and the waiter's start:
+        # an audience change waits for nothing in flight, not for a close.
+        start = "2026-11-18T00:00:00Z  INFO buzz_acp: buzz-acp starting: relay=wss://r pubkey=x\n"
+        self.log.write_text(self.log.read_text() + start + "2026-11-18T00:00:01Z  INFO agentctl: turn opened\n2026-11-18T00:00:02Z  INFO agentctl: turn closed\n")
+        pid = self.a.running(self.d)
+        self.a.spawn_apply = lambda d: None
+        self.a.defer_apply(self.d, audience=True)
+        self.a.APPLY_WAIT, self.a.TURN_SETTLE = 5, 0.2
+        began = time.time()
+        self.a.apply_later(self.d)
+        self.assertLess(time.time() - began, 4, "at once, not after the hard stop")
+        self.assertNotEqual(self.a.running(self.d), pid)
+        self.assertNotIn("did not end", (self.a.RUN / "supervisor.log").read_text())
+
+    def test_the_waiter_looks_again_after_the_settle_before_it_restarts(self):
+        # With parallel sessions a turn can open while the waiter lets the
+        # reply go out: restarting then would cut it.
+        start = "2026-11-18T00:00:00Z  INFO buzz_acp: buzz-acp starting: relay=wss://r pubkey=x\n"
+        opened, closed = "2026-11-18T00:00:01Z  INFO agentctl: turn opened\n", "2026-11-18T00:00:02Z  INFO agentctl: turn closed\n"
+        self.log.write_text(self.log.read_text() + start + opened + closed)
+        pid = self.a.running(self.d)
+        self.a.spawn_apply = lambda d: None
+        self.a.defer_apply(self.d, audience=True)
+        self.a.APPLY_WAIT, self.a.TURN_SETTLE = 20, 0.2
+        settles = []
+        real_quiet = self.a.log_quiet
+        def quiet(d, seconds, limit=30):
+            settles.append(time.time())
+            if len(settles) == 1:
+                with open(self.log, "a") as f: f.write(opened)  # another session's turn opens meanwhile
+                import threading
+                threading.Timer(1.5, lambda: open(self.log, "a").write(closed)).start()
+            real_quiet(d, seconds, limit)
+        self.a.log_quiet = quiet
+        self.a.apply_later(self.d)
+        self.assertGreaterEqual(len(settles), 2, "looked again")
+        self.assertGreaterEqual(time.time() - settles[0], 1.4, "restarted only once that turn closed")
+        self.assertNotEqual(self.a.running(self.d), pid)
+        self.assertNotIn("did not end", (self.a.RUN / "supervisor.log").read_text())
+
+    def test_a_dropped_mention_asks_for_the_list_at_once_once_a_minute_at_most(self):
+        spawned = []
+        def spawn(d):  # what `agentctl dropped` leaves: nothing pending
+            spawned.append(d.name)
+            (d / "drops.json").write_text(json.dumps({**self.a.drops_state(d), "pending": []}))
+        self.a.spawn_dropped = spawn
+        now = time.time()
+        self.a.supervise_pass(now)
+        self.assertEqual(spawned, [], "nothing dropped yet: a log from before the watch is not read")
+        with open(self.log, "a") as f: f.write(drop_line(NEWCOMER))
+        self.a.supervise_pass(now + 1)
+        self.assertEqual(spawned, [self.d.name])
+        with open(self.log, "a") as f: f.write(drop_line(NEWCOMER, at="2026-11-18T09:00:40.000000Z"))
+        self.a.supervise_pass(now + 2)
+        self.assertEqual(spawned, [self.d.name], "not again within the minute")
+        self.a.supervise_pass(now + self.a.DROP_EVERY + 3)
+        self.assertEqual(spawned, [self.d.name] * 2, "its second mention, a minute on")
+        self.a.supervise_pass(now + 2 * self.a.DROP_EVERY + 4)
+        self.assertEqual(len(spawned), 2, "nothing new: no ask")
+        view = self.req(op="status", pubkey=self.d.name)["audience"]["unheard"]
+        self.assertEqual((view["count"], view["lastAt"]), (2, int(self.a.log_stamp("2026-11-18T09:00:40.000000Z"))))
+
+    def test_a_newly_linked_person_is_heard_after_the_turns_in_flight_and_told_so_once(self):
+        self.link(NEWCOMER)
+        at = int(time.time()) + 1  # after its start
+        self.message(NEWCOMER, at)
+        deferred = []
+        self.a.defer_apply = lambda d, audience=False: deferred.append((d.name, audience))
+        drop = {"author": NEWCOMER, "channel": "6f1c7c1e-1d5b-4c55-9d43-0c1f0b6a2f10", "at": at, "dm": False}
+        (self.d / "drops.json").write_text(json.dumps({"offset": 0, "pending": [drop], "events": [drop]}))
+        (self.d / "audience.json").write_text(json.dumps({**json.loads((self.d / "audience.json").read_text()), "tried": 0}))
+        self.a.turns_in_flight = lambda d: 2  # two parallel sessions busy
+        self.a.handle_dropped(self.d)
+        self.assertEqual(deferred, [(self.d.name, True)], "the new list waits for nothing in flight, then restarts")
+        self.assertIn(NEWCOMER, self.a.audience_keys(self.a.read_settings(self.d), self.a.audience_state(self.d)["entries"]))
+        sends = self.sends()
+        self.assertEqual(len(sends), 1)
+        argv = sends[0]["argv"]
+        self.assertEqual(argv[argv.index("--reply-to") + 1], "9" * 64, "a thread reply to the dropped message")
+        self.assertEqual(argv[argv.index("--channel") + 1], "6f1c7c1e-1d5b-4c55-9d43-0c1f0b6a2f10")
+        self.assertEqual(argv[argv.index("--content") + 1], self.a.SIGN_SOON)
+        self.assertEqual((sends[0]["key"], sends[0]["relay"]), (True, "https://relay.example.com"), "as the agent, on its community")
+        for word in (STAFF[0], "staff", "list", "allow"):
+            self.assertNotIn(word, self.a.SIGN_SOON.lower(), "nothing about who else it serves")
+        # A second mention within the period: no second line.
+        (self.d / "drops.json").write_text(json.dumps({**json.loads((self.d / "drops.json").read_text()),
+                                                      "pending": [{"author": NEWCOMER, "channel": "6f1c7c1e-1d5b-4c55-9d43-0c1f0b6a2f10", "at": at + 60, "dm": False}]}))
+        self.message(NEWCOMER, at + 60, event_id="7" * 64)
+        self.a.handle_dropped(self.d)
+        self.assertEqual(len(self.sends()), 1, "once per person per period")
+        self.assertEqual(self.req(op="status", pubkey=self.d.name)["audience"]["unheard"]["waiting"], 1)
+
+    def test_someone_the_agent_does_not_serve_gets_no_sign_and_the_owner_sees_it(self):
+        at = int(time.time()) - 5
+        self.message(STRANGER, at)
+        with open(self.log, "a") as f: pass
+        self.a.supervise_pass()  # the watch starts at the end of the log
+        with open(self.log, "a") as f: f.write(drop_line(STRANGER, colour=False))
+        self.a.spawn_dropped = lambda d: None
+        self.a.supervise_pass()
+        state = json.loads((self.d / "drops.json").read_text())
+        state["pending"][0]["at"] = at
+        (self.d / "drops.json").write_text(json.dumps(state))
+        (self.d / "audience.json").write_text(json.dumps({**json.loads((self.d / "audience.json").read_text()), "tried": 0}))
+        self.a.handle_dropped(self.d)
+        self.assertEqual(self.sends(), [], "not someone Platform Control names for it: the runner says nothing")
+        self.assertEqual(len(self.calls()), 2, "but it did ask for the list again")
+        view = self.req(op="status", pubkey=self.d.name)["audience"]["unheard"]
+        self.assertEqual((view["count"], view["waiting"], view["lastServed"]), (1, 0, False))
+        self.assertIn("1 unheard", self.a.audience_line("Test agent", self.req(op="status", pubkey=self.d.name)["audience"]))
+
+    def test_a_listed_person_who_sends_a_direct_message_is_told_to_mention_it(self):
+        at = int(time.time()) - 5
+        self.message(STAFF[0], at, dm=True)
+        (self.d / "drops.json").write_text(json.dumps({"offset": 0, "events": [],
+                                                      "pending": [{"author": STAFF[0], "channel": "6f1c7c1e-1d5b-4c55-9d43-0c1f0b6a2f10", "at": at, "dm": True}]}))
+        self.a.handle_dropped(self.d)
+        sends = self.sends()
+        self.assertEqual(len(sends), 1)
+        self.assertEqual(sends[0]["argv"][sends[0]["argv"].index("--content") + 1], self.a.SIGN_DM)
+        self.assertEqual(len(self.calls()), 1, "already listed: no need to ask again")
+
+    def test_a_sign_is_noted_before_it_is_sent_so_it_never_goes_twice(self):
+        write_exe(self.a.BIN / "buzz", FAKE_BUZZ_CLI.replace('print(json.dumps({{"event_id": "f" * 64, "accepted": True}}))', 'pass'))
+        self.link(NEWCOMER)
+        self.a.defer_apply = lambda d, audience=False: None
+        (self.d / "audience.json").write_text(json.dumps({**json.loads((self.d / "audience.json").read_text()), "tried": 0}))
+        for n in range(2):
+            at = int(time.time()) + 1
+            self.message(NEWCOMER, at, event_id=str(7 + n) * 64)
+            (self.d / "drops.json").write_text(json.dumps({**self.a.drops_state(self.d), "offset": 0,
+                "pending": [{"author": NEWCOMER, "channel": "6f1c7c1e-1d5b-4c55-9d43-0c1f0b6a2f10", "at": at, "dm": False}]}))
+            self.a.handle_dropped(self.d)
+        self.assertEqual(len(self.sends()), 1, "a send that prints nothing still counts as sent")
+        self.assertIn(f"{NEWCOMER}:soon", json.loads((self.d / "signed.json").read_text()))
+
+    def test_a_drop_waits_for_a_list_asked_after_it(self):
+        # The list was asked a moment before the person linked and mentioned:
+        # no ask now (once a minute at most), but the drop is not forgotten.
+        self.link(NEWCOMER)
+        state = json.loads((self.d / "audience.json").read_text())
+        at = int(time.time()) + 1
+        (self.d / "audience.json").write_text(json.dumps({**state, "tried": at - 10, "at": at - 10, "entries": [{"pubkey": k, "kind": "staff"} for k in STAFF if k != NEWCOMER]}))
+        self.message(NEWCOMER, at)
+        drop = {"author": NEWCOMER, "channel": "6f1c7c1e-1d5b-4c55-9d43-0c1f0b6a2f10", "at": at, "dm": False}
+        (self.d / "drops.json").write_text(json.dumps({"offset": 0, "events": [drop], "pending": [drop]}))
+        self.a.defer_apply = lambda d, audience=False: None
+        self.a.handle_dropped(self.d)
+        self.assertEqual(self.sends(), [])
+        self.assertEqual(self.a.drops_state(self.d)["pending"], [drop], "kept for the next run")
+        state = json.loads((self.d / "audience.json").read_text())
+        (self.d / "audience.json").write_text(json.dumps({**state, "tried": at - 120}))  # a minute on
+        self.a.handle_dropped(self.d)
+        self.assertEqual(len(self.sends()), 1, "asked, found, told")
+        self.assertEqual(self.a.drops_state(self.d)["pending"], [])
+
+    def test_no_message_found_means_no_reply(self):
+        self.link(NEWCOMER)
+        (self.home / "messages.json").write_text("[]")
+        (self.d / "drops.json").write_text(json.dumps({"offset": 0, "events": [],
+                                                      "pending": [{"author": NEWCOMER, "channel": "6f1c7c1e-1d5b-4c55-9d43-0c1f0b6a2f10", "at": int(time.time()), "dm": False}]}))
+        self.a.defer_apply = lambda d, audience=False: None
+        self.a.handle_dropped(self.d)
+        self.assertEqual(self.sends(), [])

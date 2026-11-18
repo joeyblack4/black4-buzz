@@ -28,6 +28,8 @@ Not requests (run from cron or by agentctl itself):
   agentctl supervise          keeps activated agents running; cron starts it
   agentctl list               prints each agent and whom it answers
   agentctl audience <pubkey>  asks Platform Control for an agent's audience again
+  agentctl dropped <pubkey>   handles the mentions an agent's gate dropped (see
+                              "a mention the gate drops")
   agentctl tool-gate          a customer-facing agent's Claude Code hook (see
                               "the customer-facing profile")
   agentctl login-helper <id>  holds one sign-in open between SSH calls
@@ -78,7 +80,7 @@ Black 4 MCP: when setup.sh has installed the connector (mcp/black4), every agent
 gets it as buzz-acp's MCP server. It signs each request with the agent's own key
 and owner attestation, so there is nothing to sign in to and no per-agent setting.
 """
-import fcntl, hashlib, json, os, re, secrets, shutil, signal, socket, subprocess, sys, time
+import calendar, contextlib, fcntl, hashlib, json, os, re, secrets, shutil, signal, socket, subprocess, sys, time
 from pathlib import Path
 
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -1462,8 +1464,8 @@ def heartbeat_view(s):
 # every 10 minutes (the supervisor). The answer is kept in
 # agents/<pubkey>/audience.json; a failed refresh keeps the last good one, and
 # an agent with none at all starts owner-only (closed, never open). A changed
-# list restarts the agent after its turn: buzz-acp reads the list once, at its
-# start. Until Platform Control has the tool (it answers that it has none),
+# list restarts the agent at once when idle, else once no turn is in flight:
+# buzz-acp reads the list once, at its start (see "a mention the gate drops"). Until Platform Control has the tool (it answers that it has none),
 # staff.json, the machine's static staff list, stands in for its staff keys.
 #
 # What buzz-acp 0.5.30 does with it (crates/buzz-acp/src/lib.rs,
@@ -1633,8 +1635,8 @@ def refresh_audience(d, restart=True):
                 try: log_line("supervisor", f"audience of {d.name[:8]} changed; restarted it: pid {start(d)}")
                 except Exception as e: log_line("supervisor", f"audience of {d.name[:8]} changed; restart failed: {str(e)[:200]}")
             else:
-                log_line("supervisor", f"audience of {d.name[:8]} changed; restarting it after its turn")
-                defer_apply(d)
+                log_line("supervisor", f"audience of {d.name[:8]} changed; restarting it once no turn is in flight")
+                defer_apply(d, audience=True)
     return state
 
 
@@ -1684,6 +1686,8 @@ def audience_view(d, s):
         if state.get("asOf"): view["asOf"] = state["asOf"]
         if state.get("at"): view["checkedAt"] = int(state["at"])
         if state.get("error") and (state.get("tried") or 0) > (state.get("at") or 0): view["lastError"] = state["error"]
+    unheard = unheard_view(d)
+    if unheard: view["unheard"] = unheard
     return view
 
 
@@ -1693,7 +1697,224 @@ def audience_line(name, view):
     if view.get("gate") == "allowlist": how = f"allow-list of {view.get('keys')} from {view.get('source') or '?'}"
     elif view["respondTo"] in AUDIENCE_MODES: how = "owner-only until a list arrives"
     else: how = view.get("gate")
-    return f"{name}: {mode} ({how})"
+    unheard = view.get("unheard")
+    heard = f"; {unheard['count']} unheard today" + (f", {unheard['waiting']} heard after its restart" if unheard.get("waiting") else "") if unheard else ""
+    return f"{name}: {mode} ({how}){heard}"
+
+
+# ---------------------------------------------------------------- a mention the gate drops
+# buzz-acp 0.5.30 reads its allowlist once, into its Config, and has no reload
+# (no signal, no file it watches: crates/buzz-acp/src/config.rs and lib.rs),
+# and a SIGTERM cancels the turns in flight after 30 s. So a newly linked
+# person is heard only after a restart, and the restart waits until no turn
+# is in flight (APPLY_WAIT at most, then the hard way; see "an agent changing
+# itself"). Its author gate drops everyone else's event with one INFO line,
+#   buzz_acp::inbound_author_gate: inbound author gate — dropping event
+#   channel_id=<uuid> raw_author=<hex> effective_author=<hex> mode=<gate> is_dm=<bool>
+# and nothing else: no reaction, no reply. The supervisor reads those lines
+# from agent.log (drops.json keeps where it is, the last day's drops for the
+# owner to see, and those not yet handled) and starts `agentctl dropped
+# <pubkey>`, at most once per DROP_EVERY, which
+#   - asks Platform Control for the list again unless it just did (one ask,
+#     as signed as the agent as every ask), so a person who has just linked
+#     their key is not left waiting for the 10-minute refresh. Every ask is a
+#     whole refresh: a removal takes effect at least as fast as before.
+#   - says one line from the runner (the stock buzz CLI, as the agent, a
+#     thread reply to the dropped message; never the model) only to a person
+#     Platform Control names for this agent, at most once per person per
+#     SIGN_EVERY: someone just linked, behind a gate that has not restarted
+#     yet (SIGN_SOON), or someone it serves who mentioned it in a direct
+#     message, which buzz-acp answers from its owner only (SIGN_DM). Only a
+#     message that mentions the agent gets a line. A drop by someone not on
+#     the kept list waits (DROP_PATIENCE at most) for a list asked after it,
+#     so a skipped or failed ask is tried again. Anyone else, an
+#     unlinked key, a customer of another business, another agent, gets
+#     nothing: the runner cannot tell them apart and never says who is on
+#     the list. Their drops show in status and list ("unheard").
+DROP_LINE = re.compile(rb"^(\S+)\s.*inbound author gate .{1,4} dropping event channel_id=(\S+) raw_author=([0-9a-f]{64}) "
+                       rb"effective_author=([0-9a-f]{64}) mode=\S+ is_dm=(true|false)")
+DROP_EVERY = 60            # seconds between `agentctl dropped` runs for one agent
+DROP_REFRESH = 60          # a list asked this recently is not asked again for a drop
+DROP_KEEP = 24 * 3600      # how long status shows a drop
+DROP_PATIENCE = 15 * 60    # a drop waits this long at most for a list asked after it
+SIGN_EVERY = 6 * 3600      # at most one line per person and kind this often
+DROP_FIND = 180            # seconds around a drop the dropped message is looked for
+SIGN_SOON = "I can't pick up that message, but I will be able to in a few minutes. Mention me again then."
+SIGN_DM = "I answer direct messages from my owner only. Mention me in a channel or a thread instead."
+
+
+def log_stamp(text):
+    """Unix seconds of a log line's RFC 3339 UTC stamp, or None."""
+    try: return float(calendar.timegm(time.strptime(text[:19], "%Y-%m-%dT%H:%M:%S")))
+    except (TypeError, ValueError):
+        return None
+
+
+def drops_state(d):
+    return read_json(d / "drops.json", {}) or {}
+
+
+@contextlib.contextmanager
+def drops_lock(d):
+    """Held for each read-modify-write of drops.json, by the supervisor and
+    `agentctl dropped` alike (briefly: never across a network call)."""
+    with open(d / "drops.state.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def watch_drops(d, now=None):
+    """Reads what agent.log gained since the last look for the gate's drops.
+    Returns whether a drop is waiting to be handled. The first look starts at
+    the log's end: a drop from before the watch is not answered."""
+    now = now or time.time()
+    with drops_lock(d): return _watch_drops(d, now)
+
+
+def _watch_drops(d, now):
+    state = drops_state(d)
+    size = log_size(d)
+    if "offset" not in state:
+        write_private(d / "drops.json", json.dumps({"offset": size, "events": [], "pending": []}))
+        return False
+    offset = state["offset"] if isinstance(state.get("offset"), int) and state["offset"] <= size else 0  # cut over: from the start
+    found = []
+    if size > offset:
+        try:
+            with open(d / "agent.log", "rb") as f:
+                f.seek(offset); chunk = f.read(size - offset)
+        except OSError:
+            chunk = b""
+        whole = chunk.rfind(b"\n") + 1  # a line still being written is read next time
+        for line in chunk[:whole].split(b"\n"):
+            m = DROP_LINE.match(ANSI.sub(b"", line))
+            if m:
+                found.append({"at": log_stamp(m.group(1).decode(errors="replace")) or now, "channel": m.group(2).decode(errors="replace"),
+                              "author": m.group(4).decode(), "dm": m.group(5) == b"true"})
+        offset += whole
+    if found or offset != state.get("offset"):
+        events = [e for e in (state.get("events") or []) + found if isinstance(e, dict) and now - (e.get("at") or 0) < DROP_KEEP][-50:]
+        pending = ((state.get("pending") or []) + found)[-20:]
+        state = {**state, "offset": offset, "events": events, "pending": pending}
+        write_private(d / "drops.json", json.dumps(state))
+    return bool(state.get("pending"))
+
+
+def spawn_dropped(d):
+    """Starts `agentctl dropped <pubkey>` detached; it outlives the supervisor's pass."""
+    env = {**base_env(), **root_env()}
+    if os.environ.get("AGENTCTL_NO_CRON"): env["AGENTCTL_NO_CRON"] = "1"
+    try:
+        subprocess.Popen([PYTHON, str(SELF), "dropped", d.name], env=env, cwd=str(private_dir(RUN)),
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:
+        pass
+
+
+def runner_buzz(d, s, args, timeout=20):
+    """The stock buzz CLI as this agent, on its community: parsed JSON, or None."""
+    buzz = BIN / "buzz"
+    if not os.access(buzz, os.X_OK) or not s.get("auth") or "://" not in (s.get("community") or ""): return None
+    env = {**base_env(), "BUZZ_PRIVATE_KEY": (d / "key").read_text().strip(), "BUZZ_AUTH_TAG": json.dumps(s["auth"]),
+           "BUZZ_RELAY_URL": "https://" + s["community"].split("://", 1)[1], "BUZZ_OUTPUT_FORMAT": "json"}
+    try:
+        done = subprocess.run([str(buzz), *args], env=env, capture_output=True, text=True, timeout=timeout, cwd=str(d))
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if done.returncode != 0: return None
+    try: parsed = json.loads(done.stdout or "null")
+    except ValueError: parsed = None
+    return True if parsed is None else parsed  # exit 0 is done, whatever it printed
+
+
+def dropped_message(d, s, drop):
+    """The id of the message a drop was about: the author's latest in that
+    channel around the drop's time that mentions this agent. None when it
+    cannot be found."""
+    at = int(drop.get("at") or 0)
+    rows = runner_buzz(d, s, ["messages", "get", "--channel", drop["channel"], "--since", str(at - DROP_FIND), "--limit", "100"])
+    best = None
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict) or row.get("pubkey") != drop["author"] or not HEX64.match(str(row.get("id") or "")): continue
+        when = row.get("created_at") if isinstance(row.get("created_at"), (int, float)) else None
+        if when is None or not at - DROP_FIND <= when <= at + 5: continue
+        # Only a message that names the agent: never a line into a conversation
+        # (a group direct message too) that was not addressed to it.
+        if not any(isinstance(tag, list) and tag[:2] == ["p", d.name] for tag in row.get("tags") or []): continue
+        if best is None or when >= best[0]: best = (when, row["id"])
+    return best[1] if best else None
+
+
+def handle_dropped(d):
+    """`agentctl dropped <pubkey>`: what the gate dropped since the last run,
+    once (see "a mention the gate drops"). One at a time per agent. A drop by
+    someone not on the kept list stays pending until a list asked after it
+    has arrived, so a skipped or failed ask is tried again on the next run."""
+    lock = open(d / "drops.lock", "a")
+    try:
+        try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError: return
+        with drops_lock(d):
+            pending = [p for p in drops_state(d).get("pending") or [] if isinstance(p, dict) and HEX64.match(str(p.get("author") or ""))]
+        if not pending: return
+        s = read_settings(d)
+        now = time.time()
+        listed = respond_to(s) in AUDIENCE_MODES
+        audience = audience_state(d)
+        keys = set(audience_keys(s, audience.get("entries") or [])) if listed else set()
+        # Someone not on the kept list may have just been added: ask now
+        # (a changed list restarts the agent: at once when idle, else once no
+        # turn is in flight). A listed person's direct message needs no ask.
+        if listed and any(p["author"] not in keys for p in pending) and now - (audience.get("tried") or 0) >= DROP_REFRESH:
+            audience = refresh_audience(d)
+            keys = set(audience_keys(s, audience.get("entries") or []))
+        answered = audience.get("at") or 0  # when the kept list last came back
+        done, keep = [], []
+        for p in pending:
+            # (The 10-minute refresh covers one older than DROP_PATIENCE.)
+            if listed and p["author"] not in keys and answered < (p.get("at") or 0) and now - (p.get("at") or 0) < DROP_PATIENCE: keep.append(p)
+            else: done.append(p)
+        latest = {}
+        for p in done: latest[(p["author"], bool(p.get("dm")))] = p  # one line per person and kind
+        # Only `agentctl dropped` writes signed.json, under drops.lock.
+        signed = {k: v for k, v in (read_json(d / "signed.json", {}) or {}).items() if isinstance(v, (int, float)) and now - v < SIGN_EVERY}
+        served = {}
+        for (author, dm), p in latest.items():
+            served[author] = author in keys
+            if author not in keys or author == d.name: continue
+            kind = "dm" if dm else "soon"
+            if f"{author}:{kind}" in signed: continue
+            event = dropped_message(d, s, p)
+            if not event: continue
+            # Noted before it is sent: a send that posts and then times out
+            # is never sent twice.
+            signed[f"{author}:{kind}"] = now
+            write_private(d / "signed.json", json.dumps(signed))
+            if runner_buzz(d, s, ["messages", "send", "--channel", p["channel"], "--reply-to", event, "--content", SIGN_DM if dm else SIGN_SOON]) is not None:
+                log_line("supervisor", f"told {author[:8]} that {d.name[:8]} {'answers its owner only by direct message' if dm else 'will hear them after its restart'}")
+        with drops_lock(d):
+            state = drops_state(d)  # the supervisor may have added drops meanwhile
+            handled = {json.dumps(p, sort_keys=True) for p in done}
+            rest = [p for p in state.get("pending") or [] if json.dumps(p, sort_keys=True) not in handled]
+            events = [{**e, **({"served": served[e["author"]]} if e.get("author") in served else {})} for e in state.get("events") or [] if isinstance(e, dict)]
+            write_private(d / "drops.json", json.dumps({**state, "events": events, "pending": rest}))
+    finally:
+        lock.close()
+
+
+def unheard_view(d):
+    """What status and list say about the last day's dropped events: how
+    many, the last one's time, whether its author is someone the agent serves
+    (then it hears them after its restart), and how many such are waiting."""
+    events = [e for e in drops_state(d).get("events") or [] if isinstance(e, dict) and time.time() - (e.get("at") or 0) < DROP_KEEP]
+    if not events: return None
+    last = events[-1]
+    # Someone it serves, dropped since its last start: the gate it runs has
+    # not got them yet, and gets them at its next restart.
+    try: started = (d / "launch.json").stat().st_mtime
+    except OSError: started = 0
+    waiting = len({e["author"] for e in events if e.get("served") and not e.get("dm") and (e.get("at") or 0) >= started})
+    return {"count": len(events), "lastAt": int(last.get("at") or 0), "lastServed": bool(last.get("served")), "waiting": waiting}
 
 
 CONTROLS = {  # setting -> (buzz-acp's environment variable, int bounds or the allowed values, buzz-acp's default)
@@ -2455,6 +2676,13 @@ TURN_OPEN_WIRE = re.compile(rb'acp::wire: \xe2\x86\x92 .*"method":\s*"session/pr
 TURN_CLOSE_WIRE = re.compile(rb'acp::wire: \xe2\x86\x90 .*"result":\s*\{\s*"stopReason"')  # ← its result
 TURN_OPEN = re.compile(rb"agentctl: turn opened")   # what the log filter writes for them
 TURN_CLOSE = re.compile(rb"agentctl: turn closed")
+# A prompt buzz-acp 0.5.30 gives up on with no stopReason ever coming back
+# (crates/buzz-acp/src/pool.rs): the model process exited, the prompt failed,
+# the hard cap hit, or the cancel after an idle timeout failed. Each ends a
+# turn as surely as a result does. (An idle timeout itself cancels, and the
+# cancelled prompt's result closes it.)
+TURN_LOST = re.compile(rb"pool::prompt: (?:agent \d+ exited during (?:prompt|cancel_with_cleanup)|session_prompt error|cancel_with_cleanup error|hard timeout)")
+TURN_MARK = re.compile(rb"agentctl: turn (opened|closed)|" + TURN_LOST.pattern)
 TURN_START = b"buzz-acp starting:"  # the line buzz-acp writes when it starts
 
 
@@ -2555,11 +2783,12 @@ def log_size(d):
     except OSError: return 0
 
 
-def defer_apply(d):
+def defer_apply(d, audience=False):
     """A self-change: nothing restarts now; a detached waiter applies it after
     the agent's turn. The settings are already saved; the log's size now is
-    where the waiter starts looking for the turn's end."""
-    write_private(d / APPLY_MARK, json.dumps({"at": time.time(), "pid": running(d), "logAt": log_size(d)}))
+    where the waiter starts looking for the turn's end. A changed audience
+    (`audience`) waits only for nothing to be in flight."""
+    write_private(d / APPLY_MARK, json.dumps({"at": time.time(), "pid": running(d), "logAt": None if audience else log_size(d)}))
     spawn_apply(d)
 
 
@@ -2586,24 +2815,31 @@ def turns_in_flight(d):
     text = ANSI.sub(b"", text)
     start = text.rfind(TURN_START)
     if start < 0: return None
-    text = text[start:]
-    return len(TURN_OPEN.findall(text)) - len(TURN_CLOSE.findall(text))
+    open_turns = 0
+    for mark in TURN_MARK.finditer(text[start:]):
+        # Never below none: an end whose start came before the log did hides
+        # no turn that opens after it.
+        open_turns = open_turns + 1 if mark.group(1) == b"opened" else max(0, open_turns - 1)
+    return open_turns
 
 
 def turn_ended(d, since):
-    """Whether the turn that asked (running at byte `since` of agent.log) has
-    ended and nothing else is in flight: as many results back as prompts sent
-    since buzz-acp started, and at least one result past `since`."""
-    path = d / "agent.log"
-    try:
-        size = path.stat().st_size
-        with open(path, "rb") as f:
-            f.seek(since if size >= since else 0)
-            closed_since = len(TURN_CLOSE.findall(ANSI.sub(b"", f.read())))
-    except OSError:
-        return False
+    """Whether nothing is in flight and, for a self-change (`since` the byte of
+    agent.log where the asking turn was running), at least one turn has ended
+    past `since`. An audience change (`since` None) waits for nothing in flight
+    only: the last turn may well have closed before the waiter began."""
+    if since is not None:
+        path = d / "agent.log"
+        try:
+            size = path.stat().st_size
+            with open(path, "rb") as f:
+                f.seek(since if size >= since else 0)
+                tail_ = ANSI.sub(b"", f.read())
+        except OSError:
+            return False
+        if not (TURN_CLOSE.search(tail_) or TURN_LOST.search(tail_)): return False
     open_turns = turns_in_flight(d)
-    return closed_since > 0 and open_turns is not None and open_turns <= 0
+    return open_turns is not None and open_turns <= 0
 
 
 def log_quiet(d, seconds, limit=30):
@@ -2625,14 +2861,21 @@ def apply_later(d):
     except OSError: return
     try:
         mark = read_json(d / APPLY_MARK, {}) or {}
-        pid, since = running(d), mark.get("logAt") or 0
+        pid, since = running(d), mark.get("logAt", 0)
         if pid:
-            deadline = time.time() + APPLY_WAIT
-            while running(d) == pid and time.time() < deadline and not turn_ended(d, since): time.sleep(0.5)
-            if running(d) == pid and not turn_ended(d, since):
-                log_line("supervisor", f"apply {d.name[:8]}: its turn did not end in {APPLY_WAIT} s; stopping it")
-            elif running(d) == pid:
-                log_quiet(d, TURN_SETTLE)  # the reply goes out after the turn completes
+            # Nothing in flight, then a quiet log so the reply goes out, then
+            # nothing in flight still: with parallel sessions another turn may
+            # open meanwhile, and a restart then would cut it. At APPLY_WAIT it
+            # stops the hard way, so a change never waits for ever.
+            deadline, ready = time.time() + APPLY_WAIT, False
+            while running(d) == pid and time.time() < deadline:
+                if turn_ended(d, since):
+                    log_quiet(d, TURN_SETTLE, limit=max(1, min(30, deadline - time.time())))
+                    if turn_ended(d, since): ready = True; break
+                    continue
+                time.sleep(0.5)
+            if running(d) == pid and not ready:
+                log_line("supervisor", f"apply {d.name[:8]}: its turns did not end in {APPLY_WAIT} s; stopping it")
         (d / "restarts.json").unlink(missing_ok=True)
         if read_settings(d).get("auth"):
             try: log_line("supervisor", f"applied {d.name[:8]} after its turn: pid {start(d)}")
@@ -2761,6 +3004,7 @@ def recheck_launch(d, s):
 
 
 AUDIENCE_SPAWNED = {}  # pubkey -> when this supervisor last started its refresh
+DROPS_SPAWNED = {}     # pubkey -> when this supervisor last started `agentctl dropped`
 
 
 def supervise_pass(now=None):
@@ -2774,6 +3018,10 @@ def supervise_pass(now=None):
         cap_log(d / "agent.raw.log", AGENT_LOG_CAP)
         s = read_settings(d)
         if not s.get("auth"): continue
+        # What its gate dropped: asked about, and answered, out of band.
+        if running(d) and watch_drops(d, now) and now - DROPS_SPAWNED.get(d.name, 0) >= DROP_EVERY:
+            DROPS_SPAWNED[d.name] = now
+            spawn_dropped(d)
         if applying(d): continue  # a self-change's waiter restarts it
         as_agent(d, s)
         r = restarts(d)
@@ -3912,6 +4160,8 @@ def main(argv=None):
     if argv[:1] == ["supervise"]: return supervise()
     if argv[:1] == ["audience"] and len(argv) == 2 and HEX64.match(argv[1]) and (AGENTS / argv[1]).is_dir():
         return refresh_audience(AGENTS / argv[1]) and None
+    if argv[:1] == ["dropped"] and len(argv) == 2 and HEX64.match(argv[1]) and (AGENTS / argv[1]).is_dir():
+        return handle_dropped(AGENTS / argv[1])
     if argv[:1] == ["list"] and len(argv) == 1: sys.exit(print_list())
     if argv[:1] == ["doctor"]: sys.exit(print_doctor())
     if argv[:1] == ["login-helper"] and len(argv) == 2: return login_helper(argv[1])

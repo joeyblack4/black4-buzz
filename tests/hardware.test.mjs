@@ -7,7 +7,7 @@ import {
   askMachine, hardwareProvider, hardwareDefaults, HEARTBEAT_MINUTES, HEARTBEAT_CHOICES, heartbeatChoices, beatFrom, heartbeatRemote, MACHINES, machineOf, statusReader, harnessOptions, signInState, readyToCreate, takesKey, defaultPays, PAYS,
   createLogin, agentDirectory, summaryOf, signInOf, doorTransport, bodySha256, createSession, createMcp, readAnswer, memoryStore,
   modelsReader, modelChoices, applyPick, setModel, applyHardware, COMPACT_OPTIONS, buzzUi, CONVERSATION_ROWS, controlOptions, controlValue, BLACK4_MARK,
-  audienceValue, audienceSettings, audienceOptions, businessesOf,
+  audienceValue, audienceSettings, audienceOptions, businessesOf, unheardText,
 } from "../plugins/black4/plugin.js";
 import { fakeAuthKit, fakeMcp, fakeDoor, https, sha256url, DOOR } from "./fakes.mjs";
 
@@ -1340,4 +1340,13 @@ test("render: Settings sends a business as respondTo and businessId, and a custo
   await new Promise((resolve) => setTimeout(resolve, 10));
   assert.deepEqual(asked.find((request) => request.op === "settings.set"), { op: "settings.set", pubkey: PUBKEY, respondTo: "business", businessId: "business-plain" });
   void tree;
+});
+
+test("the owner sees the mentions an agent's gate dropped, and whether they are heard after a restart", () => {
+  const time = () => "16:22";
+  assert.equal(unheardText(undefined), "");
+  assert.equal(unheardText({ count: 0 }), "");
+  assert.equal(unheardText({ count: 3, lastAt: 1795000000, waiting: 1 }, { time }), "3 dropped in the last day, last at 16:22. 1 heard after its restart.");
+  assert.equal(unheardText({ count: 1, lastAt: 1795000000, waiting: 0 }, { time }), "1 dropped in the last day, last at 16:22.");
+  assert.equal(unheardText({ count: 2, waiting: 2 }, { time }), "2 dropped in the last day. 2 heard after its restart.");
 });

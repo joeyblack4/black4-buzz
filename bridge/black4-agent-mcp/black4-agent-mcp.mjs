@@ -26,7 +26,7 @@
 //
 // `black4-agent-mcp --call <tool>` makes one call as the agent instead and
 // prints one JSON line (agentctl asks get_buzz_audience this way).
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { createInterface } from "node:readline";
 import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
@@ -337,7 +337,11 @@ export function createConnector({ env = process.env, write, fetchFn = fetch, log
    * "missing" means the server works and has no such tool (not live yet). */
   async function callOnce(name, args = {}) {
     if (setupProblem) return { ok: false, kind: "setup", detail: setupProblem };
-    const step = async (id, method, params) => {
+    // Ids of their own, so two calls in the same second never sign the same
+    // body (the server takes each signed event once).
+    const nonce = randomBytes(6).toString("hex");
+    const step = async (name, method, params) => {
+      const id = `${name}-${nonce}`;
       const result = await post({ jsonrpc: "2.0", id, method, params }, { passThrough: false });
       if (result.kind !== "ok") return { fail: { ok: false, kind: result.kind, detail: sentenceFor(result) } };
       const reply = result.messages.find((m) => m?.id === id);

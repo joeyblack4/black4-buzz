@@ -2807,8 +2807,43 @@ class Audience(Base):
         STAFF.append("3" * 64)
         self.addCleanup(STAFF.pop)
         self.answer(platform_answer())
+        (self.home / "turn.txt").write_text("")  # mid-turn: after it
+        self.assertTrue(self.req(op="start", pubkey=d.name)["ok"])
+        for _ in range(50):
+            if self.a.turns_in_flight(d): break
+            time.sleep(0.1)
+        self.assertEqual(self.a.turns_in_flight(d), 1)
+        STAFF.append("4" * 64)
+        self.addCleanup(STAFF.pop)
+        self.answer(platform_answer())
         self.a.refresh_audience(d)
         self.assertEqual(applied, [d.name])
+        (self.home / "turn.txt").unlink()
+        (self.home / "finish.txt").write_text("")
+
+    def test_an_idle_agent_restarts_on_a_changed_list_at_once(self):
+        self.answer(platform_answer())
+        d = self.make_agent()
+        self.started(d)
+        before = self.a.running(d)
+        self.a.defer_apply = lambda agent: self.fail("an idle agent does not wait for a turn")
+        STAFF.append("5" * 64)
+        self.addCleanup(STAFF.pop)
+        self.answer(platform_answer())
+        (d / "work" / "env.json").unlink()
+        self.a.refresh_audience(d)
+        env = self.wait_env(d)
+        self.assertIn("5" * 64, env["BUZZ_ACP_RESPOND_TO_ALLOWLIST"])
+        self.assertNotEqual(self.a.running(d), before, "restarted")
+
+    def test_a_kept_platform_list_outranks_the_machine_staff_list(self):
+        self.a.STAFF_FILE.write_text(json.dumps({"staff": [{"name": "Pat", "pubkey": "9" * 64}]}))
+        self.answer(platform_answer())
+        d = self.make_agent()
+        self.started(d)
+        self.answer({"ok": False, "kind": "missing", "detail": "Tool get_buzz_audience not found"})
+        state = self.a.refresh_audience(d, restart=False)
+        self.assertEqual((state["source"], self.a.audience_keys(self.a.read_settings(d), state["entries"])), ("platform", sorted(STAFF)))
 
     def test_the_supervisor_asks_again_about_every_ten_minutes_out_of_band(self):
         self.answer(platform_answer())

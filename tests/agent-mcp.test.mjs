@@ -342,10 +342,8 @@ test("--call: a server without the tool answers missing, through call_tool too",
   const fake = await startFakeMcp({ linked: new Set([id.owner]) }); // lists call_tool, has no get_buzz_audience
   t.after(fake.close);
   assert.deepEqual(await callOnce(envFor(id, fake.url)), { ok: false, kind: "missing", detail: "Black 4 has no get_buzz_audience tool for this agent." });
-  // A second fake: the same body in the same second is a replay to the first.
-  const other = await startFakeMcp({ linked: new Set([id.owner]) });
-  t.after(other.close);
-  const trimmed = await callOnce(envFor(id, other.url, { BLACK4_MCP_TOOLS: "core" }));
+  // The same agent again within the same second: fresh ids, so no replay.
+  const trimmed = await callOnce(envFor(id, fake.url, { BLACK4_MCP_TOOLS: "core" }));
   assert.equal(trimmed.kind, "missing");
 });
 

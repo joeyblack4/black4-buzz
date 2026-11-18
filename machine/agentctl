@@ -1601,7 +1601,9 @@ def refresh_audience(d, restart=True):
         state = audience_state(d)
         status, entries, detail = ask_audience(d, s)
         now = time.time()
-        if status == "missing" and staff_list():
+        # The static staff list stands in only while Platform Control has never
+        # answered this agent: a kept Platform list outranks it.
+        if status == "missing" and staff_list() and state.get("source") != "platform":
             entries, detail, source = [{"pubkey": k, "kind": "staff"} for k in staff_list()], None, "machine"
             status = "ok"
         else:
@@ -1617,8 +1619,12 @@ def refresh_audience(d, restart=True):
     if restart and running(d) and not applying(d):
         launched = read_json(d / "launch.json") or {}
         if isinstance(launched, dict) and launched.get("audience") != audience_launch(s, state)["fingerprint"]:
-            log_line("supervisor", f"audience of {d.name[:8]} changed; restarting it after its turn")
-            defer_apply(d)
+            # Idle: at once (a revoked key stops at once). Mid-turn: after it.
+            if turns_in_flight(d) == 0:
+                log_line("supervisor", f"audience of {d.name[:8]} changed; restarted it: pid {start(d)}")
+            else:
+                log_line("supervisor", f"audience of {d.name[:8]} changed; restarting it after its turn")
+                defer_apply(d)
     return state
 
 
@@ -3345,7 +3351,8 @@ def community_url(value):
 #     0.94.0 offers no dontAsk mode, so buzz-acp could not set one.) Checked on
 #     the Commerce Mac, 2026-11-17, through claude-agent-acp as buzz-acp
 #     drives it: with the deny rules, Bash, Read, Write, Glob and Agent were
-#     not offered; with the hook alone, each was refused by it.
+#     not offered; with the hook alone, each was refused by it; an @path in a
+#     message reached no file.
 #   - its audience is one business (respondTo "business").
 #   - it lives on a runner of its own, run by a separate macOS user with its
 #     own workforce root (runner.json {"profile": "platform"}), so even a
@@ -3362,7 +3369,8 @@ PLATFORM_DENY = ("Bash", "BashOutput", "KillBash", "KillShell", "PowerShell", "R
                  "NotebookEdit", "NotebookRead", "Glob", "Grep", "LS", "LSP", "WebSearch", "Task", "Agent", "Workflow",
                  "TaskCreate", "TaskUpdate", "TaskOutput", "TaskStop", "SendMessage", "Skill", "SlashCommand", "Monitor",
                  "CronCreate", "CronDelete", "ScheduleWakeup", "RemoteTrigger", "EnterWorktree", "ExitWorktree",
-                 "EnterPlanMode", "ExitPlanMode", "TodoWrite", "ListMcpResourcesTool", "ReadMcpResourceTool", "mcp__acp")
+                 "EnterPlanMode", "ExitPlanMode", "TodoWrite", "ListMcpResourcesTool", "ReadMcpResourceTool", "ListAgents",
+                 "ReportFindings", "AskUserQuestion", "mcp__acp")
 # Customers talk only to customer-facing agents: a full-access agent never
 # answers a business.
 BUSINESS_NEEDS_PLATFORM = ("An agent that answers a business is customer-facing: it is made as one (access platform), "

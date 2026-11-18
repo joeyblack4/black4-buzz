@@ -323,7 +323,7 @@ test("end to end: a fixture-signed list runs the real agentctl as the email call
   assert.equal(listed.json.agents[0].createdBy, "annabelle@black4.ai");
   const remove = JSON.stringify({ op: "remove", pubkey: made.json.pubkey });
   const other = await d.post(remove, auth(pass(remove, { claims: { email: "sam@black4.ai" } })));
-  assert.match(other.json.error, /belongs to annabelle@black4.ai/);
+  assert.match(other.json.error, /Only they or a Black 4 admin can remove it/);
   assert.equal((await d.post(remove, auth(pass(remove)))).json.ok, true);
 });
 

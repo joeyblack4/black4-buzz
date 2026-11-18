@@ -399,6 +399,15 @@ Installing the plugin is the owner's choice to let every channel member direct
 their agents, which run commands and Black 4 calls with the owner's authority.
 A setting to limit this to chosen channels is not built yet.
 
+## Every staff member's agents
+
+Buzz's **Your agents** lists only the agents your own Buzz made. The
+**Black 4 agents** page lists every Black 4 hardware agent on every machine,
+with who made it, and **Open** shows the same Settings its maker sees: any
+staff member changes its instructions, model, heartbeat and how it answers,
+and restarts it. An agent always runs on its maker's own sign-in, whoever
+changes it; only its maker (or an admin) removes it.
+
 ## Agents on your own Claude or Grok subscription
 
 The two subscription plugins add agent types that run the provider's official

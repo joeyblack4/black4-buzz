@@ -173,7 +173,8 @@ function reviewScreens(React, store, bridge) {
           row("After", brief.after),
           row("Success looks like", brief.successMeasure),
           row("Evidence", brief.baselineSource ? `${brief.baselineSource}${brief.baselineObservedAt ? ` · ${brief.baselineObservedAt}` : ""}` : ""),
-          row("Made by", item.madeBy ?? review.madeBy),
+          // The byline already names the maker when Black 4 sends `producer`.
+          row("Made by", item.producer ?? review.producer ? "" : reviewMadeBy(item.madeBy ?? review.madeBy)),
           row("Asked by", item.requestedBy),
           row("Job", origin.jobName || origin.jobId),
           row("Goal", goals.map((goal) => goal.title).join(" · ")),
@@ -235,7 +236,8 @@ function reviewScreens(React, store, bridge) {
     }
     const card = item.card ?? {};
     return h(DecisionBar, { status: h(Stack, { gap: 2 },
-        h(QuietLine, { glyph: STAKE_GLYPH[card.stake?.kind] ?? null }, card.stake?.text || (card.facts ?? []).join(" · ") || review.businessName),
+        // No stake and no facts: no line (the header already names the business).
+        card.stake?.text || card.facts?.length ? h(QuietLine, { glyph: STAKE_GLYPH[card.stake?.kind] ?? null }, card.stake?.text || card.facts.join(" · ")) : null,
         item.action ? ui.Permits(item.action) : null) },
       h(Button, { key: "approve", variant: "prominent", autoFocus, "aria-keyshortcuts": "A", onClick: () => store.propose({ review, item, verdict: "approved" }) }, "Approve"),
       h(Button, { key: "changes", variant: "outline", "aria-keyshortcuts": "C", onClick: () => setCompose("changes_requested") }, "Ask for changes"),

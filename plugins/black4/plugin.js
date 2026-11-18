@@ -2834,12 +2834,14 @@ function buzzUi(React, { nativeSelect = false } = {}) {
   };
 
   /** The bar fixed under a panel's body (Activity's toolbar border, at the
-   * bottom): a `status` line, then the actions. `stacked`: a field above. */
+   * bottom): a `status` line, then the actions. `stacked`: a field above.
+   * A long status wraps in full and scrolls past a third of the window, so
+   * the actions stay on screen. */
   const DecisionBar = ({ status, stacked = false, children }) =>
     h("div", { "data-buzz-ui": "", role: "group", "aria-label": "Decision", style: { flex: "0 0 auto", display: "flex", flexDirection: stacked ? "column" : "row", flexWrap: "wrap",
         alignItems: stacked ? "stretch" : "center", justifyContent: "space-between", gap: "var(--space-2) var(--space-3)",
         padding: "var(--space-3) var(--space-panel-inset)", borderTop: "1px solid var(--border-standard)", background: "var(--surface-panel)" } },
-      status ? h("div", { "aria-live": "polite", style: { minWidth: 0, flex: stacked ? undefined : "1 1 12rem" } }, status) : null,
+      status ? h("div", { "aria-live": "polite", style: { minWidth: 0, flex: stacked ? undefined : "1 1 12rem", maxBlockSize: "min(16rem, 34vh)", overflowY: "auto" } }, status) : null,
       ...(children == null ? [] : [stacked ? h("div", { key: "actions", className: "grid gap-2" }, ...each(children))
         : h("div", { key: "actions", className: "flex flex-wrap items-center gap-2" }, ...each(children))]));
 
@@ -2951,18 +2953,19 @@ function buzzUi(React, { nativeSelect = false } = {}) {
   const CanvasImage = ({ src, alt }) => src
     ? h("img", { src, alt, style: { display: "block", maxWidth: "100%", maxHeight: "100%", objectFit: "contain", margin: "auto" } })
     : h("div", { role: "img", "aria-label": `${alt} loading`, "aria-busy": true, style: { flex: 1, background: "var(--surface-inset)" } });
-  /** A quiet line of short values (the stake, the facts), one line, cut short. */
+  /** A quiet line of short values (the stake, the facts), wrapped in full:
+   * the mark stays beside its first line. */
   const QuietLine = ({ glyph, children }) =>
-    h("p", { className: "m-0 text-caption text-subtle", style: { display: "flex", gap: "var(--space-1)", alignItems: "center", minWidth: 0 } },
-      glyph && ICON[glyph] ? icon(ICON[glyph], 12, { style: { flex: "none" } }) : null,
-      h("span", { style: { minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, children));
-  /** What approving permits, in two lines at most (the whole on hover). */
-  const Permits = (text) => h("p", { className: "m-0 text-body-sm text-standard", title: text, style: { display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" } }, text);
+    h("p", { className: "m-0 text-caption text-subtle", style: { display: "flex", gap: "var(--space-1)", alignItems: "baseline", minWidth: 0 } },
+      glyph && ICON[glyph] ? icon(ICON[glyph], 12, { style: { flex: "none", alignSelf: "flex-start", marginBlockStart: "0.125rem" } }) : null,
+      h("span", { style: { minWidth: 0, overflowWrap: "anywhere" } }, children));
+  /** What approving permits, in full. */
+  const Permits = (text) => h("p", { className: "m-0 text-body-sm text-standard", style: { overflowWrap: "anywhere" } }, text);
   /** One review item's column: its heading, the canvas taking the rest, then details. */
   const Article = ({ label, children }) =>
     h("article", { "aria-label": label, style: { display: "flex", flexDirection: "column", gap: "var(--space-3)", flex: "1 0 auto", minHeight: "100%" } }, ...each(children));
-  /** The question, one or two lines, the heading of the item. */
-  const Question = (text) => h("h2", { className: "m-0 text-label", style: { display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden", overflowWrap: "anywhere" } }, text);
+  /** The question, in full, the heading of the item. */
+  const Question = (text) => h("h2", { className: "m-0 text-label", style: { overflowWrap: "anywhere" } }, text);
 
   /** The finished work as a page, in Diffs' card (`.preview`: a bounded,
    * scrolling frame) with an embedded view inside. */
@@ -3569,6 +3572,13 @@ function reviewOrigin(review, item) {
   return Object.fromEntries(Object.entries(out).filter(([, value]) => value));
 }
 
+/** `madeBy` as words: the agent key Platform Control appends
+ * (" [nostr:<hex>]") is left out; the key is shown as the agent's profile. */
+function reviewMadeBy(value) {
+  if (typeof value !== "string") return undefined;
+  return plain(value.replace(/\s*\[nostr:[0-9a-f]{64}\]\s*$/i, ""), 160) || undefined;
+}
+
 /** Who made a review item and what set it off, for its byline:
  * `{ maker: { name, pubkey?, signed, app?, person?, personVerified, agent },
  * origin: { kind: job | request | proactive | unknown, text, threadId? } }`.
@@ -3590,12 +3600,14 @@ function reviewByline(review, item) {
     const verified = producer.verified ?? {};
     const pubkey = verified.agentKey === true ? key(producer.agentKey) : undefined;
     const model = text(producer.model, 60);
-    const app = text(producer.app, 60);
-    maker = { name: text(producer.agent, 80) ?? text(item?.madeBy ?? review?.madeBy, 160) ?? "An agent", agent: true, signed: !!pubkey,
+    // "agent" is Platform Control's word for a signed agent whose app it
+    // could not name (black4McpHarness), not a harness: it is left out.
+    const app = text(producer.app, 60)?.replace(/^agent$/i, "") || undefined;
+    maker = { name: text(producer.agent, 80) ?? reviewMadeBy(item?.madeBy ?? review?.madeBy) ?? "An agent", agent: true, signed: !!pubkey,
       ...(pubkey ? { pubkey } : {}),
       ...(model || app ? { app: model && app ? `${model} via ${app}` : model ?? app } : {}),
       ...(text(producer.person, 120) ? { person: text(producer.person, 120), personVerified: verified.person === true } : {}) };
-  } else maker = { name: text(item?.madeBy ?? review?.madeBy, 160) ?? "Unknown maker", agent: false, signed: false };
+  } else maker = { name: reviewMadeBy(item?.madeBy ?? review?.madeBy) ?? "Unknown maker", agent: false, signed: false };
   let origin;
   const kind = said && typeof said === "object" ? said.kind : undefined;
   if (kind === "job" || (!kind && job && (job.jobName || job.jobId))) {
@@ -4259,7 +4271,8 @@ function reviewScreens(React, store, bridge) {
           row("After", brief.after),
           row("Success looks like", brief.successMeasure),
           row("Evidence", brief.baselineSource ? `${brief.baselineSource}${brief.baselineObservedAt ? ` · ${brief.baselineObservedAt}` : ""}` : ""),
-          row("Made by", item.madeBy ?? review.madeBy),
+          // The byline already names the maker when Black 4 sends `producer`.
+          row("Made by", item.producer ?? review.producer ? "" : reviewMadeBy(item.madeBy ?? review.madeBy)),
           row("Asked by", item.requestedBy),
           row("Job", origin.jobName || origin.jobId),
           row("Goal", goals.map((goal) => goal.title).join(" · ")),
@@ -4321,7 +4334,8 @@ function reviewScreens(React, store, bridge) {
     }
     const card = item.card ?? {};
     return h(DecisionBar, { status: h(Stack, { gap: 2 },
-        h(QuietLine, { glyph: STAKE_GLYPH[card.stake?.kind] ?? null }, card.stake?.text || (card.facts ?? []).join(" · ") || review.businessName),
+        // No stake and no facts: no line (the header already names the business).
+        card.stake?.text || card.facts?.length ? h(QuietLine, { glyph: STAKE_GLYPH[card.stake?.kind] ?? null }, card.stake?.text || card.facts.join(" · ")) : null,
         item.action ? ui.Permits(item.action) : null) },
       h(Button, { key: "approve", variant: "prominent", autoFocus, "aria-keyshortcuts": "A", onClick: () => store.propose({ review, item, verdict: "approved" }) }, "Approve"),
       h(Button, { key: "changes", variant: "outline", "aria-keyshortcuts": "C", onClick: () => setCompose("changes_requested") }, "Ask for changes"),

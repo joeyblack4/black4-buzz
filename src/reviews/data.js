@@ -171,6 +171,13 @@ function reviewOrigin(review, item) {
   return Object.fromEntries(Object.entries(out).filter(([, value]) => value));
 }
 
+/** `madeBy` as words: the agent key Platform Control appends
+ * (" [nostr:<hex>]") is left out; the key is shown as the agent's profile. */
+function reviewMadeBy(value) {
+  if (typeof value !== "string") return undefined;
+  return plain(value.replace(/\s*\[nostr:[0-9a-f]{64}\]\s*$/i, ""), 160) || undefined;
+}
+
 /** Who made a review item and what set it off, for its byline:
  * `{ maker: { name, pubkey?, signed, app?, person?, personVerified, agent },
  * origin: { kind: job | request | proactive | unknown, text, threadId? } }`.
@@ -192,12 +199,14 @@ function reviewByline(review, item) {
     const verified = producer.verified ?? {};
     const pubkey = verified.agentKey === true ? key(producer.agentKey) : undefined;
     const model = text(producer.model, 60);
-    const app = text(producer.app, 60);
-    maker = { name: text(producer.agent, 80) ?? text(item?.madeBy ?? review?.madeBy, 160) ?? "An agent", agent: true, signed: !!pubkey,
+    // "agent" is Platform Control's word for a signed agent whose app it
+    // could not name (black4McpHarness), not a harness: it is left out.
+    const app = text(producer.app, 60)?.replace(/^agent$/i, "") || undefined;
+    maker = { name: text(producer.agent, 80) ?? reviewMadeBy(item?.madeBy ?? review?.madeBy) ?? "An agent", agent: true, signed: !!pubkey,
       ...(pubkey ? { pubkey } : {}),
       ...(model || app ? { app: model && app ? `${model} via ${app}` : model ?? app } : {}),
       ...(text(producer.person, 120) ? { person: text(producer.person, 120), personVerified: verified.person === true } : {}) };
-  } else maker = { name: text(item?.madeBy ?? review?.madeBy, 160) ?? "Unknown maker", agent: false, signed: false };
+  } else maker = { name: reviewMadeBy(item?.madeBy ?? review?.madeBy) ?? "Unknown maker", agent: false, signed: false };
   let origin;
   const kind = said && typeof said === "object" ? said.kind : undefined;
   if (kind === "job" || (!kind && job && (job.jobName || job.jobId))) {

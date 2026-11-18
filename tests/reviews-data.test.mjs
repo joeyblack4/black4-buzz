@@ -228,6 +228,20 @@ test("the byline: who made it and what set it off; a signed agent only when Blac
   assert.deepEqual(reviewByline(null, { producer: { agent: null, verified: {} }, origin: { kind: "request", requestedBy: "Sam", threadId: "t9" } }).origin, { kind: "request", text: "Asked by Sam", threadId: "t9" });
 });
 
+test("the byline names no app Black 4 could not name: its placeholder \"agent\" is left out, never guessed", async () => {
+  const { reviewByline } = await freshPlugin();
+  const key = "cd".repeat(32);
+  const producer = (app, model = "gpt-6") => ({ agent: "Wren", agentKey: key, model, effort: null, app, person: "ops@example.test", verified: { person: true, agentKey: true } });
+  assert.equal(reviewByline(null, { producer: producer("agent") }).maker.app, "gpt-6", "the model alone, without \"via agent\"");
+  assert.equal(reviewByline(null, { producer: producer(" Agent ") }).maker.app, "gpt-6");
+  assert.equal("app" in reviewByline(null, { producer: producer("agent", null) }).maker, false, "nothing at all when only the placeholder is sent");
+  assert.equal(reviewByline(null, { producer: producer("Codex") }).maker.app, "gpt-6 via Codex", "a real app is still named");
+  assert.equal(reviewByline(null, { producer: producer("agent-runner") }).maker.app, "gpt-6 via agent-runner", "only the exact placeholder is dropped");
+  // madeBy, when it is all there is: the appended agent key is not part of the name.
+  assert.equal(reviewByline(null, { madeBy: `gpt-6 · Wren via agent [nostr:${key}]` }).maker.name, "gpt-6 · Wren via agent");
+  assert.equal(reviewByline(null, { madeBy: `[nostr:${key}]`, producer: producer("agent") }).maker.name, "Wren");
+});
+
 test("too many at once (HTTP 429): the same call is sent again with the same token, and saves once", async () => {
   let refusals = 1;
   const { store, calls, advance } = data({ decide_review_item: (args) => refusals-- > 0

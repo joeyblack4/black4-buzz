@@ -264,3 +264,20 @@ test("captures: the page's picture (and its before) from _meta, through get_revi
   assert.equal(store.queuePicture(entry), CAPTURE);
   assert.equal(store.queuePicture({ businessId: "b", assetId: "a" }), null, "an older queue sends none");
 });
+
+test("the queue's captures come from _meta by assetId, onto the review they picture, for the plugin's own screens", async () => {
+  const { reviewQueueOf } = await freshPlugin();
+  const link = { url: "https://content.example.test/v/g/_captures/menu.jpg", expiresAt: "2099-01-01T00:00:00Z", contentType: "image/jpeg" };
+  const result = tool(QUEUE, { captures: { rv_bakery: { desktop: link }, rv_unknown: { desktop: link } } });
+  const queue = reviewQueueOf(result);
+  assert.deepEqual(queue.reviews.find((review) => review.assetId === "rv_bakery").capture, { desktop: link });
+  assert.equal(queue.reviews.find((review) => review.assetId === "rv_surf").capture, undefined, "no capture yet: none");
+  assert.equal(QUEUE.reviews[0].capture, undefined, "the answer itself is not changed");
+  assert.deepEqual(reviewQueueOf(tool(QUEUE)), QUEUE, "an older server: the queue as it was");
+  assert.deepEqual(reviewQueueOf(tool(QUEUE, { captures: { rv_bakery: { desktop: { url: "javascript:alert(1)" } } } })).reviews[0].capture, undefined, "only https links");
+  // Read by the store, it reaches queue rows.
+  const { store } = data({ review_queue: () => result });
+  await store.readQueue();
+  const entry = reviewOrder(store.queue).find((candidate) => candidate.assetId === "rv_bakery");
+  assert.deepEqual(entry.capture, { desktop: link });
+});

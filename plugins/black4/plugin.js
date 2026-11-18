@@ -813,7 +813,7 @@ export function apply(ctx) {
     try {
       const result = await flight;
       // { data: queue } today; older servers answered the queue bare.
-      if (!result?.isError) { const value = readAnswer(result); queue = value?.data && !value.kind ? value.data : value; }
+      if (!result?.isError) queue = reviewQueueOf(result);
     } catch {}
     if (queueFlight === flight) queueFlight = null;
     if (attempt !== generation || stopped || state.status !== "connected") return;
@@ -1362,7 +1362,7 @@ export function apply(ctx) {
       const result = await request("tools/call", { name, arguments: args }, { timeoutMs });
       // A queue the person just read is the freshest count the badge can show.
       if (name === "review_queue" && attempt === generation && state.status === "connected" && !result?.isError) {
-        try { const value = readAnswer(result); noteQueue(value?.data && !value.kind ? value.data : value); } catch {}
+        try { noteQueue(reviewQueueOf(result)); } catch {}
       }
       return result;
     },
@@ -3452,6 +3452,21 @@ function reviewLink({ assetId, businessId, itemKey, version } = {}) {
 const reviewItemId = (businessId, assetId, key) => `${businessId}/${assetId}/${key}`;
 const reviewAssetKey = (businessId, assetId) => `${businessId}/${assetId}`;
 
+/** review_queue's answer as the plugin's own screens read it: its data, and
+ * each review's capture (the desktop picture of the page its first listed item
+ * opens on) from `_meta["ai.black4/review-card"].captures[assetId]`, which the
+ * server keeps out of what a model reads. Never handed to an agent. */
+function reviewQueueOf(result) {
+  const value = readAnswer(result);
+  const queue = value?.data && !value.kind ? value.data : value;
+  const captures = result?._meta?.[REVIEW_CARD_META]?.captures;
+  if (queue?.kind !== "black4_review_queue" || !captures || typeof captures !== "object") return queue;
+  return { ...queue, reviews: (queue.reviews ?? []).map((review) => {
+    const link = captures[review.assetId]?.desktop;
+    return typeof link?.url === "string" && /^https:\/\//.test(link.url) ? { ...review, capture: { desktop: link } } : review;
+  }) };
+}
+
 /** Everything waiting, in queue order, one entry per item: what next and
  * previous step through. Approved work that is blocked or stalled is not here. */
 function reviewOrder(queue) {
@@ -3613,7 +3628,7 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
   };
   const readQueue = () => queueFlight ??= (async () => {
     try {
-      const { data } = answer(await call("review_queue", {}));
+      const data = reviewQueueOf(await call("review_queue", {}));
       if (data?.kind !== "black4_review_queue") throw new Error("Black 4 answered with something Reviews cannot show.");
       noteQueue(data);
       return data;
@@ -4791,7 +4806,7 @@ function reviewsSlot(ctx, bridge) {
   };
 }
 // ---- end reviews ----
-export { reviewByline, reviewLocator, reviewLink, reviewOrder, reviewGroups, reviewState, reviewData, wordDiff, reviewsPart, reviewsSlot, REVIEW_UNDO_MS };
+export { reviewByline, reviewQueueOf, reviewLocator, reviewLink, reviewOrder, reviewGroups, reviewState, reviewData, wordDiff, reviewsPart, reviewsSlot, REVIEW_UNDO_MS };
 
 /** buzz-acp's own conversation levers, by the names the machine lists them
  * under (`controls` in its models reply: the bounds or values of each, and

@@ -55,6 +55,21 @@ function reviewLink({ assetId, businessId, itemKey, version } = {}) {
 const reviewItemId = (businessId, assetId, key) => `${businessId}/${assetId}/${key}`;
 const reviewAssetKey = (businessId, assetId) => `${businessId}/${assetId}`;
 
+/** review_queue's answer as the plugin's own screens read it: its data, and
+ * each review's capture (the desktop picture of the page its first listed item
+ * opens on) from `_meta["ai.black4/review-card"].captures[assetId]`, which the
+ * server keeps out of what a model reads. Never handed to an agent. */
+function reviewQueueOf(result) {
+  const value = readAnswer(result);
+  const queue = value?.data && !value.kind ? value.data : value;
+  const captures = result?._meta?.[REVIEW_CARD_META]?.captures;
+  if (queue?.kind !== "black4_review_queue" || !captures || typeof captures !== "object") return queue;
+  return { ...queue, reviews: (queue.reviews ?? []).map((review) => {
+    const link = captures[review.assetId]?.desktop;
+    return typeof link?.url === "string" && /^https:\/\//.test(link.url) ? { ...review, capture: { desktop: link } } : review;
+  }) };
+}
+
 /** Everything waiting, in queue order, one entry per item: what next and
  * previous step through. Approved work that is blocked or stalled is not here. */
 function reviewOrder(queue) {
@@ -216,7 +231,7 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
   };
   const readQueue = () => queueFlight ??= (async () => {
     try {
-      const { data } = answer(await call("review_queue", {}));
+      const data = reviewQueueOf(await call("review_queue", {}));
       if (data?.kind !== "black4_review_queue") throw new Error("Black 4 answered with something Reviews cannot show.");
       noteQueue(data);
       return data;

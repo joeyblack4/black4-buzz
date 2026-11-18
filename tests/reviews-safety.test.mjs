@@ -112,3 +112,19 @@ test("a review an agent raises points back to its conversation: start_review def
   assert.equal(args[3].arguments.threadId, "root-9", "through call_tool too");
   assert.equal("threadId" in args[4], false, "outside a conversation, nothing is added");
 });
+
+test("the queue's _meta (its capture links) never reaches an agent, directly or through call_tool", async (t) => {
+  const queue = { kind: "black4_review_queue", total: 1, reviews: [{ businessId: "business-sample", assetId: "rv_sample", title: "Menu", items: [] }] };
+  const body = { result: {
+    _meta: { "ai.black4/review-card": { captures: { rv_sample: { desktop: { url: "https://content.example.test/v/grant-queue-secret/c.jpg", contentType: "image/jpeg" } } } } },
+    structuredContent: { data: queue }, content: [{ type: "text", text: JSON.stringify({ data: queue }) }],
+  } };
+  const app = await harness(t, { tools: [listed("review_queue"), listed("call_tool")], answer: () => body });
+  for (const text of [
+    await app.registered.get("black4_review_queue").call({ key: "agent" }, {}, {}),
+    await app.registered.get("black4_call_tool").call({ key: "agent" }, {}, { name: "review_queue", arguments: {} }),
+  ]) {
+    assert.doesNotMatch(text, /grant-queue-secret|captures|_meta|ai\.black4\/review-card/);
+    assert.match(text, /rv_sample/, "the queue itself still reads");
+  }
+});

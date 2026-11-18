@@ -2932,7 +2932,8 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
   // The screens are drawn in Buzz's own primitives (buzzUi), laid out as
   // Buzz's Settings: a title, a rounded card of rows, each row a label and a
   // muted line on the left and its control on the right.
-  const { SectionTitle, Group, Row, Button, Input, SwitchRow, Pill, TextField, Stack, Actions, ErrorLine, Spinner, Status, Value, Alert, Code } = buzzUi(React, { nativeSelect: NATIVE_SELECT });
+  const { SectionTitle, Group, Row, Button, Input, SwitchRow, Pill, TextField, Stack, Actions, ErrorLine, Spinner, Status, Value, Alert, Code,
+    Page, PanelHeader, IconButton, EmptyState, Failure } = buzzUi(React, { nativeSelect: NATIVE_SELECT });
   // An unsaved edit per agent, kept across Buzz mounting the Identity and
   // Settings tabs apart (each tab mounts the component anew).
   const drafts = new Map();
@@ -3362,13 +3363,14 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
   };
 
   /** Every Black 4 hardware agent on every machine, for every staff member:
-   * Buzz lists only the agents this Buzz made, so this page shows the rest
-   * and opens the same Settings for any of them. */
+   * Buzz lists only the agents this Buzz made, so this dock page shows them
+   * all and opens the same Settings for any of them. */
   const AllAgents = () => {
     const { signedOut, reachable, epoch } = useBlack4();
     const [rows, setRows] = React.useState({ loading: true, machines: [] });
     const [open, setOpen] = React.useState(null);
     const [revision, setRevision] = React.useState(0);
+    const refresh = () => setRevision((value) => value + 1);
     React.useEffect(() => {
       if (!reachable || !ask) return undefined;
       let live = true;
@@ -3384,22 +3386,25 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
       return () => { live = false; };
     }, [reachable, epoch, revision]);
 
-    if (signedOut && SignInPrompt) return h(SignInPrompt, null);
-    if (open) return h(Stack, null,
-      h(Actions, null, h(Button, { onClick: () => { setOpen(null); setRevision((value) => value + 1); } }, "All agents")),
-      h(SectionTitle, { title: open.name || "Agent" }),
+    const page = (header, ...body) => h(Page, { label: "Black 4 agents", header }, ...body);
+    if (signedOut && SignInPrompt) return page(h(PanelHeader, { title: "Black 4 agents" }), h(SignInPrompt, null));
+    if (open) return page(
+      h(PanelHeader, { title: open.name || open.pubkey.slice(0, 8),
+        navigation: h(IconButton, { label: "All agents", glyph: "back", large: true, onClick: () => { setOpen(null); refresh(); } }) }),
       h(GuardedSettings, { key: open.pubkey, agent: { pubkey: open.pubkey } }));
-    if (rows.loading && !rows.machines.length) return Status("Loading agents…");
-    return h(Stack, null, ...rows.machines.map(({ machine, agents, error }) => h("div", { key: machine.id },
+    const header = h(PanelHeader, { title: "Black 4 agents",
+      actions: h(IconButton, { label: "Refresh", glyph: "refresh", large: true, disabled: rows.loading, onClick: refresh }) });
+    if (rows.loading && !rows.machines.length) return page(header, Status("Loading agents…"));
+    return page(header, ...rows.machines.map(({ machine, agents, error }) => h(Stack, { key: machine.id, gap: 2 },
       h(SectionTitle, { title: machine.label }),
-      error ? ErrorLine(error)
-        : h(Group, null, ...(agents.length ? agents : [null]).map((row) => row
-          ? h(Row, { key: row.pubkey, title: row.name || row.pubkey.slice(0, 8),
-              description: [harnessLabel(row.harness) ?? row.harness, row.createdBy ? `Made by ${row.createdBy}` : null].filter(Boolean).join(" · "),
-              trailing: h(React.Fragment, null,
-                Value(row.running ? "Running" : row.activated ? "Stopped" : "Not set up"),
-                h(Button, { size: "sm", onClick: () => setOpen(row) }, "Open")) })
-          : h(Row, { key: "none", title: "No agents yet" }))))));
+      error ? h(Failure, { message: error, retry: refresh })
+        : agents.length ? h(Group, null, ...agents.map((row) =>
+          h(Row, { key: row.pubkey, title: row.name || row.pubkey.slice(0, 8),
+            description: [harnessLabel(row.harness) ?? row.harness, row.createdBy ? `Made by ${row.createdBy}` : null].filter(Boolean).join(" · "),
+            trailing: h(React.Fragment, null,
+              Value(row.running ? "Running" : row.activated ? "Stopped" : "Not set up"),
+              h(Button, { size: "sm", onClick: () => setOpen(row) }, "Open")) })))
+        : h(EmptyState, { title: "No agents yet", description: "Agents made on this machine show here." }))));
   };
 
   // A component that throws shows one sentence in its place and is reported,
@@ -3432,7 +3437,8 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
     remote,
   });
 
-  ctx.pages?.register?.({ id: "black4-agents", title: "Black 4 agents", component: guarded(AllAgents, "agents") });
+  // Primary in the dock: Buzz lists a plugin page only when it is primary.
+  ctx.pages?.register?.({ id: "black4-agents", title: "Black 4 agents", primary: true, placement: "dock", layout: "workspace", component: guarded(AllAgents, "agents") });
 }
 
 /** Offers the hardware type and takes it back. Buzz has no call to remove a

@@ -53,6 +53,10 @@ afterAll(async () => {
   await Promise.resolve(services.dispose()).catch(() => {});
 });
 
+const until = async (done: () => boolean, ms = 10_000) => {
+  const deadline = Date.now() + ms;
+  while (!done() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+};
 const ACTIVE = 2; // cordis FiberState.active, as src/plugins/runtime.ts names it
 const FAILED = 3;
 
@@ -66,6 +70,9 @@ for (const plugin of plugins as { id: string; title: string; file: string }[]) {
     fibers.push(fiber);
     const deadline = Date.now() + 10_000;
     while (fiber.state !== ACTIVE && fiber.state !== FAILED && Date.now() < deadline) await new Promise((done) => setTimeout(done, 20));
+    // Parts started in their own child scope (Black 4's Reviews) register a moment later.
+    const pages = () => registered.filter((entry) => entry.plugin === plugin.id && (entry.kind === "page" || entry.kind === "panel")).length;
+    if (fiber.state === ACTIVE && typeof module.reviewsSlot === "function") await until(() => pages() >= 2, 5_000);
     current = "";
     if (fiber.state === FAILED) {
       const reason = await fiber.await().then(() => "unknown", (error: unknown) => String((error as Error)?.message ?? error));
@@ -77,10 +84,6 @@ for (const plugin of plugins as { id: string; title: string; file: string }[]) {
 }
 
 const owner = (id: string) => Object.freeze({ id, revision: "canary", agentHooks: [], agentExecution: [] });
-const until = async (done: () => boolean, ms = 10_000) => {
-  const deadline = Date.now() + ms;
-  while (!done() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
-};
 const hardwarePlugins: { id: string; title: string; module: any }[] = [];
 for (const plugin of plugins as { id: string; title: string; file: string }[]) {
   const module = await import(/* @vite-ignore */ `./${plugin.file}`);
@@ -127,7 +130,7 @@ for (const { id, title, module } of hardwarePlugins) {
       },
     });
     fibers.push(fiber);
-    await until(() => (fiber.state === ACTIVE && errors.length > 0) || fiber.state === FAILED);
+    await until(() => (fiber.state === ACTIVE && errors.length > 0 && registered.filter((entry) => entry.plugin === name && entry.kind === "panel").length > 0) || fiber.state === FAILED);
     refuseHardware = false;
     current = "";
     expect(fiber.state, "the plugin stays active").toBe(ACTIVE);

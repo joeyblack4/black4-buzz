@@ -2299,7 +2299,13 @@ function buzzUi(React, { nativeSelect = false } = {}) {
     refresh: ["M20 11a8.1 8.1 0 0 0 -15.5 -2m-.5 -4v4h4", "M4 13a8.1 8.1 0 0 0 15.5 2m.5 4v-4h-4"],
     decisions: ["M3.5 5.5l1.5 1.5l2.5 -2.5", "M3.5 11.5l1.5 1.5l2.5 -2.5", "M3.5 17.5l1.5 1.5l2.5 -2.5", "M11 6l9 0", "M11 12l9 0", "M11 18l9 0"],
     inbox: ["M4 6a2 2 0 0 1 2 -2h12a2 2 0 0 1 2 2v12a2 2 0 0 1 -2 2h-12a2 2 0 0 1 -2 -2z", "M4 13h3l3 3h4l3 -3h3"],
-    link: ["M9 15l6 -6", "M11 6l.463 -.536a5 5 0 0 1 7.071 7.072l-.534 .464", "M13 18l-.397 .534a5.068 5.068 0 0 1 -7.127 0a4.972 4.972 0 0 1 0 -7.071l.524 -.463"] };
+    link: ["M9 15l6 -6", "M11 6l.463 -.536a5 5 0 0 1 7.071 7.072l-.534 .464", "M13 18l-.397 .534a5.068 5.068 0 0 1 -7.127 0a4.972 4.972 0 0 1 0 -7.071l.524 -.463"],
+    // chevron-up, chevron-down, currency-dollar, users, alert-triangle, minus
+    up: "M6 15l6 -6l6 6", down: "M6 9l6 6l6 -6",
+    money: ["M16.7 8a3 3 0 0 0 -2.7 -2h-4a3 3 0 0 0 0 6h4a3 3 0 0 1 0 6h-4a3 3 0 0 1 -2.7 -2", "M12 3v3m0 12v3"],
+    people: ["M5 7a4 4 0 1 0 8 0a4 4 0 1 0 -8 0", "M3 21v-2a4 4 0 0 1 4 -4h4a4 4 0 0 1 4 4v2", "M16 3.13a4 4 0 0 1 0 7.75", "M21 21v-2a4 4 0 0 0 -3 -3.85"],
+    alert: ["M12 9v4", "M10.363 3.591l-8.106 13.534a1.914 1.914 0 0 0 1.636 2.871h16.214a1.914 1.914 0 0 0 1.636 -2.87l-8.106 -13.536a1.914 1.914 0 0 0 -3.274 0z", "M12 16h.01"],
+    minus: "M5 12l14 0" };
   const h = React.createElement;
   const Fragment = React.Fragment;
   /** The variants each part takes, all ones Buzz styles (kit/uses.json
@@ -2500,12 +2506,12 @@ function buzzUi(React, { nativeSelect = false } = {}) {
 
   /** Field.tsx around Textarea.tsx (AgentInstructions): label, the text, a
    * muted description or the error. */
-  const TextField = ({ label, description, error, optional = false, value, onChange, rows = 8, maxLength, placeholder, disabled }) => {
+  const TextField = ({ label, description, error, optional = false, value, onChange, rows = 8, maxLength, placeholder, disabled, autoFocus, onKeyDown }) => {
     const id = React.useId();
     return h("div", { "data-buzz-ui": "", className: "buzz-field" },
       h("label", { className: "buzz-field-label", htmlFor: id }, label,
         optional ? h(Fragment, null, " ", h("span", { className: "buzz-field-optional" }, "Optional")) : null),
-      h("textarea", { id, rows, maxLength, placeholder, value, disabled,
+      h("textarea", { id, rows, maxLength, placeholder, value, disabled, autoFocus, onKeyDown,
         "data-buzz-ui": "", className: "buzz-textarea", "data-variant": "text", "data-surface": "inset", "data-appearance": "outlined",
         "data-invalid": error ? "" : undefined, "aria-invalid": error ? "true" : undefined,
         onChange: (event) => onChange(event.target.value) }),
@@ -2520,7 +2526,7 @@ function buzzUi(React, { nativeSelect = false } = {}) {
   /** A column of sections, cards or fields. `as: "form"` makes it the form
    * (with `onSubmit`); gap 4 between sections, 2 within a field. */
   const Stack = ({ as = "div", gap, onSubmit, children }) =>
-    h(as, { className: GAPS[one(VARIANTS.Stack.gap, gap)], onSubmit }, ...each(children));
+    h(as, { className: GAPS[one(VARIANTS.Stack.gap, gap)], onSubmit, style: { gridTemplateColumns: "minmax(0, 1fr)" } }, ...each(children));
   /** Builderlab's sign-in column: lines and a button, left-aligned. */
   const Column = ({ gap, children }) =>
     h("div", { "data-buzz-ui": "", className: one(VARIANTS.Column.gap, gap) === 2 ? "flex flex-col items-start gap-2" : "flex flex-col items-start gap-4" }, ...each(children));
@@ -2561,8 +2567,8 @@ function buzzUi(React, { nativeSelect = false } = {}) {
   /** A dock page's surface (Panel.tsx, laid out as Shared notes' page):
    * `header` (a PanelHeader) above a scrolling body. `fill`: the body has no
    * inset (an embedded browser fills it). */
-  const Page = ({ label, header, fill = false, children }) =>
-    h("section", { className: "panel", "data-buzz-surface": "", "data-shape": "panel", "aria-label": label },
+  const Page = ({ label, header, fill = false, onFocus, onBlur, children }) =>
+    h("section", { className: "panel", "data-buzz-surface": "", "data-shape": "panel", "aria-label": label, onFocus, onBlur },
       h("div", { "data-buzz-ui": "", style: { display: "flex", flexDirection: "column", height: "100%", minHeight: 0, containerType: "inline-size" } },
         header ?? null,
         h("div", { style: fill ? { display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }
@@ -2570,8 +2576,11 @@ function buzzUi(React, { nativeSelect = false } = {}) {
           ...each(children))));
 
   /** A drill-in inside a panel (PanelSubview): its bar stays put while the body scrolls. */
-  const Subview = ({ header, children }) =>
-    h("div", { "data-buzz-ui": "", style: { display: "flex", flexDirection: "column", height: "100%", minHeight: 0 } }, header, ...each(children));
+  const Subview = ({ header, footer, children }) =>
+    h("div", { "data-buzz-ui": "", style: { display: "flex", flexDirection: "column", height: "100%", minHeight: 0 } }, header, ...each(children), footer ?? null);
+  /** A panel's whole surface (a Subview's frame), which knows when it has focus. */
+  const Surface = ({ label, onFocus, onBlur, children }) =>
+    h("div", { "data-buzz-ui": "", role: "region", "aria-label": label, onFocus, onBlur, style: { display: "flex", flexDirection: "column", height: "100%", minHeight: 0 } }, ...each(children));
   /** A side panel's body: Buzz leaves the inset to the panel (as GitHub's). */
   const PanelBody = ({ children }) =>
     h("div", { "data-buzz-ui": "", style: { padding: "var(--space-panel-inset)", overflowY: "auto", minHeight: 0, flex: 1, display: "flex", flexDirection: "column", gap: "var(--space-4)", color: "var(--text-standard)" } },
@@ -2688,6 +2697,149 @@ function buzzUi(React, { nativeSelect = false } = {}) {
   const Notice = ({ title, children }) =>
     h("div", { role: "status", className: "notice" }, title ? h("h3", null, title) : null, ...each(children));
 
+  // ---- Reviews: the work, the decision and the list ------------------------------
+
+  /** ValueChip.tsx: a short read-only value (a stake, a fact). `glyph`: an
+   * ICON name for its 12px mark; `emphasis`: the label in the standard weight
+   * (the stake), else the chip's own. */
+  const Chip = ({ label, glyph, title }) =>
+    h("span", { "data-buzz-ui": "", className: "buzz-value-chip" },
+      glyph && ICON[glyph] ? h("span", { className: "buzz-value-chip-icon", "aria-hidden": true }, icon(ICON[glyph], 12)) : null,
+      h("span", { className: "buzz-value-chip-text", title: title ?? (typeof label === "string" ? label : undefined) }, label));
+  /** One of the kit's icons on its own, as Buzz draws a 16px icon (a sidebar section's mark). */
+  const Glyph = ({ name, size = 16 }) => icon(ICON[name] ?? ICON.check, size);
+  /** Chips in a row that wraps. */
+  const ChipRow = ({ children }) => h("div", { className: "flex flex-wrap items-center gap-2", style: { minWidth: 0 } }, ...each(children));
+
+  /** Diffs' card (bundled/diffs, Diffs.module.css `.card`/`.fileHeader`):
+   * the frame around a change. */
+  const card = { minWidth: 0, overflow: "hidden", border: "1px solid var(--border-standard)", borderRadius: "var(--radius-control)", background: "var(--surface-panel)", color: "var(--text-standard)" };
+  const cardHeader = { display: "flex", alignItems: "center", gap: "var(--space-2)", padding: "var(--space-2) var(--space-3)", background: "var(--surface-inset)" };
+  /** Diffs' insert and delete fills (`--diff-code-insert/delete-background-color`):
+   * a tint on the words, never red text (red means broken). */
+  const RUN = { added: { background: "var(--affordance-success)", borderRadius: "var(--space-half)", textDecoration: "none" },
+    removed: { background: "var(--affordance-danger)", borderRadius: "var(--space-half)", textDecoration: "line-through" } };
+  /** A word diff as Diffs draws inserted and deleted code: `runs` of
+   * { kind: same | added | removed, text }, under its `label`. */
+  const DiffText = ({ label, runs }) =>
+    h("figure", { "data-buzz-ui": "", style: { ...card, margin: 0 } },
+      label ? h("figcaption", { className: "text-caption text-subtle", style: cardHeader }, label) : null,
+      h("p", { className: "m-0 text-body", style: { padding: "var(--space-3)", whiteSpace: "pre-wrap", overflowWrap: "anywhere" } },
+        ...runs.map((run, index) => run.kind === "same" ? h(Fragment, { key: index }, run.text)
+          : h(run.kind === "added" ? "ins" : "del", { key: index, style: { ...RUN[run.kind], color: "inherit" } },
+            h("span", { className: "sr-only" }, run.kind === "added" ? "Added: " : "Removed: "), run.text))));
+
+  /** Settings before and after, in Diffs' card: each row its label, Now and
+   * After; a changed row's new value carries the insert tint, an unchanged
+   * row reads once, quietly. */
+  const ChangeTable = ({ rows, now = "Now", after = "After" }) =>
+    h("div", { "data-buzz-ui": "", role: "table", "aria-label": "Changes", style: card },
+      ...rows.map((row, index) => h("div", { key: index, role: "row", style: { display: "grid", gap: "var(--space-1)", padding: "var(--space-3)", borderTop: index ? "1px solid var(--border-standard)" : undefined } },
+        row.label ? h("span", { role: "rowheader", className: "text-caption text-subtle" }, row.label) : null,
+        row.changed
+          ? h(Fragment, null,
+              h("span", { role: "cell", className: "text-body-sm text-subtle", style: { display: "grid", gridTemplateColumns: "3.5rem minmax(0, 1fr)", gap: "var(--space-2)" } },
+                h("span", { className: "text-caption" }, now), h("span", { style: { overflowWrap: "anywhere" } }, row.before || "None")),
+              h("span", { role: "cell", className: "text-body text-standard", style: { display: "grid", gridTemplateColumns: "3.5rem minmax(0, 1fr)", gap: "var(--space-2)" } },
+                h("span", { className: "text-caption text-subtle" }, after), h("span", { style: { overflowWrap: "anywhere" } }, h("mark", { style: { ...RUN.added, color: "inherit" } }, row.after || "None"))))
+          : h("span", { role: "cell", className: "text-body-sm text-subtle", style: { overflowWrap: "anywhere" } }, `Unchanged: ${row.after || row.before || "None"}`))));
+
+  /** Before and after images, side by side in Diffs' card. `before`/`after`:
+   * data URLs; `loading`: the image is still coming. */
+  const MediaPair = ({ before, after, loading = false, label = "The work" }) => {
+    const figure = (src, caption) => h("figure", { key: caption, style: { margin: 0, display: "grid", gap: "var(--space-1)", minWidth: 0 } },
+      src ? h("img", { src, alt: `${label}: ${caption}`, style: { display: "block", width: "100%", height: "auto", borderRadius: "var(--radius-control)", background: "var(--surface-inset)" } })
+        : h("div", { role: "img", "aria-label": `${caption} loading`, style: { aspectRatio: "4 / 3", borderRadius: "var(--radius-control)", background: "var(--surface-inset)" } }),
+      h("figcaption", { className: "text-caption text-subtle" }, caption));
+    return h("div", { "data-buzz-ui": "", "aria-busy": loading || undefined, style: { ...card, display: "grid", gridTemplateColumns: before ? "repeat(2, minmax(0, 1fr))" : "minmax(0, 1fr)", gap: "var(--space-3)", padding: "var(--space-3)" } },
+      before ? figure(before, "Now") : null, figure(loading ? null : after, before ? "After" : "The new version"));
+  };
+
+  /** The bar fixed under a panel's body (Activity's toolbar border, at the
+   * bottom): a `status` line, then the actions. `stacked`: a field above. */
+  const DecisionBar = ({ status, stacked = false, children }) =>
+    h("div", { "data-buzz-ui": "", role: "group", "aria-label": "Decision", style: { flex: "0 0 auto", display: "flex", flexDirection: stacked ? "column" : "row", flexWrap: "wrap",
+        alignItems: stacked ? "stretch" : "center", justifyContent: "space-between", gap: "var(--space-2) var(--space-3)",
+        padding: "var(--space-3) var(--space-panel-inset)", borderTop: "1px solid var(--border-standard)", background: "var(--surface-panel)" } },
+      status ? h("div", { "aria-live": "polite", style: { minWidth: 0, flex: stacked ? undefined : "1 1 12rem" } }, status) : null,
+      ...(children == null ? [] : [h("div", { key: "actions", className: "flex flex-wrap items-center gap-2" }, ...each(children))]));
+
+  /** A placeholder in the real layout while it loads (Buzz has no skeleton:
+   * inset bars in the place of the lines). `layout`: item | list. */
+  const Skeleton = ({ layout = "item" }) => {
+    const bar = (width, height = "var(--space-3)", key) => h("span", { key, style: { display: "block", width, height, borderRadius: "var(--space-1)", background: "var(--surface-inset)" } });
+    const rows = layout === "list"
+      ? [0, 1, 2, 3].map((n) => h("span", { key: n, style: { display: "grid", gap: "var(--space-2)", padding: "var(--space-2) var(--space-control-inset)" } }, bar("40%", "var(--space-3)", "a"), bar(n % 2 ? "70%" : "85%", "var(--space-4)", "b")))
+      : [bar("30%", "var(--space-3)", "a"), bar("80%", "var(--space-6)", "b"), h("span", { key: "c", className: "flex flex-wrap items-center gap-2" }, bar("6rem", "var(--space-5)", "c1"), bar("4rem", "var(--space-5)", "c2"), bar("5rem", "var(--space-5)", "c3")), bar("100%", "8rem", "d")];
+    return h("div", { "data-buzz-ui": "", "aria-busy": true, style: { display: "grid", gap: "var(--space-4)" } }, h("span", { className: "sr-only", role: "status" }, "Loading"), ...rows);
+  };
+
+  /** Checkbox.tsx (Base UI Checkbox.Root) without its label: the row names it. */
+  const Checkbox = ({ checked, onCheckedChange, label, disabled, size = "md" }) =>
+    h("button", { type: "button", role: "checkbox", "aria-checked": !!checked, "aria-label": label, disabled,
+        "data-buzz-ui": "", className: "buzz-checkbox", "data-size": size === "sm" ? "sm" : "md",
+        "data-checked": checked ? "" : undefined, "data-unchecked": checked ? undefined : "", "data-disabled": disabled ? "" : undefined,
+        onClick: (event) => { event.stopPropagation(); if (!disabled) onCheckedChange(!checked); } },
+      checked ? h("span", { "aria-hidden": true, style: { display: "flex" } }, icon(ICON.check, size === "sm" ? 12 : 14)) : null);
+
+  /** Activity's row (MessageListRow, NavigationItem multiline) in a
+   * NavigationCard, so a Checkbox can sit beside it without nesting controls:
+   * `title` (the sender's place), `subtitle` (the preview's), `meta` (the
+   * date's). `picked`/`onPick`: an explicit selection; `quiet`: muted. */
+  const SelectRow = ({ title, subtitle, meta, selected = false, picked, onPick, pickLabel, onOpen, quiet = false }) =>
+    h("li", { style: { minWidth: 0, listStyle: "none" } },
+      h("div", { "data-buzz-ui": "", "data-navigation-card": "", "data-tone": "default", className: "navigation-card" },
+        h("div", { className: "navigation-card-row" },
+          h("button", { type: "button", "data-variant": "row", "data-multiline": "", "data-buzz-ui": "", className: "navigation-item",
+              "data-selected": selected ? "" : undefined, "aria-current": selected ? "true" : undefined, onClick: onOpen },
+            h("span", { className: "navigation-item-label" },
+              h("span", { style: { display: "flex", flexDirection: "column", gap: "var(--space-1)", minWidth: 0, whiteSpace: "normal", paddingBlock: "var(--space-row-gap)" } },
+                h("span", { style: { display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: "var(--space-1) var(--space-control-inset)" } },
+                  h("strong", { className: `text-label-sm ${quiet ? "text-subtle" : "text-standard"}`, style: { minWidth: 0, overflowWrap: "anywhere" } }, title),
+                  meta ? h("span", { className: "text-caption text-subtle", style: { flex: "0 0 auto" } }, meta) : null),
+                subtitle ? h("span", { className: "text-body-sm text-subtle", style: { maxInlineSize: "64ch", overflow: "hidden", overflowWrap: "anywhere", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" } }, subtitle) : null))),
+          onPick ? h("span", { style: { order: -1, flex: "none", display: "grid", placeItems: "center", paddingBlock: "calc(var(--space-row-gap) + var(--space-half))", paddingInlineStart: "var(--space-control-inset)" } },
+            h(Checkbox, { checked: !!picked, onCheckedChange: onPick, label: pickLabel ?? (typeof title === "string" ? `Select ${title}` : "Select") })) : null)));
+
+  /** A titled list of rows (Activity's list): `label` and a quiet `count`. */
+  const ListGroup = ({ label, count, children }) =>
+    h("section", { "data-buzz-ui": "", style: { display: "grid", gap: "var(--space-1)", minWidth: 0 } },
+      label ? h("h3", { className: "text-label-sm text-subtle", style: { margin: 0, padding: "0 var(--space-control-inset)", display: "flex", gap: "var(--space-2)" } },
+        h("span", null, label), count ? h("span", { className: "tabular-nums" }, String(count)) : null) : null,
+      h("ul", { role: "list", style: { margin: 0, padding: 0, display: "grid", gap: "1px" } }, ...each(children)));
+
+  /** Activity's workspace: the list pane beside the preview (Inbox.module.css
+   * `.workspace`, `.listPane`, `.scroll`). Too narrow for both, the preview
+   * takes the space while it shows something. */
+  const Split = ({ label, list, detail, showing = false }) => {
+    const box = React.useRef(null);
+    const [narrow, setNarrow] = React.useState(false);
+    React.useLayoutEffect(() => {
+      const node = box.current;
+      if (!node || typeof ResizeObserver !== "function") return undefined;
+      const watch = new ResizeObserver(() => setNarrow(node.clientWidth < 720));
+      watch.observe(node);
+      return () => watch.disconnect();
+    }, []);
+    const pane = { display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0 };
+    return h("div", { ref: box, "data-buzz-ui": "", style: { display: "flex", flex: 1, minWidth: 0, minHeight: 0 } },
+      narrow && showing ? null : h("div", { role: "region", "aria-label": label, style: { ...pane, flex: narrow ? 1 : "0 0 min(26rem, 42%)", borderRight: narrow ? undefined : "1px solid var(--border-standard)" } },
+        h("div", { style: { flex: 1, minHeight: 0, overflow: "auto", padding: "var(--space-3) var(--space-row-gap) var(--space-panel-inset)" } }, list)),
+      narrow && !showing ? null : h("div", { style: { ...pane, flex: 1 } }, detail));
+  };
+
+  /** A message's card (Diffs' DiffMessage card): a quiet frame around rows. */
+  const MessageCard = ({ label, children }) =>
+    h("div", { "data-buzz-ui": "", role: "group", "aria-label": label, style: { ...card, display: "grid" } }, ...each(children));
+  /** One row in a message's card: the question, its live state, Open. */
+  const MessageRow = ({ title, subtitle, loading = false, onOpen, openLabel = "Open" }) =>
+    h("div", { style: { display: "flex", alignItems: "center", gap: "var(--space-3)", padding: "var(--space-2) var(--space-3)", minWidth: 0 } },
+      h("span", { style: { display: "grid", gap: "var(--space-1)", minWidth: 0, flex: 1 } },
+        h("span", { className: "text-label-sm text-standard", style: { overflowWrap: "anywhere" } }, title),
+        loading ? h("span", { style: { display: "block", width: "40%", height: "var(--space-3)", borderRadius: "var(--space-1)", background: "var(--surface-inset)" } })
+          : subtitle ? h("span", { className: "text-caption text-subtle" }, subtitle) : null),
+      onOpen ? h(Button, { size: "sm", variant: "outline", onClick: onOpen }, openLabel) : null);
+
   // Text, in the roles Buzz's pages write.
   const Title = (text, props = {}) => h("h2", { ...props, className: "text-heading" }, text);
   const Heading = (text) => h("h3", { className: "text-label" }, text);
@@ -2716,7 +2868,8 @@ function buzzUi(React, { nativeSelect = false } = {}) {
   const Code = (text) => h("code", { className: "text-body tabular-nums", style: { letterSpacing: "0.08em" } }, text);
 
   return { VARIANTS, SectionTitle, Group, Row, Button, Input, Switch, SwitchRow, Pill, Popup, Native, TextField, Stack, Column, Actions, Note, ErrorLine, Spinner, Status, Value, Alert, Code,
-    Header, IconButton, PanelHeader, Page, Subview, PanelBody, Fill, Toolbar, EmptyState, NavItem, Tabs, Disclosure, CountBadge, Dot, LinkChip, OneTimeCode, CodeColumn, Failure, Notice,
+    Header, IconButton, PanelHeader, Page, Subview, Surface, PanelBody, Fill, Toolbar, EmptyState, NavItem, Tabs, Disclosure, CountBadge, Dot, LinkChip, OneTimeCode, CodeColumn, Failure, Notice,
+    Glyph, Chip, ChipRow, DiffText, ChangeTable, MediaPair, DecisionBar, Skeleton, Checkbox, SelectRow, ListGroup, Split, MessageCard, MessageRow,
     Title, Heading, Paragraph, Caption, Strong, Lines, Line, Pre, ICON };
 }
 // ---- end buzz-ui kit ----
@@ -2746,6 +2899,8 @@ const REVIEW_FRESH_MS = 60 * 1000;
 /** Refusals after which the review is read again for its new state. */
 const REVIEW_CONFLICTS = Object.freeze(["stale_review", "decision_exists"]);
 const REVIEW_TOKEN_CODES = Object.freeze(["decision_token_expired", "decision_token_used", "decision_token_invalid", "decision_token_required"]);
+/** Decisions sent at once at most (Platform Control answers 429 past 4 for a customer). */
+const REVIEW_PARALLEL = 3;
 const REVIEW_VERDICTS = Object.freeze(["approved", "changes_requested", "rejected"]);
 const REVIEWS_HOME = "https://app.black4.ai/reviews";
 
@@ -2786,7 +2941,7 @@ function reviewOrder(queue) {
     for (const item of review.items ?? []) {
       out.push({ id: reviewItemId(review.businessId, review.assetId, item.key), businessId: review.businessId, businessName: review.businessName,
         assetId: review.assetId, reviewTitle: review.title, key: item.key, version: item.version, title: item.title, question: item.question,
-        stake: item.stake, age: item.age, brief: item.brief, workType: item.workType, origin: item.origin ?? review.origin });
+        stake: item.stake, age: item.age, brief: item.brief, workType: item.workType, threadId: item.threadId ?? review.threadId ?? null });
     }
   }
   return out;
@@ -2802,17 +2957,17 @@ function reviewGroups(queue) {
   return [...groups.values()];
 }
 
-/** Where a review came from, when the server says: a Buzz thread, a job. */
+/** Where a review came from, when the server says (staff only): the Buzz
+ * thread and the job run that made it. Flat fields: `threadId`, and `job`
+ * { jobId, jobName, runId, startedAt }. */
 function reviewOrigin(review, item) {
-  const raw = item?.origin ?? review?.origin ?? {};
-  const thread = raw.thread ?? {};
-  const job = raw.job ?? {};
   const text = (value) => (typeof value === "string" && value.trim() ? plain(value, 200) : undefined);
+  const job = item?.job ?? review?.job ?? null;
   const out = {
-    threadId: text(raw.threadId ?? thread.id ?? item?.threadId ?? review?.threadId),
-    channelId: text(raw.channelId ?? thread.channelId ?? item?.channelId ?? review?.channelId),
-    jobId: text(raw.jobId ?? job.id ?? item?.jobId ?? review?.jobId),
-    jobTitle: text(raw.jobTitle ?? job.title ?? item?.jobTitle ?? review?.jobTitle),
+    threadId: text(item?.threadId ?? review?.threadId),
+    jobId: text(job?.jobId),
+    jobName: text(job?.jobName),
+    runId: text(job?.runId),
   };
   return Object.fromEntries(Object.entries(out).filter(([, value]) => value));
 }
@@ -2939,6 +3094,7 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
       if (!businessId && !serverNeedsBusiness) {
         try { return await ask({ assetId: locator.assetId, ...(locator.itemKey ? { itemKey: locator.itemKey } : {}) }); } catch (error) {
           // A server that needs businessId refuses the input; it is asked by business from now on.
+          if (error?.serverCode === "review_not_found") throw Object.assign(new Error("This review isn't waiting in your queue."), { code: "elsewhere" });
           if (error?.code === "rpc" || /businessId|required|invalid/i.test(String(error?.message))) serverNeedsBusiness = true;
           else throw error;
         }
@@ -3089,6 +3245,18 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
     setReceipt(id, { ...receipt, state: "saved", decision, message: "" });
   };
 
+  // At most REVIEW_PARALLEL decisions in flight (bulk approvals): the server
+  // limits a customer's parallel calls.
+  const waiting = [];
+  let inFlight = 0;
+  const enqueue = (id) => { waiting.push(id); pump(); };
+  const pump = () => {
+    while (inFlight < REVIEW_PARALLEL && waiting.length && !disposed) {
+      const id = waiting.shift();
+      inFlight += 1;
+      send(id).finally(() => { inFlight -= 1; pump(); });
+    }
+  };
   /** A person chose a verdict: it waits `undoMs` for Undo, then is sent.
    * Ask for changes and Reject need feedback. Returns the receipt, or null. */
   const propose = ({ review, item, verdict, feedback = "" }) => {
@@ -3101,7 +3269,7 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
     const receipt = { id, state: "pending", verdict, feedback: note, businessId: review.businessId, businessName: review.businessName, assetId: review.assetId,
       key: item.key, version: item.version, title: item.card?.question || item.title, deadline: now() + undoMs, message: "" };
     clearTimer(timers.get(id));
-    timers.set(id, setTimer(() => { timers.delete(id); void send(id); }, undoMs));
+    timers.set(id, setTimer(() => { timers.delete(id); enqueue(id); }, undoMs));
     setReceipt(id, receipt);
     return receipt;
   };
@@ -3117,7 +3285,7 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
   const retry = (id) => {
     const receipt = receipts.get(id);
     if (!receipt || receipt.state !== "failed") return;
-    void send(id);
+    enqueue(id);
   };
   /** Reads an unsure receipt's item again. */
   const recheck = (id) => {
@@ -3167,10 +3335,700 @@ function wordDiff(before, after) {
   return runs;
 }
 
-// stub
+// ---- Reviews: the screens ------------------------------------------------------
+// Drawn only with the Buzz UI kit. Work first: the question, the stake and
+// facts as chips, then the change itself; the reasons sit in one closed
+// disclosure. Deciding happens in place, in a bar at the bottom.
 
-function reviewsPart() {}
-function reviewsSlot() { return { dispose() {} }; }
+/** The screens over one reviewData store. `bridge`: { use, SignInPrompt,
+ * browser, openThread? }. */
+function reviewScreens(React, store, bridge) {
+  const h = React.createElement;
+  const ui = buzzUi(React);
+  const { Button, IconButton, PanelHeader, Subview, PanelBody, EmptyState, Column, Actions, Stack, SectionTitle, Title, Caption, Strong, Lines, Line, Note, Status,
+    Disclosure, Group, Row, Pre, Failure, TextField, CountBadge, Chip, ChipRow, DiffText, ChangeTable, MediaPair, DecisionBar, Skeleton, SelectRow, ListGroup, Split, Toolbar } = ui;
+
+  const CONNECTION_TEXT = {
+    starting: "Connecting to Black 4…",
+    "signing-in": "Waiting for you to sign in to Black 4.",
+    "signed-out": "Not signed in to Black 4.",
+    stopped: "Black 4 is stopped.",
+    failed: "Black 4 is not connected.",
+  };
+  const VERDICT_WORDS = { approved: "Approve", changes_requested: "Ask for changes", rejected: "Reject" };
+  const COMPOSE = {
+    changes_requested: { label: "What should change?", send: "Ask for changes" },
+    rejected: { label: "Why reject it?", send: "Reject" },
+  };
+
+  /** Re-renders when the store changes. */
+  const useStore = () => {
+    const [, setTick] = React.useState(0);
+    React.useEffect(() => store.subscribe(() => setTick((n) => n + 1)), []);
+    return store.revision;
+  };
+  const useConnection = () => {
+    const raw = bridge.use();
+    return typeof raw === "string" ? { status: raw } : raw ?? { status: "failed" };
+  };
+  /** A clock that ticks while `active` (Undo countdowns). */
+  const useTicking = (active) => {
+    const [, setTick] = React.useState(0);
+    React.useEffect(() => {
+      if (!active) return undefined;
+      const timer = setInterval(() => setTick((n) => n + 1), 250);
+      return () => clearInterval(timer);
+    }, [active]);
+  };
+  /** "grok-bot · Grok Bot (SEO & AEO Desk)" → "Grok Bot". */
+  const agentName = (madeBy) => {
+    const text = String(madeBy ?? "").split(" · ").slice(-1)[0].replace(/\s*\[.*$/, "").replace(/\s+via\s+.*$/, "").replace(/\s*\(.*\)$/, "").trim();
+    return text || "The agent";
+  };
+  const capital = (text) => (text ? text.charAt(0).toUpperCase() + text.slice(1) : text);
+  const STAKE_GLYPH = { money: "money", customers: "people", risk: "alert", none: null };
+
+  /** Where Black 4 stands, while not connected: Sign in, or a line. */
+  function NotConnected({ link, compact = false }) {
+    if (bridge.SignInPrompt && ["signed-out", "signing-in", "idle"].includes(link.status)) return h(bridge.SignInPrompt, { compact });
+    return h(Column, { gap: 2 },
+      Line(CONNECTION_TEXT[link.status] ?? `Black 4: ${link.status}.`, { role: "status" }),
+      link.detail ? Line(link.detail) : null,
+      link.connect && (link.status === "failed" || link.status === "stopped") ? h(Button, { variant: "prominent", size: compact ? "sm" : "md", onClick: link.connect }, "Connect Black 4") : null);
+  }
+
+  // ---- the work itself -----------------------------------------------------------
+  function Media({ review, item }) {
+    const [images, setImages] = React.useState({ after: undefined, before: undefined });
+    React.useEffect(() => {
+      let live = true;
+      for (const which of ["after", "before"]) {
+        store.image(review.businessId, review.assetId, item.key, which).then((src) => { if (live) setImages((now) => ({ ...now, [which]: src })); });
+      }
+      return () => { live = false; };
+    }, [review.assetId, item.key, item.version]);
+    if (images.after === null && !images.before) return Note("The image opens in Black 4 Reviews.");
+    return h(MediaPair, { before: images.before ?? null, after: images.after, loading: images.after === undefined, label: item.title });
+  }
+  /** The change, as the card's `show` says, else the brief's before and after. */
+  function Work({ review, item }) {
+    const show = item.card?.show;
+    if (show?.type === "fields" && show.rows?.length) {
+      return h(ChangeTable, { rows: show.rows.map((row) => ({ label: row.label, before: row.before ?? "", after: row.after ?? "", changed: (row.before ?? "") !== (row.after ?? "") })) });
+    }
+    if (show?.type === "text") return h(DiffText, { label: show.label, runs: wordDiff(show.before ?? "", show.after ?? "") });
+    if (show?.type === "list" && show.rows?.length) {
+      return h(ListGroup, { label: show.label }, ...show.rows.map((row, index) => h(Row, { key: `${index}`, title: row.label, description: row.detail })));
+    }
+    if (show?.type === "media") return h(Media, { review, item });
+    const brief = item.brief ?? {};
+    if (brief.before || brief.after) return h(ChangeTable, { rows: [{ label: "", before: brief.before ?? "", after: brief.after ?? "", changed: brief.before !== brief.after }] });
+    return Note(item.action || "No change was attached.");
+  }
+
+  /** Why, evidence, provenance and the pinned request: one closed disclosure. */
+  function Details({ review, item }) {
+    const card = item.card ?? {};
+    const brief = item.brief ?? {};
+    const change = item.change && !item.change.erased ? item.change : null;
+    const origin = reviewOrigin(review, item);
+    const row = (title, text) => (text ? h(Row, { key: title, title, description: text }) : null);
+    return h(Disclosure, { title: "Details" },
+      h(Stack, { gap: 4 },
+        h(Group, null,
+          row("Approving permits", item.action),
+          row("If yes", card.ifYes || brief.expectedResult),
+          row("If no", card.ifNo),
+          row("Tradeoff", card.tradeoff),
+          row("Why", brief.why),
+          row("Success looks like", brief.successMeasure),
+          row("Evidence", brief.baselineSource ? `${brief.baselineSource}${brief.baselineObservedAt ? ` · ${brief.baselineObservedAt}` : ""}` : ""),
+          row("Made by", item.madeBy),
+          row("Asked by", item.requestedBy),
+          row("Job", origin.jobName || origin.jobId),
+          row("Version", `${item.version}${review.title ? ` of ${review.title}` : ""}`)),
+        change ? h("div", null, h(SectionTitle, { title: "Pinned request" }),
+          h(Stack, { gap: 2 },
+            Caption(`${change.method} ${change.endpoint} · ${change.connector}${change.connection ? ` (${change.connection})` : ""}${change.records != null ? ` · ${change.records} records` : ""}`),
+            Pre(change.lines.map((line) => `${line.label}: ${line.value}`).join("\n") + (change.more ? `\n… ${change.more} more` : "")))) : null));
+  }
+
+  // ---- deciding --------------------------------------------------------------------
+  /** The bar at the bottom: Approve, Ask for changes, Reject; then Undo; then the receipt. */
+  function Decide({ review, item, onReload, onHandOff, autoFocus, compose, setCompose }) {
+    useStore();
+    const id = reviewItemId(review.businessId, review.assetId, item.key);
+    const receipt = store.receipt(id);
+    const [feedback, setFeedback] = React.useState("");
+    React.useEffect(() => { setFeedback(""); }, [id, item.version, compose]);
+    useTicking(receipt?.state === "pending");
+    if (receipt?.state === "pending") {
+      const left = Math.max(1, Math.ceil((receipt.deadline - Date.now()) / 1000));
+      const words = { approved: "Approving", changes_requested: "Asking for changes", rejected: "Rejecting" }[receipt.verdict];
+      return h(DecisionBar, { status: Status(`${words} in ${left} s`) },
+        h(Button, { key: "undo", variant: "outline", autoFocus: true, onClick: () => store.undo(id) }, "Undo"));
+    }
+    if (receipt?.state === "sending") return h(DecisionBar, { status: Status("Saving…") });
+    if (receipt?.state === "unknown") {
+      return h(DecisionBar, { status: Line(receipt.message || "Couldn't confirm it saved.") },
+        h(Button, { key: "check", onClick: () => void store.recheck(id) }, "Check again"));
+    }
+    if (receipt?.state === "conflict") {
+      return h(DecisionBar, { status: Line(receipt.message || "This item changed.") },
+        h(Button, { key: "load", variant: "prominent", onClick: () => { store.clear(id); onReload(); } }, "Load the new version"));
+    }
+    if (receipt?.state === "failed") {
+      return h(DecisionBar, { status: Line(`${receipt.message || "It didn't save."}`, { danger: true, role: "alert" }) },
+        h(Button, { key: "retry", variant: "prominent", onClick: () => store.retry(id) }, `Try ${VERDICT_WORDS[receipt.verdict].toLowerCase()} again`),
+        h(Button, { key: "cancel", variant: "outline", onClick: () => store.clear(id) }, "Cancel"));
+    }
+    const decision = receipt?.decision ?? item.decision;
+    if (decision || !item.decidable) {
+      return h(DecisionBar, { status: Strong(reviewState(item, receipt).text) },
+        decision?.feedback ? Caption(decision.feedback) : null);
+    }
+    if (!store.canDecide(review, item)) {
+      // This Black 4 server lets the person decide only in Black 4 Reviews.
+      return h(DecisionBar, { status: Caption("Decide in Black 4 Reviews") },
+        h(Button, { key: "web", variant: "prominent", ...(onHandOff ? { onClick: onHandOff } : { href: reviewUrl(item.reviewUrl || review.reviewUrl) || REVIEWS_HOME }) }, "Open in Black 4 Reviews"));
+    }
+    if (compose) {
+      const words = COMPOSE[compose];
+      const send = () => { if (store.propose({ review, item, verdict: compose, feedback })) { setCompose(null); setFeedback(""); } };
+      return h(DecisionBar, { stacked: true },
+        h(TextField, { key: "feedback", label: words.label, value: feedback, onChange: setFeedback, rows: 3, maxLength: 8000, autoFocus: true,
+          onKeyDown: (event) => { if (event.key === "Escape") { event.stopPropagation(); setCompose(null); } else if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) send(); } }),
+        h(Actions, { key: "actions" },
+          h(Button, { key: "send", variant: compose === "rejected" ? "destructive" : "prominent", disabled: !feedback.trim(), onClick: send }, words.send),
+          h(Button, { key: "cancel", variant: "outline", onClick: () => setCompose(null) }, "Cancel")));
+    }
+    return h(DecisionBar, null,
+      h(Button, { key: "approve", variant: "prominent", autoFocus, "aria-keyshortcuts": "A", onClick: () => store.propose({ review, item, verdict: "approved" }) }, "Approve"),
+      h(Button, { key: "changes", variant: "outline", "aria-keyshortcuts": "C", onClick: () => setCompose("changes_requested") }, "Ask for changes"),
+      h(Button, { key: "reject", variant: "ghost", onClick: () => setCompose("rejected") }, "Reject"));
+  }
+
+  // ---- one item --------------------------------------------------------------------
+  /** One review item, work first, with the decision bar. `entry`: a locator
+   * `{ businessId?, assetId, itemKey? }`. `step`: { position, total, next,
+   * previous } from the queue; `onBack`: to the queue. `onCommand` receives
+   * this item's key commands while it is shown (shortcuts). */
+  function ReviewItem({ entry, step, onBack, onCommand, onSaved, frame = true }) {
+    const link = useConnection();
+    useStore();
+    const [state, setState] = React.useState({ review: null, error: null });
+    const [revision, setRevision] = React.useState(0);
+    const [human, setHuman] = React.useState(null);
+    const [compose, setCompose] = React.useState(null);
+    const key = `${entry?.businessId ?? ""}/${entry?.assetId ?? ""}`;
+    React.useEffect(() => setCompose(null), [key, entry?.itemKey]);
+    React.useEffect(() => {
+      let live = true;
+      setHuman(null);
+      if (link.status !== "connected" || !entry?.assetId) return () => { live = false; };
+      const cached = entry.businessId ? store.cachedReview(entry.businessId, entry.assetId) : null;
+      setState({ review: cached, error: null });
+      store.open(entry, { fresh: revision > 0 }).then((review) => { if (live) setState({ review, error: null }); }, (error) => { if (live) setState({ review: null, error }); });
+      return () => { live = false; };
+    }, [key, link.status, revision]);
+    const review = state.review && entry?.assetId === state.review.assetId ? (store.cachedReview(state.review.businessId, state.review.assetId) ?? state.review) : null;
+    const item = review ? (review.items.find((candidate) => candidate.key === entry.itemKey) ?? review.items.find((candidate) => candidate.key === review.focusItemKey) ?? review.items[0]) : null;
+    const id = review && item ? reviewItemId(review.businessId, review.assetId, item.key) : null;
+    const receipt = id ? store.receipt(id) : null;
+    // A saved decision moves on to the next waiting item by itself.
+    const savedRef = React.useRef(receipt?.state === "saved");
+    React.useEffect(() => {
+      const saved = receipt?.state === "saved";
+      if (saved && !savedRef.current && step?.next) {
+        const timer = setTimeout(() => { onSaved?.(id); step.next(); }, 900);
+        savedRef.current = saved;
+        return () => clearTimeout(timer);
+      }
+      savedRef.current = saved;
+      return undefined;
+    }, [receipt?.state, id]);
+    // Key commands for this item (the surface's shortcuts call them).
+    React.useEffect(() => {
+      if (!onCommand) return undefined;
+      return onCommand({
+        approve: review && item && !receipt && !compose && store.canDecide(review, item) ? () => store.propose({ review, item, verdict: "approved" }) : null,
+        changes: review && item && !receipt && store.canDecide(review, item) ? () => setCompose("changes_requested") : null,
+        undo: receipt?.state === "pending" ? () => store.undo(id) : null,
+      });
+    }, [id, receipt?.state, review?.decideIn, compose, store.revision]);
+
+    const header = (title) => h(PanelHeader, { title,
+      navigation: onBack ? h(IconButton, { label: "Back to the queue", glyph: "back", large: true, onClick: onBack }) : null,
+      actions: [
+        step && step.position ? Caption(`${step.position} of ${step.total}`) : null,
+        step ? h(IconButton, { key: "prev", label: "Previous decision (K)", glyph: "up", large: true, disabled: !step.previous, onClick: () => step.previous?.() }) : null,
+        step ? h(IconButton, { key: "next", label: "Next decision (J)", glyph: "down", large: true, disabled: !step.next, onClick: () => step.next?.() }) : null,
+        h(IconButton, { key: "refresh", label: "Refresh", glyph: "refresh", large: true, onClick: () => setRevision((n) => n + 1) }),
+      ].filter(Boolean) });
+    const wrap = (title, body, bar = null) => frame
+      ? h(Subview, { header: header(title), footer: bar }, h(PanelBody, null, body))
+      : h(Stack, { gap: 4 }, body, bar);
+
+    if (link.status !== "connected") return wrap("Reviews", h(NotConnected, { link }));
+    if (human && bridge.browser) {
+      return h(Subview, { header: h(PanelHeader, { title: "Black 4 Reviews", navigation: h(IconButton, { label: "Back to the decision", glyph: "back", large: true, onClick: () => { setHuman(null); setRevision((n) => n + 1); } }) }) },
+        h(bridge.browser, { url: human, storage: "black4-reviews", label: "Black 4 Reviews" }));
+    }
+    if (state.error) {
+      const elsewhere = state.error.code === "elsewhere";
+      return wrap("Reviews", elsewhere
+        ? h(Column, { gap: 2 }, Line("This review isn't waiting in your queue."), h(Button, { size: "sm", href: reviewUrl(reviewLink(entry)) || REVIEWS_HOME }, "Open in Black 4 Reviews"))
+        : h(Failure, { message: plain(state.error.message, 300), retry: () => setRevision((n) => n + 1), retryLabel: "Try again" }));
+    }
+    if (!review) return wrap("Reviews", h(Skeleton, { layout: "item" }));
+    if (!item) return wrap(review.businessName, Line("Nothing in this review is shown to you."));
+    const card = item.card ?? {};
+    const origin = reviewOrigin(review, item);
+    const facts = [
+      card.stake?.text ? h(Chip, { key: "stake", glyph: STAKE_GLYPH[card.stake.kind] ?? null, label: card.stake.text, emphasis: card.stake.kind !== "none" }) : null,
+      ...(card.facts ?? []).map((fact, index) => h(Chip, { key: `f${index}`, label: fact })),
+    ].filter(Boolean);
+    const recommendation = card.recommend?.answer
+      ? `${agentName(item.madeBy)} recommends ${String(card.recommend.answer).toLowerCase()}${card.recommend.why ? `: ${card.recommend.why}` : ""}`
+      : "";
+    const body = h(Stack, { key: id, as: "article", gap: 4 },
+      h(Stack, { gap: 2 },
+        Caption([review.businessName, review.items.length > 1 ? `Item ${review.items.indexOf(item) + 1} of ${review.items.length}` : null, item.title !== card.question ? item.title : null].filter(Boolean).join(" · ")),
+        Title(card.question || item.title),
+        facts.length ? h(ChipRow, null, ...facts) : null),
+      h(Work, { review, item }),
+      recommendation ? Line(recommendation) : null,
+      origin.threadId && bridge.openThread ? h(Actions, null, h(Button, { size: "sm", variant: "outline", onClick: () => bridge.openThread(origin) }, "Open thread")) : null,
+      h(Details, { review, item }));
+    const handOff = bridge.browser ? () => setHuman(reviewUrl(item.reviewUrl || review.reviewUrl) || REVIEWS_HOME) : null;
+    return wrap(review.businessName, body, h(Decide, { review, item, compose, setCompose, onReload: () => setRevision((n) => n + 1), onHandOff: handOff }));
+  }
+
+  // ---- the queue -----------------------------------------------------------------
+  /** A row's line: the question, else the title. */
+  const questionOf = (entry) => {
+    const cached = store.cachedReview(entry.businessId, entry.assetId)?.items?.find((item) => item.key === entry.key);
+    return { question: cached?.card?.question || entry.question || entry.title, stake: cached?.card?.stake?.text || entry.stake?.text || entry.brief || "" };
+  };
+  const receiptWords = (receipt) => receipt ? reviewState(null, receipt).text + (receipt.state === "failed" ? " · didn't save" : receipt.state === "unknown" ? " · unconfirmed" : receipt.state === "conflict" ? " · changed" : "") : "";
+
+  /** The list: approved work that needs a push (quiet, at the top), then
+   * every waiting item grouped by business. Selection is explicit. */
+  function QueueList({ queue, selectedId, onOpen, picked, onPick, filter, onFilter }) {
+    useStore();
+    const groups = reviewGroups(queue).filter((group) => !filter || group.businessId === filter);
+    const attention = [...(queue.stalled ?? []).map((entry) => ({ ...entry, why: `Not started · ${entry.waitingOn ? `waiting on ${entry.waitingOn}` : "nobody has picked it up"}` })),
+      ...(queue.blocked ?? []).map((entry) => ({ ...entry, why: entry.note ? `Blocked · ${entry.note}` : "Blocked" }))]
+      .filter((entry) => !filter || entry.businessId === filter);
+    const filterName = filter ? (groups[0]?.businessName ?? attention[0]?.businessName ?? "this business") : "";
+    return h(Stack, { gap: 4 },
+      filter ? h(Actions, null, Caption(`Only ${filterName}`), h(Button, { size: "sm", variant: "link", onClick: () => onFilter(null) }, "Show all")) : null,
+      attention.length ? h(ListGroup, { label: "Approved, not finished", count: attention.length },
+        ...attention.map((entry) => h(SelectRow, { key: `a${entry.decisionId}`, title: entry.title, subtitle: entry.why, meta: entry.age, quiet: true,
+          selected: selectedId === reviewItemId(entry.businessId, entry.assetId, entry.key),
+          onOpen: () => onOpen({ businessId: entry.businessId, assetId: entry.assetId, itemKey: entry.key }) }))) : null,
+      ...groups.map((group) => h(ListGroup, { key: group.businessId, label: group.businessName, count: group.items.length },
+        ...group.items.map((entry) => {
+          const { question, stake } = questionOf(entry);
+          const receipt = store.receipt(entry.id);
+          return h(SelectRow, { key: entry.id, title: question, subtitle: receiptWords(receipt) || stake, meta: entry.age,
+            selected: selectedId === entry.id,
+            picked: onPick ? picked?.has(entry.id) : undefined, pickLabel: `Select ${question}`,
+            onPick: onPick ? (value) => onPick(entry.id, value) : undefined,
+            onOpen: () => onOpen({ businessId: entry.businessId, assetId: entry.assetId, itemKey: entry.key }) });
+        }))),
+      !groups.length && !attention.length ? h(EmptyState, { glyph: "inbox", title: filter ? `Nothing waiting for ${filterName}` : "Nothing is waiting for you", frame: "none" }) : null,
+      queue.truncated ? Note(`Showing ${queue.listed} of ${queue.total}. Decide some to see the rest.`) : null);
+  }
+
+  /** Approves the picked items together: each its own call, token and receipt. */
+  const approveTogether = async (ids, order) => {
+    const entries = order.filter((entry) => ids.has(entry.id));
+    const refused = [];
+    for (const entry of entries) {
+      try {
+        const review = await store.open({ businessId: entry.businessId, assetId: entry.assetId });
+        const item = review.items.find((candidate) => candidate.key === entry.key);
+        if (!store.propose({ review, item, verdict: "approved" })) refused.push(entry.id);
+      } catch { refused.push(entry.id); }
+    }
+    return refused;
+  };
+
+  return { useStore, useConnection, NotConnected, ReviewItem, QueueList, Work, Decide, approveTogether, questionOf, receiptWords, agentName };
+}
+
+// ---- Reviews: what it gives Buzz -----------------------------------------------
+// The dock page (Activity's list and preview), the side panel, the message
+// card, the Team sidebar's Decisions section, key commands and OS
+// notifications. Started in its own scope (reviewsSlot), so a fault here is
+// reported in Settings and never stops the MCP connection or the agent tools.
+
+/** Services Reviews needs. The rest (navigation, shortcuts, notifications,
+ * sidebarSections) it reads with ctx.reflect.get and uses when Buzz has them:
+ * Buzz has no optional inject. */
+const REVIEWS_INJECT = Object.freeze(["react", "pages", "panels", "conversation"]);
+const REVIEWS_PAGE = "reviews";
+/** The page's route: { business?, asset?, item? } (a sidebar row, a notification). */
+const REVIEWS_ROUTE = Object.freeze({ version: 1, validate: (params) => !!params && typeof params === "object" && !Array.isArray(params)
+  && Object.entries(params).every(([key, value]) => ["business", "asset", "item"].includes(key) && typeof value === "string" && value.length <= 200) });
+/** Review links in a message's text, in order, once each. */
+function reviewLinksIn(text) {
+  const out = [];
+  for (const match of String(text ?? "").matchAll(/https:\/\/app\.black4\.ai\/r\/[A-Za-z0-9_-]+(?:\?[^\s<>()\[\]"'`]*)?/g)) {
+    const url = reviewUrl(match[0].replace(/[.,;:!?]+$/, ""));
+    if (url && !out.includes(url) && out.length < 12) out.push(url);
+  }
+  return out;
+}
+
+/** Where the next and previous item are, in queue order, from `entry`. */
+function reviewStep(order, entry, remembered = 0) {
+  const at = order.findIndex((candidate) => candidate.assetId === entry?.assetId && (!entry?.itemKey || candidate.key === entry.itemKey)
+    && (!entry?.businessId || candidate.businessId === entry.businessId));
+  // A decided item leaves the queue: the item that followed it now sits in its place.
+  const index = at >= 0 ? at : Math.min(remembered, order.length);
+  return {
+    index: at >= 0 ? at : index,
+    found: at >= 0,
+    next: at >= 0 ? order[at + 1] ?? null : order[index] ?? null,
+    previous: at >= 0 ? order[at - 1] ?? null : order[index - 1] ?? null,
+  };
+}
+
+/** New things worth an OS notification, against what was seen before. */
+function reviewNews(queue, seen) {
+  const waiting = reviewOrder(queue).filter((entry) => !seen.waiting.has(entry.id));
+  const blocked = (queue?.blocked ?? []).filter((entry) => !seen.blocked.has(entry.decisionId));
+  return { waiting, blocked };
+}
+
+function reviewsPart(ctx, bridge) {
+  const React = ctx.react;
+  const h = React.createElement;
+  const ui = buzzUi(React);
+  const store = reviewData(bridge.call);
+  /** A service Buzz may not have: undefined when it is missing. */
+  const optional = (name) => { try { return ctx.reflect?.get?.(name) ?? undefined; } catch { return undefined; } };
+  const pluginId = ctx.pluginOwner?.id ?? "ai.black4";
+  const pageTarget = (params) => ({ version: 1, kind: "page", pluginId, pageId: REVIEWS_PAGE, ...(params && Object.keys(params).length ? { route: { version: 1, params } } : {}) });
+  const screens = reviewScreens(React, store, { use: bridge.use, SignInPrompt: bridge.SignInPrompt, browser: bridge.browser, openThread: bridge.openThread });
+  const { ReviewItem, QueueList, useStore, useConnection, NotConnected, approveTogether } = screens;
+  const disposers = [];
+  const own = (dispose) => { if (typeof dispose === "function") disposers.push(dispose); else if (dispose?.dispose) disposers.push(() => dispose.dispose()); };
+
+  // ---- what the page shows: shared with the sidebar and notifications ----------
+  let view = { filter: null, entry: null };
+  const viewListeners = new Set();
+  const setView = (patch) => { view = { ...view, ...patch }; for (const listener of [...viewListeners]) listener(); };
+  const useView = () => {
+    const [, setTick] = React.useState(0);
+    React.useEffect(() => { const listener = () => setTick((n) => n + 1); viewListeners.add(listener); return () => viewListeners.delete(listener); }, []);
+    return view;
+  };
+
+  // ---- key commands: only while a Reviews surface is shown and focused ---------
+  let commands = null; // the item on screen: { approve, undo }
+  let surface = null; // { next, previous, changes } of the focused surface
+  let surfaceFocused = false;
+  const focusIn = () => { surfaceFocused = true; };
+  const focusOut = (event) => { if (!event?.currentTarget?.contains?.(event.relatedTarget)) surfaceFocused = false; };
+  const onCommand = (value) => { commands = value; return () => { if (commands === value) commands = null; }; };
+  const typing = () => {
+    const active = globalThis.document?.activeElement;
+    return !!active && (/^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName) || active.isContentEditable);
+  };
+
+  /** Next, previous and the position in the queue for `entry`. */
+  function useStepping(entry, setEntry) {
+    useStore();
+    const order = reviewOrder(store.queue);
+    const remembered = React.useRef(0);
+    const step = reviewStep(order, entry, remembered.current);
+    if (step.found) remembered.current = step.index;
+    const go = (target) => target ? () => setEntry({ businessId: target.businessId, assetId: target.assetId, itemKey: target.key }) : null;
+    return { position: step.found ? step.index + 1 : 0, total: order.length, next: go(step.next), previous: go(step.previous) };
+  }
+
+  /** A queue read on demand, for surfaces opened before the badge's first read. */
+  function useQueue() {
+    useStore();
+    const link = useConnection();
+    const [error, setError] = React.useState(null);
+    React.useEffect(() => {
+      if (link.status !== "connected" || store.queue) return;
+      store.readQueue().then(() => setError(null), (reason) => setError(reason));
+    }, [link.status]);
+    return { link, queue: link.status === "connected" ? store.queue : null, error, retry: () => store.readQueue().then(() => setError(null), setError) };
+  }
+
+  // ---- the dock page: the list beside the item, as Activity -------------------
+  function ReviewsPage({ navigation: pageNavigation } = {}) {
+    const { link, queue, error, retry } = useQueue();
+    const current = useView();
+    // Opened from a sidebar row or a notification: its business, or its item.
+    const params = pageNavigation?.target?.route?.params;
+    React.useEffect(() => {
+      if (!params || typeof params !== "object") return;
+      setView({ filter: params.business ?? null, entry: params.asset ? { businessId: params.business, assetId: params.asset, itemKey: params.item } : view.entry });
+    }, [pageNavigation?.entryId]);
+    const [picked, setPicked] = React.useState(() => new Set());
+    const [bulk, setBulk] = React.useState(null); // { ids } while approving together
+    const setEntry = (entry) => setView({ entry });
+    const step = useStepping(current.entry, setEntry);
+    surface = { next: step.next, previous: step.previous };
+    const order = reviewOrder(queue);
+    // Picks that left the queue (decided) drop out of the selection.
+    const live = new Set([...picked].filter((id) => order.some((entry) => entry.id === id)));
+    const pick = (id, value) => setPicked((now) => { const next = new Set(now); if (value) next.add(id); else next.delete(id); return next; });
+    const pending = [...live].map((id) => store.receipt(id)).filter((receipt) => receipt?.state === "pending");
+    const approve = async () => {
+      const ids = new Set(live);
+      setBulk({ ids });
+      await approveTogether(ids, order);
+      setPicked(new Set());
+      setBulk(null);
+    };
+    const undoAll = () => { for (const receipt of pending) store.undo(receipt.id); };
+    let toolbar = null;
+    if (pending.length) {
+      toolbar = h(ui.Toolbar, { key: "bulk" }, ui.Status(`Approving ${pending.length} in ${Math.max(1, Math.ceil((pending[0].deadline - Date.now()) / 1000))} s`),
+        h(ui.Button, { size: "sm", variant: "outline", onClick: undoAll }, "Undo"));
+    } else if (live.size) {
+      toolbar = h(ui.Toolbar, { key: "bulk" }, ui.Strong(`${live.size} selected`),
+        h(ui.Button, { size: "sm", variant: "prominent", loading: !!bulk, onClick: () => void approve() }, `Approve ${live.size}`),
+        h(ui.Button, { size: "sm", variant: "ghost", onClick: () => setPicked(new Set()) }, "Clear"));
+    }
+    let list;
+    if (link.status !== "connected") list = h(NotConnected, { link });
+    else if (error && !queue) list = h(ui.Failure, { message: plain(error.message, 300), retry, retryLabel: "Try again" });
+    else if (!queue) list = h(ui.Skeleton, { layout: "list" });
+    else list = h(QueueList, { queue, selectedId: current.entry ? order[reviewStep(order, current.entry).index]?.id : null, onOpen: setEntry,
+      picked: live, onPick: pick, filter: current.filter, onFilter: (filter) => setView({ filter }) });
+    const detail = current.entry
+      ? h(ReviewItem, { key: "item", entry: current.entry, step, onCommand, frame: true })
+      : h(ui.EmptyState, { glyph: "decisions", title: queue && order.length ? "Choose a decision" : "Nothing to decide", frame: "none" });
+    return h(ui.Page, { label: "Reviews", fill: true, header: h(ui.PanelHeader, { title: "Reviews", actions: [h(ui.IconButton, { key: "refresh", label: "Refresh", glyph: "refresh", large: true, onClick: () => bridge.queue.refresh() })] }),
+      onFocus: focusIn, onBlur: focusOut },
+      toolbar,
+      h(ui.Split, { key: "split", label: "Decisions waiting", list, detail }));
+  }
+
+  // ---- the side panel: one item, stepping through the queue -------------------
+  function ReviewPanel({ target }) {
+    const locator = reviewLocator(target);
+    const [entry, setEntry] = React.useState(locator?.kind === "review" ? locator : null);
+    const [filter, setFilter] = React.useState(locator?.kind === "queue" ? locator.businessId ?? null : null);
+    React.useEffect(() => {
+      const next = reviewLocator(target);
+      setEntry(next?.kind === "review" ? next : null);
+      if (next?.kind === "queue") setFilter(next.businessId ?? null);
+    }, [target]);
+    const step = useStepping(entry, setEntry);
+    const { link, queue, error, retry } = useQueue();
+    let body;
+    if (entry) body = h(ReviewItem, { entry, step, onBack: () => setEntry(null), onCommand });
+    else {
+      let list;
+      if (link.status !== "connected") list = h(NotConnected, { link });
+      else if (error && !queue) list = h(ui.Failure, { message: plain(error.message, 300), retry, retryLabel: "Try again" });
+      else if (!queue) list = h(ui.Skeleton, { layout: "list" });
+      else list = h(QueueList, { queue, onOpen: setEntry, filter, onFilter: setFilter });
+      body = h(ui.Subview, { header: h(ui.PanelHeader, { title: queue?.total ? `${queue.total} waiting` : "Reviews",
+        actions: [h(ui.IconButton, { key: "refresh", label: "Refresh", glyph: "refresh", large: true, onClick: () => bridge.queue.refresh() })] }) }, h(ui.PanelBody, null, list));
+    }
+    surface = { next: step.next, previous: step.previous };
+    return h(ui.Surface, { label: "Black 4 Reviews", onFocus: focusIn, onBlur: focusOut }, body);
+  }
+
+  // ---- the dock badge ---------------------------------------------------------
+  function ReviewsBadge() {
+    const current = useConnection();
+    if (current.status === "idle") return ui.Dot({ label: "Approve your Black 4 sign-in in your browser" });
+    if (current.status === "signed-out") return ui.Dot({ label: current.detail ? `Sign in to Black 4. ${current.detail}` : "Sign in to Black 4" });
+    if (current.status !== "connected" || !current.waiting) return null;
+    return ui.CountBadge({ count: current.waiting, label: `${current.waiting} decisions waiting for the connected Black 4 account` });
+  }
+
+  ctx.pages.register({ id: REVIEWS_PAGE, title: "Reviews", primary: true, placement: "dock", layout: "workspace", route: REVIEWS_ROUTE, badge: ReviewsBadge, component: ReviewsPage });
+  ctx.panels.register({
+    id: "reviews", title: "Black 4 Reviews", order: 0,
+    matches: (target) => Boolean(reviewUrl(target)),
+    component: ReviewPanel,
+    channelPlacement: "side",
+    channelLauncher: function ReviewsLauncher({ available, toggle, pressed }) {
+      if (!available()) return null;
+      return ui.IconButton({ label: "Open your Black 4 review queue", glyph: "decisions", "aria-expanded": pressed, "data-channel-panel-toggle": "",
+        onClick: (event) => { event?.currentTarget?.focus?.(); toggle(REVIEWS_HOME); } });
+    },
+  });
+
+  // ---- in the conversation ----------------------------------------------------
+  // The host owns the anchor and its click; the chip draws no control of its own.
+  ctx.conversation.registerLink?.({
+    id: "review-link", title: "Black 4 review", order: 0,
+    matches: (url) => Boolean(reviewUrl(url)),
+    component: function ReviewLink() { return h(ui.LinkChip, { label: "Black 4 review" }); },
+  });
+  /** One row per review link: the question and its live state. */
+  function LinkRow({ url, open }) {
+    useStore();
+    const link = useConnection();
+    const locator = reviewLocator(url);
+    const [failed, setFailed] = React.useState(null);
+    React.useEffect(() => {
+      if (link.status !== "connected" || !locator?.assetId) return;
+      store.open(locator).then(() => setFailed(null), (error) => setFailed(error));
+    }, [url, link.status]);
+    const businessId = locator?.businessId ?? reviewOrder(store.queue).find((entry) => entry.assetId === locator?.assetId)?.businessId;
+    const cached = locator?.assetId ? (businessId ? store.cachedReview(businessId, locator.assetId) : null) : null;
+    const review = cached ?? null;
+    const item = review ? (review.items.find((candidate) => candidate.key === locator.itemKey) ?? review.items[0]) : null;
+    const receipt = review && item ? store.receipt(reviewItemId(review.businessId, review.assetId, item.key)) : null;
+    const state = item ? reviewState(item, receipt) : null;
+    const title = item ? (item.card?.question || item.title) : failed?.code === "elsewhere" ? "A Black 4 review" : failed ? "A Black 4 review" : "Loading the review…";
+    return h(ui.MessageRow, { title, subtitle: state ? `${review.businessName} · ${state.text}` : failed ? (failed.code === "elsewhere" ? "Not in your queue" : "Couldn't read it") : "",
+      tone: state?.tone ?? "quiet", loading: !item && !failed && link.status === "connected", onOpen: open, openLabel: "Open" });
+  }
+  function ReviewPreview({ url, open }) {
+    const link = useConnection();
+    if (link.status !== "connected") return h(ui.MessageCard, { label: "Black 4 review" }, h(NotConnected, { link, compact: true }));
+    return h(ui.MessageCard, { label: "Black 4 review" }, h(LinkRow, { url, open }));
+  }
+  /** One card per message for every review link in it, under the message. */
+  function ReviewMessageCard({ message, open }) {
+    const link = useConnection();
+    const urls = reviewLinksIn(message?.content);
+    if (!urls.length) return null;
+    const label = urls.length === 1 ? "Black 4 decision" : `${urls.length} Black 4 decisions`;
+    if (link.status !== "connected") return h(ui.MessageCard, { label }, h(NotConnected, { link, compact: true }));
+    return h(ui.MessageCard, { label }, ...urls.map((url) => h(LinkRow, { key: url, url, open: () => open?.(url) })));
+  }
+  if (typeof ctx.conversation.registerAccessory === "function") {
+    ctx.conversation.registerAccessory({ id: "review-decisions", title: "Black 4 decisions", order: -10, placement: "message", component: ReviewMessageCard });
+  } else {
+    // An older Buzz: one compact card per link.
+    ctx.conversation.registerLinkPreview?.({
+      id: "review-preview", title: "Black 4 decision", order: -10,
+      matches: (url) => Boolean(reviewUrl(url)) && /\/r\//.test(new URL(url).pathname),
+      component: ReviewPreview,
+    });
+  }
+
+  // ---- the Team sidebar: Decisions, one row per business --------------------------
+  let sidebarRows = [];
+  let sidebarRevision = -1;
+  const rowsNow = () => {
+    if (sidebarRevision !== store.revision) {
+      sidebarRevision = store.revision;
+      const next = reviewGroups(store.queue).map((group) => ({ id: group.businessId, label: group.businessName, count: group.items.length }));
+      if (JSON.stringify(next) !== JSON.stringify(sidebarRows)) sidebarRows = next;
+    }
+    return sidebarRows;
+  };
+  try {
+    optional("sidebarSections")?.register?.({
+      version: 1, id: "decisions", title: "Decisions", icon: h(ui.Glyph, { name: "decisions" }),
+      rows: { snapshot: rowsNow, subscribe: (listener) => store.subscribe(listener) },
+      select: (row) => pageTarget({ business: row.id }),
+    });
+  } catch (error) { bridge.report?.(error); }
+
+  // ---- key commands: J/K or arrows to move, A approve, C ask for changes ----------
+  const navigationService = optional("navigation");
+  const onReviewsPage = () => {
+    try { const target = navigationService?.snapshot?.()?.entry?.target; return target?.kind === "page" && target.pluginId === pluginId && target.pageId === REVIEWS_PAGE; } catch { return false; }
+  };
+  const live = () => (surfaceFocused || onReviewsPage()) && !typing();
+  const keys = optional("shortcuts");
+  const shortcut = (id, title, binding, run, ready = () => true) => {
+    try { keys?.register?.({ id: `reviews.${id}`, title, binding, run, when: () => live() && ready() }); } catch (error) { bridge.report?.(error); }
+  };
+  shortcut("next", "Next decision", [{ key: "j" }, { key: "ArrowDown" }], () => surface?.next?.(), () => !!surface?.next);
+  shortcut("previous", "Previous decision", [{ key: "k" }, { key: "ArrowUp" }], () => surface?.previous?.(), () => !!surface?.previous);
+  shortcut("approve", "Approve this decision", { key: "a" }, () => commands?.approve?.(), () => !!commands?.approve);
+  shortcut("changes", "Ask for changes", { key: "c" }, () => commands?.changes?.(), () => !!commands?.changes);
+  shortcut("undo", "Undo the decision", { key: "z", mod: true }, () => commands?.undo?.(), () => !!commands?.undo);
+
+  // ---- the queue the badge already polls: notifications --------------------------
+  const seen = { started: false, waiting: new Set(), blocked: new Set() };
+  const notify = (queue) => {
+    const news = reviewNews(queue, seen);
+    for (const entry of reviewOrder(queue)) seen.waiting.add(entry.id);
+    for (const entry of queue?.blocked ?? []) seen.blocked.add(entry.decisionId);
+    if (!seen.started) { seen.started = true; return; } // the first read is what was already there
+    const post = (category, input) => { try { Promise.resolve(category?.submit?.(input)).catch(() => {}); } catch {} };
+    if (news.waiting.length) {
+      const first = news.waiting[0];
+      post(waitingNotes, { sourceKey: `waiting:${news.waiting.map((entry) => entry.id).join(",")}`.slice(0, 1024),
+        title: news.waiting.length === 1 ? "A decision is waiting" : `${news.waiting.length} decisions are waiting`,
+        body: news.waiting.length === 1 ? `${first.businessName}: ${first.question || first.title}` : [...new Set(news.waiting.map((entry) => entry.businessName))].join(", "),
+        target: pageTarget(news.waiting.length === 1 ? { business: first.businessId, asset: first.assetId, item: first.key } : {}) });
+    }
+    for (const entry of news.blocked.slice(0, 3)) {
+      post(blockedNotes, { sourceKey: `blocked:${entry.decisionId}`, title: "Approved work is blocked",
+        body: `${entry.businessName}: ${entry.title}${entry.note ? `. ${plain(entry.note, 160)}` : ""}`,
+        target: pageTarget({ business: entry.businessId, asset: entry.assetId, item: entry.key }) });
+    }
+  };
+  // Two switches in Settings → Notifications, driven by the badge's own poll.
+  let waitingNotes = null;
+  let blockedNotes = null;
+  try {
+    const notifications = optional("notifications");
+    waitingNotes = notifications?.register?.({ id: "decisions", label: "Black 4 decisions waiting" }) ?? null;
+    blockedNotes = notifications?.register?.({ id: "decisions-blocked", label: "Black 4 approved work blocked" }) ?? null;
+  } catch (error) { bridge.report?.(error); }
+  own(bridge.queue.subscribe((queue) => { store.noteQueue(queue); notify(queue); }));
+
+  return {
+    store,
+    dispose() {
+      for (const dispose of disposers.splice(0)) { try { dispose(); } catch {} }
+      store.dispose();
+      viewListeners.clear();
+    },
+    // For tests and the Settings card: what is on screen and the commands.
+    get commands() { return commands; },
+    get surface() { return surface; },
+    get live() { return live(); },
+    setView,
+  };
+}
+
+/** Starts Reviews in its own child scope. Whatever it throws goes to
+ * `bridge.report`, never up to the plugin. */
+function reviewsSlot(ctx, bridge) {
+  let scope = null;
+  let part = null;
+  const start = (child) => {
+    try { part = reviewsPart(child, bridge); } catch (error) { bridge.report?.(error); }
+  };
+  try {
+    if (typeof ctx.plugin === "function") {
+      scope = ctx.plugin({
+        name: "black4-reviews",
+        inject: REVIEWS_INJECT,
+        apply: (child) => {
+          start(child);
+          child.effect?.(() => () => { try { part?.dispose(); } catch {} part = null; });
+        },
+      });
+    } else start(ctx); // an older host, and the tests
+  } catch (error) {
+    bridge.report?.(error);
+  }
+  return {
+    get part() { return part; },
+    dispose() {
+      try { part?.dispose(); } catch {}
+      part = null;
+      const current = scope;
+      scope = null;
+      try { Promise.resolve(current?.dispose?.()).catch(() => {}); } catch {}
+    },
+  };
+}
 // ---- end reviews ----
 export { reviewLocator, reviewLink, reviewOrder, reviewGroups, reviewState, reviewData, wordDiff, reviewsPart, reviewsSlot, REVIEW_UNDO_MS };
 

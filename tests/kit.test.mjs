@@ -54,10 +54,11 @@ test("kit: each part draws with Buzz's classes, and Pill draws Buzz's popup or t
   const React = { Fragment: "f", createElement: (type, props, ...children) => ({ type, props: { ...(props ?? {}), children: children.flat() } }),
     useState: (v) => [v, () => {}], useRef: (current) => ({ current }), useId: () => "id", useEffect() {}, useLayoutEffect() {} };
   const ui = loadKit()(React);
-  assert.deepEqual(Object.keys(ui).sort(), ["Actions", "Alert", "Button", "Caption", "Code", "CodeColumn", "Column", "CountBadge", "Disclosure", "Dot", "EmptyState",
-    "ErrorLine", "Failure", "Fill", "Group", "Header", "Heading", "ICON", "IconButton", "Input", "Line", "Lines", "LinkChip", "Native", "NavItem", "Note", "Notice",
-    "OneTimeCode", "Page", "PanelBody", "PanelHeader", "Paragraph", "Pill", "Popup", "Pre", "Row", "SectionTitle", "Spinner", "Stack", "Status", "Strong", "Subview",
-    "Switch", "SwitchRow", "Tabs", "TextField", "Title", "Toolbar", "VARIANTS", "Value"]);
+  assert.deepEqual(Object.keys(ui).sort(), ["Actions", "Alert", "Button", "Caption", "ChangeTable", "Checkbox", "Chip", "ChipRow", "Code", "CodeColumn", "Column", "CountBadge",
+    "DecisionBar", "DiffText", "Disclosure", "Dot", "EmptyState", "ErrorLine", "Failure", "Fill", "Glyph", "Group", "Header", "Heading", "ICON", "IconButton", "Input", "Line", "Lines",
+    "LinkChip", "ListGroup", "MediaPair", "MessageCard", "MessageRow", "Native", "NavItem", "Note", "Notice", "OneTimeCode", "Page", "PanelBody", "PanelHeader", "Paragraph", "Pill",
+    "Popup", "Pre", "Row", "SectionTitle", "SelectRow", "Skeleton", "Spinner", "Split", "Stack", "Status", "Strong", "Subview", "Surface", "Switch", "SwitchRow", "Tabs", "TextField",
+    "Title", "Toolbar", "VARIANTS", "Value"]);
   // A variant Buzz does not style draws the default, never an unstyled control.
   assert.equal(ui.Button({ variant: "glassy", size: "xl", shape: "round", children: "B" }).props["data-variant"], "subtle");
   assert.equal(ui.Button({ variant: "glassy", size: "xl", shape: "round", children: "B" }).props["data-size"], "md");

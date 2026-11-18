@@ -21,6 +21,8 @@ const REVIEW_FRESH_MS = 60 * 1000;
 /** Refusals after which the review is read again for its new state. */
 const REVIEW_CONFLICTS = Object.freeze(["stale_review", "decision_exists"]);
 const REVIEW_TOKEN_CODES = Object.freeze(["decision_token_expired", "decision_token_used", "decision_token_invalid", "decision_token_required"]);
+/** Decisions sent at once at most (Platform Control answers 429 past 4 for a customer). */
+const REVIEW_PARALLEL = 3;
 const REVIEW_VERDICTS = Object.freeze(["approved", "changes_requested", "rejected"]);
 const REVIEWS_HOME = "https://app.black4.ai/reviews";
 
@@ -61,7 +63,7 @@ function reviewOrder(queue) {
     for (const item of review.items ?? []) {
       out.push({ id: reviewItemId(review.businessId, review.assetId, item.key), businessId: review.businessId, businessName: review.businessName,
         assetId: review.assetId, reviewTitle: review.title, key: item.key, version: item.version, title: item.title, question: item.question,
-        stake: item.stake, age: item.age, brief: item.brief, workType: item.workType, origin: item.origin ?? review.origin });
+        stake: item.stake, age: item.age, brief: item.brief, workType: item.workType, threadId: item.threadId ?? review.threadId ?? null });
     }
   }
   return out;
@@ -77,17 +79,17 @@ function reviewGroups(queue) {
   return [...groups.values()];
 }
 
-/** Where a review came from, when the server says: a Buzz thread, a job. */
+/** Where a review came from, when the server says (staff only): the Buzz
+ * thread and the job run that made it. Flat fields: `threadId`, and `job`
+ * { jobId, jobName, runId, startedAt }. */
 function reviewOrigin(review, item) {
-  const raw = item?.origin ?? review?.origin ?? {};
-  const thread = raw.thread ?? {};
-  const job = raw.job ?? {};
   const text = (value) => (typeof value === "string" && value.trim() ? plain(value, 200) : undefined);
+  const job = item?.job ?? review?.job ?? null;
   const out = {
-    threadId: text(raw.threadId ?? thread.id ?? item?.threadId ?? review?.threadId),
-    channelId: text(raw.channelId ?? thread.channelId ?? item?.channelId ?? review?.channelId),
-    jobId: text(raw.jobId ?? job.id ?? item?.jobId ?? review?.jobId),
-    jobTitle: text(raw.jobTitle ?? job.title ?? item?.jobTitle ?? review?.jobTitle),
+    threadId: text(item?.threadId ?? review?.threadId),
+    jobId: text(job?.jobId),
+    jobName: text(job?.jobName),
+    runId: text(job?.runId),
   };
   return Object.fromEntries(Object.entries(out).filter(([, value]) => value));
 }
@@ -214,6 +216,7 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
       if (!businessId && !serverNeedsBusiness) {
         try { return await ask({ assetId: locator.assetId, ...(locator.itemKey ? { itemKey: locator.itemKey } : {}) }); } catch (error) {
           // A server that needs businessId refuses the input; it is asked by business from now on.
+          if (error?.serverCode === "review_not_found") throw Object.assign(new Error("This review isn't waiting in your queue."), { code: "elsewhere" });
           if (error?.code === "rpc" || /businessId|required|invalid/i.test(String(error?.message))) serverNeedsBusiness = true;
           else throw error;
         }
@@ -364,6 +367,18 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
     setReceipt(id, { ...receipt, state: "saved", decision, message: "" });
   };
 
+  // At most REVIEW_PARALLEL decisions in flight (bulk approvals): the server
+  // limits a customer's parallel calls.
+  const waiting = [];
+  let inFlight = 0;
+  const enqueue = (id) => { waiting.push(id); pump(); };
+  const pump = () => {
+    while (inFlight < REVIEW_PARALLEL && waiting.length && !disposed) {
+      const id = waiting.shift();
+      inFlight += 1;
+      send(id).finally(() => { inFlight -= 1; pump(); });
+    }
+  };
   /** A person chose a verdict: it waits `undoMs` for Undo, then is sent.
    * Ask for changes and Reject need feedback. Returns the receipt, or null. */
   const propose = ({ review, item, verdict, feedback = "" }) => {
@@ -376,7 +391,7 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
     const receipt = { id, state: "pending", verdict, feedback: note, businessId: review.businessId, businessName: review.businessName, assetId: review.assetId,
       key: item.key, version: item.version, title: item.card?.question || item.title, deadline: now() + undoMs, message: "" };
     clearTimer(timers.get(id));
-    timers.set(id, setTimer(() => { timers.delete(id); void send(id); }, undoMs));
+    timers.set(id, setTimer(() => { timers.delete(id); enqueue(id); }, undoMs));
     setReceipt(id, receipt);
     return receipt;
   };
@@ -392,7 +407,7 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
   const retry = (id) => {
     const receipt = receipts.get(id);
     if (!receipt || receipt.state !== "failed") return;
-    void send(id);
+    enqueue(id);
   };
   /** Reads an unsure receipt's item again. */
   const recheck = (id) => {

@@ -23,7 +23,7 @@ function drawingReact() {
 }
 
 /** Buzz's own component classes (its design-system stylesheets), as against Tailwind utilities. */
-const COMPONENT = /^(buzz-|panel$|panel-header|navigation-item|inline-chip|notice$)/;
+const COMPONENT = /^(buzz-|panel$|panel-header|navigation-item|navigation-card|inline-chip|notice$)/;
 
 function walk(node, visit) {
   if (!node || typeof node !== "object") return;
@@ -63,6 +63,18 @@ export function collect() {
       h(ui.Disclosure, { title: "T", defaultOpen: true }, "x"), h(ui.Disclosure, { title: "T" }, "x"),
       h(ui.CountBadge, { count: 3, label: "3" }), h(ui.Dot, { label: "L" }), h(ui.LinkChip, { label: "L" }),
       h(ui.CodeColumn, null, h(ui.OneTimeCode, { code: "AB12" })), h(ui.Failure, { message: "m", retry() {} }), h(ui.Notice, { title: "T" }, "x"),
+      h(ui.Surface, { label: "S" }, "x"), h(ui.Subview, { header: "h", footer: "f" }, "x"), h(ui.Glyph, { name: "decisions" }),
+      h(ui.ChipRow, null, h(ui.Chip, { label: "C", glyph: "money" }), h(ui.Chip, { label: "C" })),
+      h(ui.DiffText, { label: "L", runs: [{ kind: "same", text: "a " }, { kind: "removed", text: "b" }, { kind: "added", text: "c" }] }), h(ui.DiffText, { runs: [] }),
+      h(ui.ChangeTable, { rows: [{ label: "L", before: "a", after: "b", changed: true }, { label: "", before: "a", after: "a", changed: false }] }),
+      h(ui.MediaPair, { before: "data:image/png;base64,", after: "data:image/png;base64," }), h(ui.MediaPair, { after: null, loading: true }),
+      h(ui.DecisionBar, { status: "s" }, "x"), h(ui.DecisionBar, { stacked: true }, "x"), h(ui.DecisionBar, null),
+      h(ui.Skeleton, { layout: "item" }), h(ui.Skeleton, { layout: "list" }),
+      h(ui.Checkbox, { checked: true, label: "L", onCheckedChange() {} }), h(ui.Checkbox, { checked: false, size: "sm", disabled: true, label: "L", onCheckedChange() {} }),
+      h(ui.ListGroup, { label: "L", count: 2 }, h(ui.SelectRow, { title: "T", subtitle: "S", meta: "2h", selected: true, picked: true, onPick() {}, onOpen() {} }),
+        h(ui.SelectRow, { title: "T", quiet: true, onOpen() {} })),
+      h(ui.Split, { label: "L", list: "l", detail: "d" }),
+      h(ui.MessageCard, { label: "L" }, h(ui.MessageRow, { title: "T", subtitle: "S", onOpen() {} }), h(ui.MessageRow, { title: "T", loading: true })),
       ui.Title("t"), ui.Heading("h"), ui.Paragraph("p"), ui.Caption("c"), ui.Strong("s"), ui.Lines("a", "b"), ui.Line("l", { role: "status" }), ui.Line("l", { danger: true }), ui.Pre("p"));
   }
   const classes = new Set(), utilities = new Set(), attributes = new Set();

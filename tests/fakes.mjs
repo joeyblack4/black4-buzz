@@ -221,3 +221,78 @@ export async function until(ready, { timeoutMs = 2000, what = "the condition" } 
     await settle(4);
   }
 }
+
+/** Platform Control's review card, in its wire shapes (black4-mcp-review-card.ts):
+ * review_queue, open_review (with or without businessId; decision tokens and
+ * preview grants only in `_meta["ai.black4/review-card"]`), get_review_file
+ * (an image part) and decide_review_item. `decide` scripts its answers in
+ * order, the last repeating: "ok", "hang" (never answers), or a refusal code
+ * ("stale_review", "decision_exists", "decision_token_used", …). Use as
+ * fakeMcp's `answer`, or call `handle(name, args)` directly. Fictional
+ * businesses only. */
+export function fakeReviews({ decide = ["ok"], cardClient = true, needsBusiness = false } = {}) {
+  const item = (key, extra = {}) => ({
+    key, version: 1, title: `Change ${key}`, workType: "storefront_content", action: "Update the bakery's menu page.", status: "awaiting_decision", decidable: true, decision: null,
+    brief: { why: "The menu changed.", expectedResult: "Fewer wrong orders.", before: "Rye", after: "Sourdough" },
+    card: { question: `Change the ${key}?`, stake: { kind: "customers", text: "About 900 visitors a day." }, facts: ["Reversible"],
+      show: { type: "text", label: "Menu line", before: "Fresh rye bread daily", after: "Fresh sourdough bread daily" } },
+    change: null, publishedAt: "2026-11-17T00:00:00Z", madeBy: "copy-bot · Mira", requestedBy: "Weekly refresh", threadId: null, job: null,
+    reviewUrl: `https://app.black4.ai/r/rv_bakery?v=1&item=${key}`, ...extra,
+  });
+  const self = {
+    decide: [...decide], calls: [], tokens: new Map(), decisions: [], spent: new Set(),
+    review: { kind: "black4_review", audience: "staff", businessId: "business-crumb", businessName: "Crumb & Co", assetId: "rv_bakery", title: "Winter menu", version: 1,
+      reviewUrl: "https://app.black4.ai/r/rv_bakery?v=1", focusItemKey: "hero", items: [item("hero"), item("price")], decide: "People decide.", voided: null },
+  };
+  let serial = 0;
+  const data = (value, meta) => ({ result: { structuredContent: { data: value }, content: [{ type: "text", text: JSON.stringify({ data: value }) }], ...(meta ? { _meta: { "ai.black4/review-card": meta } } : {}) } });
+  const refusal = (code, message = `fake ${code}`) => ({ result: { isError: true, structuredContent: { error: { code, message } }, content: [{ type: "text", text: JSON.stringify({ error: { code, message } }) }] } });
+  self.queue = () => ({ kind: "black4_review_queue", audience: "staff", total: self.review.items.filter((entry) => entry.decidable).length, listed: 2, truncated: false,
+    reviews: [{ businessId: self.review.businessId, businessName: self.review.businessName, assetId: self.review.assetId, title: self.review.title, version: 1,
+      items: self.review.items.filter((entry) => entry.decidable).map((entry) => ({ key: entry.key, version: entry.version, title: entry.title, action: entry.action, workType: entry.workType, brief: "The menu changed.", age: "2h" })) }],
+    blocked: [], stalled: [] });
+  self.handle = (name, args = {}) => {
+    self.calls.push({ name, args });
+    if (name === "review_queue") return data(self.queue());
+    if (name === "open_review") {
+      if (!args.businessId && needsBusiness) return { error: { code: -32602, message: "MCP error -32602: businessId is required" } };
+      if (args.assetId !== self.review.assetId || (args.businessId && args.businessId !== self.review.businessId)) return refusal("review_not_found", "No review was found.");
+      const decisionTokens = {};
+      if (cardClient) for (const entry of self.review.items.filter((candidate) => candidate.decidable)) {
+        const token = `b4rd_${String(++serial).padStart(43, "0")}`;
+        self.tokens.set(token, { key: entry.key, version: entry.version });
+        decisionTokens[entry.key] = { token, version: entry.version, expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString() };
+      }
+      return data({ ...self.review, decideIn: cardClient ? "card" : "reviews" }, { decisionTokens,
+        previews: { hero: { url: "https://content.example.test/v/grant-secret/hero.png", contentType: "image/png" } }, beforePreviews: {} });
+    }
+    if (name === "get_review_file") return { result: { content: [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }] } };
+    if (name === "decide_review_item") {
+      const step = self.decide.length > 1 ? self.decide.shift() : self.decide[0];
+      const minted = self.tokens.get(args.decisionToken);
+      if (!minted || minted.key !== args.itemKey) return refusal("decision_token_invalid");
+      if (self.spent.has(args.decisionToken)) return refusal("decision_token_used");
+      self.spent.add(args.decisionToken);
+      const target = self.review.items.find((entry) => entry.key === args.itemKey);
+      const record = () => {
+        const decision = { id: `dec_${self.decisions.length + 1}`, businessId: args.businessId, assetId: args.assetId, version: args.version, itemKey: args.itemKey,
+          verdict: args.verdict, feedback: args.feedback ?? null, reviewer: "Sam Rivera", decidedAt: new Date().toISOString(), executionStatus: args.verdict === "approved" ? "pending" : "not_applicable" };
+        self.decisions.push(decision);
+        Object.assign(target, { decidable: false, status: "decided", decision: { verdict: decision.verdict, decidedAt: decision.decidedAt, executionStatus: decision.executionStatus, releaseOutcome: null, completedAt: null, reviewer: decision.reviewer, feedback: decision.feedback, executedBy: null } });
+        return decision;
+      };
+      if (step === "hang") { record(); return new Promise(() => {}); }
+      if (step !== "ok") return refusal(step);
+      return data({ decision: record(), next: "Saved." });
+    }
+    return undefined;
+  };
+  /** fakeMcp's `answer`: the review tools, everything else to `rest`. */
+  self.answer = (rest = () => ({ result: {} })) => (message) => {
+    if (message.method === "tools/list") return { result: { tools: ["whoami", "review_queue", "open_review", "get_review_file"].map((tool) => ({ name: tool, inputSchema: { type: "object" } }))
+      .concat([{ name: "decide_review_item", inputSchema: { type: "object" }, _meta: { ui: { visibility: ["app"] } } }]) } };
+    if (message.method === "tools/call") return self.handle(message.params?.name, message.params?.arguments) ?? rest(message);
+    return rest(message);
+  };
+  return self;
+}

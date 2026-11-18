@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { fakeAuthKit, fakeMcp, https, freshPlugin, settle, MCP } from "./fakes.mjs";
 
-const { reviewUrl, reviewReader, reviewSurface } = await freshPlugin();
+const { reviewUrl } = await freshPlugin();
 const tools = ["whoami", "resolve_channel_business", "open_review"].map((name) => ({
   name, description: name, inputSchema: { type: "object", required: ["channelId"] },
 }));
@@ -42,7 +42,7 @@ async function harness(t, options = {}) {
   // Children sit in props as well, as React keeps them, for components that render their children.
   const h = (type, props, ...children) => { const kids = children.flat(); return { type, props: { ...(props ?? {}), children: kids }, children: kids }; };
   const ctx = {
-    react: { createElement: h, useState: (v) => [v, () => {}], useEffect: () => {}, useLayoutEffect: () => {}, useRef: (v) => ({ current: v }), useId: (() => { let n = 0; return () => `id-${++n}`; })(), Component: class {} },
+    react: { createElement: h, useState: (v) => [typeof v === "function" ? v() : v, () => {}], useEffect: () => {}, useLayoutEffect: () => {}, useRef: (v) => ({ current: v }), useId: (() => { let n = 0; return () => `id-${++n}`; })(), Component: class {} },
     agents: {
       snapshot: () => ({ running: [{ key: "agent", relay: "wss://example.test" }] }),
       addTool: (tool) => { registered.set(tool.name, tool); return () => registered.delete(tool.name); },
@@ -92,32 +92,6 @@ test("review links preserve exact item/version and refuse unrelated or deceptive
   assert.equal(reviewUrl(url), url);
   assert.equal(reviewUrl("https://app.black4.ai/reviews?business=example"), "https://app.black4.ai/reviews?business=example");
   for (const bad of ["http://app.black4.ai/r/a", "https://app.black4.ai.evil.test/r/a", "https://app.black4.ai@evil.test/r/a", "https://person@app.black4.ai/r/a", "https://review.black4.ai/v/grant/a", "https://app.black4.ai/settings", "https://app.black4.ai:444/r/a", "https://app.black4.ai/r/a/other", null]) assert.equal(reviewUrl(bad), null);
-});
-
-test("native reviews register a panel and message preview without submitting a decision", async (t) => {
-  const h = await harness(t);
-  await settle();
-  const before = h.mcp.calls.length;
-  const url = "https://app.black4.ai/r/rv_example?item=hero&v=3";
-  assert.equal(h.panel.matches(url), true);
-  const view = h.panel.component({ target: url });
-  assert.equal(typeof view.type, "function");
-  assert.equal(view.props.target, url);
-  assert.equal(h.preview.matches(url), true);
-  assert.equal(h.preview.component({ url, open() {} }).props.compact, true);
-  assert.equal(h.mcp.calls.length, before);
-  assert.equal(h.link.matches(url), true);
-  let opened;
-  const launcher = h.panel.channelLauncher({ available: () => true, pressed: false, toggle: (target) => { opened = target; } });
-  launcher.props.onClick();
-  assert.equal(opened, "https://app.black4.ai/reviews");
-  assert.equal(h.panel.channelLauncher({ available: () => false }), null);
-});
-
-test("native review inspection remains available without an embedded browser", async (t) => {
-  const h = await harness(t, { browserAvailable: false });
-  assert.equal(h.panel.matches("https://app.black4.ai/reviews"), true);
-  assert.equal(h.panel.channelLauncher({ available: () => true }).type, "button");
 });
 
 test("signed in, it initializes the MCP over HTTPS with the bearer and registers every listed tool", async (t) => {
@@ -236,81 +210,6 @@ test("Stop ends an in-flight call for the agent, and its late answer goes nowher
   await settle();
 });
 
-test("review reader resolves business from the authorized queue and never calls a mutation", async () => {
-  const calls = [];
-  const read = reviewReader(async (name, args) => {
-    calls.push({ name, args });
-    if (name === "review_queue") return { reviews: [{ assetId: "rv_a", businessId: "business-sample" }] };
-    return { kind: "black4_review", assetId: "rv_a", businessId: "business-sample", version: 2, items: [{ key: "copy", version: 2 }] };
-  });
-  await read("https://app.black4.ai/r/rv_a?v=2&item=copy");
-  assert.deepEqual(calls, [
-    { name: "review_queue", args: {} },
-    { name: "open_review", args: { assetId: "rv_a", businessId: "business-sample", itemKey: "copy" } },
-  ]);
-  await assert.rejects(read("https://app.black4.ai/r/rv_a?v=1&item=copy"), /older version/);
-  await assert.rejects(read("https://app.black4.ai/r/rv_missing"), /outside the loaded queue/);
-});
-
-test("review reader refuses mismatched identities and retries failed reads", async () => {
-  let attempts = 0;
-  const read = reviewReader(async (name) => {
-    attempts++;
-    if (attempts === 1) throw new Error("session expired");
-    if (name === "review_queue") return { reviews: [{ assetId: "rv_a", businessId: "sample" }] };
-    return { kind: "black4_review", assetId: "rv_a", businessId: "another-business", version: 1 };
-  });
-  await assert.rejects(read("https://app.black4.ai/r/rv_a"), /session expired/);
-  await assert.rejects(read("https://app.black4.ai/r/rv_a"), /did not match/);
-  assert.equal(attempts, 3);
-});
-
-test("a decided review can refresh after leaving the pending queue", async () => {
-  let queueReads = 0;
-  let reviewReads = 0;
-  const read = reviewReader(async name => {
-    if (name === "review_queue") {
-      queueReads++;
-      return { reviews: queueReads === 1 ? [{ assetId: "rv_a", businessId: "sample" }] : [] };
-    }
-    reviewReads++;
-    return { kind: "black4_review", assetId: "rv_a", businessId: "sample", version: 1, items: [{ key: "copy", version: 1, status: reviewReads > 1 ? "decided" : "awaiting_decision" }] };
-  });
-  await read("https://app.black4.ai/r/rv_a?v=1");
-  assert.equal((await read("https://app.black4.ai/r/rv_a?v=1")).items[0].status, "decided");
-  assert.equal(queueReads, 1);
-  assert.equal(reviewReads, 2);
-});
-
-test("Reviews registers a host workspace in the dock without replacing MCP tools", async t => {
-  const app = await harness(t); await settle();
-  assert.equal(app.page.id, "reviews");
-  assert.equal(app.page.placement, "dock");
-  assert.equal(app.page.primary, true);
-  assert.equal(app.page.layout, "workspace");
-  assert.equal(typeof app.page.component, "function");
-  assert.equal(typeof app.page.badge, "function");
-  assert.equal(app.registered.size, tools.length);
-  const view = app.page.component();
-  assert.equal(view.children[0], null, "signed in, nothing sits above the inbox");
-  const inbox = view.children[1].children[0];
-  assert.equal(inbox.type, "browser-view");
-  assert.equal(inbox.props.url, "https://app.black4.ai/reviews?experience=buzz");
-  assert.equal(inbox.props.storage, "black4-reviews");
-});
-
-test("without an embedded browser the Reviews page is the native queue, with the review brief one step away", async t => {
-  const app = await harness(t, { browserAvailable: false, queue: queueText({ total: 1, reviews: [{ assetId: "rv_a", businessId: "b", businessName: "Sample", title: "Copy", reviewUrl: "https://app.black4.ai/r/rv_a", items: [{ age: "2h" }] }] }) });
-  await settle();
-  const page = app.page.component();
-  assert.notEqual(page.children[0].type, "browser-view");
-  const panel = render(page.children[0]);
-  assert.equal(panel.props.target, "https://app.black4.ai/reviews");
-  assert.equal(typeof panel.props.open, "function");
-  assert.equal(panel.type, app.panel.component({ target: "https://app.black4.ai/reviews" }).type, "the page and the panel mount the same native composition");
-  assert.equal(page.children[0].type, app.panel.component, "the page is the review panel pointed at the queue");
-});
-
 test("the Reviews badge shows the connected account's waiting count and clears on disconnect", async t => {
   let total = 3;
   const app = await harness(t, { queue: () => queueText({ total }) });
@@ -343,6 +242,44 @@ test("the Reviews badge hides after a failed refresh and ignores an answer from 
   assert.equal(failing.registered.size, tools.length, "a failed queue read does not disturb the agent tools");
 });
 
+
+test("Reviews registers its panel, link chip and message card without reading or deciding anything", async (t) => {
+  const h = await harness(t);
+  await settle();
+  const before = h.mcp.calls.length;
+  const url = "https://app.black4.ai/r/rv_example?item=hero&v=3";
+  assert.equal(h.panel.matches(url), true);
+  assert.equal(h.panel.matches("https://app.black4.ai/reviews"), true);
+  assert.equal(typeof h.panel.component({ target: url }).type, "function");
+  assert.equal(h.preview.matches(url), true, "an older Buzz without accessories: one card per link");
+  assert.equal(h.link.matches(url), true);
+  assert.equal(h.mcp.calls.length, before, "registering read nothing");
+  let opened;
+  const launcher = h.panel.channelLauncher({ available: () => true, pressed: false, toggle: (target) => { opened = target; } });
+  launcher.props.onClick();
+  assert.equal(opened, "https://app.black4.ai/reviews");
+  assert.equal(h.panel.channelLauncher({ available: () => false }), null);
+  assert.equal(h.mcp.calls.filter((call) => call.params?.name === "decide_review_item").length, 0);
+});
+
+test("the Reviews page is native: the queue beside the item, never the embedded website", async (t) => {
+  for (const browserAvailable of [true, false]) {
+    const app = await harness(t, { browserAvailable, queue: queueText({ total: 1, reviews: [{ assetId: "rv_a", businessId: "b", businessName: "Sample Bakery", title: "Copy", items: [{ key: "k", version: 1, title: "Change the menu", age: "2h" }] }] }) });
+    await settle();
+    assert.equal(app.page.id, "reviews");
+    assert.equal(app.page.placement, "dock");
+    assert.equal(app.page.layout, "workspace");
+    assert.equal(typeof app.page.route?.validate, "function", "a sidebar row or notification can open it on a business or item");
+    assert.equal(app.page.route.validate({ business: "b", asset: "rv_a", item: "k" }), true);
+    assert.equal(app.page.route.validate({ url: "https://evil.test" }), false);
+    const text = JSON.stringify(expandAll(app.page.component({})));
+    assert.doesNotMatch(text, /browser-view|app\.black4\.ai\/reviews\?experience/);
+    assert.match(text, /Sample Bakery/);
+    assert.match(text, /Change the menu/);
+    assert.equal(app.registered.size, tools.length, "Reviews adds no agent tools");
+  }
+});
+
 test("a native review offers Connect in place only when nothing is already in progress", async t => {
   const offline = new Set([MCP]);
   const app = await harness(t, { offline });
@@ -357,23 +294,14 @@ test("a native review offers Connect in place only when nothing is already in pr
   assert.equal(button(starting, "Connect Black 4"), undefined, "no second Connect while a connection is in progress");
   await settle();
   assert.equal(app.registered.size, tools.length);
-  const React = { createElement: (type, props, ...children) => ({ type, props: { ...(props ?? {}), children }, children }), useState: (v) => [v, () => {}], useEffect: () => {}, useId: () => "id" };
-  let connects = 0;
-  const signingIn = expandAll(reviewSurface(React, async () => ({}), null, () => ({ status: "signing-in", detail: "Finish signing in to Black 4 in your browser.", connect: () => connects++ }))({ target: "https://app.black4.ai/reviews" }));
-  assert.equal(button(signingIn, "Connect Black 4"), undefined, "an active browser sign-in is never restarted from the brief");
-  assert.match(JSON.stringify(signingIn), /Finish signing in/);
-  const stopped = expandAll(reviewSurface(React, async () => ({}), null, () => "stopped")({ target: "https://app.black4.ai/reviews" }));
-  assert.equal(button(stopped, "Connect Black 4"), undefined, "a plain status string still renders without a connect action");
-  assert.equal(connects, 0);
 });
 
-test("the native composition draws in Buzz's own parts, with no stylesheet or colors of its own", () => {
-  const React = { createElement: (type, props, ...children) => ({ type, props: { ...(props ?? {}), children }, children }), useState: (v) => [v, () => {}], useEffect: () => {}, useId: () => "id" };
-  const view = expandAll(reviewSurface(React, async () => ({}), null)({ target: "https://app.black4.ai/reviews" }));
-  const text = JSON.stringify(view);
+test("the native screens draw in Buzz's own parts: no stylesheet or colours of their own, red only for broken", async t => {
+  const app = await harness(t);
+  await settle();
+  const text = JSON.stringify(expandAll(app.panel.component({ target: "https://app.black4.ai/r/rv_a?business=b" })));
   assert.doesNotMatch(text, /"type":"style"/, "no <style> of its own");
-  assert.doesNotMatch(text, /#[0-9a-f]{3,8}\b|\brgba?\(|CanvasText/i, "no colors of its own");
-  assert.match(text, /Loading your review/);
-  assert.match(text, /motion-safe:animate-spin/, "Buzz's spinner while it loads");
+  assert.doesNotMatch(text, /#[0-9a-f]{3,8}\b|\brgba?\(|CanvasText/i, "no colours of its own");
+  assert.doesNotMatch(text, /text-danger/, "loading is not a fault");
+  assert.match(text, /aria-busy/, "a skeleton in the real layout while it loads");
 });
-

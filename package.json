@@ -7,12 +7,13 @@
   },
   "scripts": {
     "test": "node --test tests/*.test.mjs",
-    "check": "node --check plugins/black4/plugin.js && node --check bridge/black4-agent-mcp/black4-agent-mcp.mjs && node --check machine/qwen-account.mjs && node --check machine/door.mjs && sh -n machine/setup.sh && sh -n machine/deploy.sh && sh -n machine/teammates.sh && sh -n machine/platform-user.sh && sh -n install.sh && node scripts/check-build-folder.mjs && node scripts/check-machine-pins.mjs && node --check canary/check.mjs && node --check canary/load.mjs && node --check canary/design.mjs && node kit/build.mjs --check && node subscriptions/build.mjs --check && python3 -m unittest discover -s machine/tests && npm test",
+    "check": "node --check plugins/black4/plugin.js && node --check bridge/black4-agent-mcp/black4-agent-mcp.mjs && node --check machine/qwen-account.mjs && node --check machine/door.mjs && sh -n machine/setup.sh && sh -n machine/deploy.sh && sh -n machine/teammates.sh && sh -n machine/platform-user.sh && sh -n install.sh && node scripts/check-build-folder.mjs && node scripts/check-machine-pins.mjs && node --check canary/check.mjs && node --check canary/load.mjs && node --check canary/design.mjs && node kit/build.mjs --check && node src/build.mjs --check && node subscriptions/build.mjs --check && python3 -m unittest discover -s machine/tests && npm test",
     "test:subscriptions": "npm ci --prefix subscriptions --no-fund --no-audit && npm test --prefix subscriptions",
     "setup": "npm ci --prefix bridge/black4-agent-mcp --no-fund --no-audit",
     "canary": "node canary/check.mjs",
     "canary:load": "node canary/load.mjs",
     "kit": "node kit/build.mjs",
-    "canary:design": "node canary/design.mjs"
+    "canary:design": "node canary/design.mjs",
+    "build": "node kit/build.mjs && node src/build.mjs"
   }
 }

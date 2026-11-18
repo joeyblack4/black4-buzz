@@ -115,7 +115,17 @@ function buzzUi(React, { nativeSelect = false } = {}) {
     dots: ["M4 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0", "M11 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0", "M18 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0"],
     x: ["M18 6l-12 12", "M6 6l12 12"],
     robot: ["M6 6a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2l0 -4", "M12 2v2", "M9 12v9", "M15 12v9", "M5 16l4 -2", "M15 14l4 2", "M9 18h6", "M10 8v.01", "M14 8v.01"],
-    link: ["M9 15l6 -6", "M11 6l.463 -.536a5 5 0 0 1 7.071 7.072l-.534 .464", "M13 18l-.397 .534a5.068 5.068 0 0 1 -7.127 0a4.972 4.972 0 0 1 0 -7.071l.524 -.463"] };
+    link: ["M9 15l6 -6", "M11 6l.463 -.536a5 5 0 0 1 7.071 7.072l-.534 .464", "M13 18l-.397 .534a5.068 5.068 0 0 1 -7.127 0a4.972 4.972 0 0 1 0 -7.071l.524 -.463"],
+    // chevron-up, chevron-down, currency-dollar, users, alert-triangle, minus
+    up: "M6 15l6 -6l6 6", down: "M6 9l6 6l6 -6",
+    money: ["M16.7 8a3 3 0 0 0 -2.7 -2h-4a3 3 0 0 0 0 6h4a3 3 0 0 1 0 6h-4a3 3 0 0 1 -2.7 -2", "M12 3v3m0 12v3"],
+    people: ["M5 7a4 4 0 1 0 8 0a4 4 0 1 0 -8 0", "M3 21v-2a4 4 0 0 1 4 -4h4a4 4 0 0 1 4 4v2", "M16 3.13a4 4 0 0 1 0 7.75", "M21 21v-2a4 4 0 0 0 -3 -3.85"],
+    alert: ["M12 9v4", "M10.363 3.591l-8.106 13.534a1.914 1.914 0 0 0 1.636 2.871h16.214a1.914 1.914 0 0 0 1.636 -2.87l-8.106 -13.536a1.914 1.914 0 0 0 -3.274 0z", "M12 16h.01"],
+    minus: "M5 12l14 0",
+    // clock (a scheduled job), message (asked in a conversation), sparkles (on its own)
+    clock: ["M3 12a9 9 0 1 0 18 0a9 9 0 0 0 -18 0", "M12 7v5l3 3"],
+    message: ["M8 9h8", "M8 13h6", "M18 4a3 3 0 0 1 3 3v8a3 3 0 0 1 -3 3h-5l-5 3v-3h-2a3 3 0 0 1 -3 -3v-8a3 3 0 0 1 3 -3h12z"],
+    sparkles: ["M16 18a2 2 0 0 1 2 2a2 2 0 0 1 2 -2a2 2 0 0 1 -2 -2a2 2 0 0 1 -2 2zm0 -12a2 2 0 0 1 2 2a2 2 0 0 1 2 -2a2 2 0 0 1 -2 -2a2 2 0 0 1 -2 2zm-7 12a6 6 0 0 1 6 -6a6 6 0 0 1 -6 -6a6 6 0 0 1 -6 6a6 6 0 0 1 6 6z"] };
   const h = React.createElement;
   const Fragment = React.Fragment;
   /** The variants each part takes, all ones Buzz styles (kit/uses.json
@@ -127,6 +137,8 @@ function buzzUi(React, { nativeSelect = false } = {}) {
     Input: { controlSize: ["md", "sm"] },
     Stack: { gap: [4, 2, "section"] },
     Column: { gap: [4, 2] },
+    Tabs: { variant: ["panel", "segmented"] },
+    Avatar: { size: ["small", "compact", "tiny"] },
   };
   const one = (list, value) => (list.includes(value) ? value : list[0]);
   const icon = (path, size, props = {}) => h("svg", { xmlns: "http://www.w3.org/2000/svg", width: `${size / 16}rem`, height: `${size / 16}rem`,
@@ -316,12 +328,12 @@ function buzzUi(React, { nativeSelect = false } = {}) {
 
   /** Field.tsx around Textarea.tsx (AgentInstructions): label, the text, a
    * muted description or the error. */
-  const TextField = ({ label, description, error, optional = false, value, onChange, rows = 8, maxLength, placeholder, disabled }) => {
+  const TextField = ({ label, description, error, optional = false, value, onChange, rows = 8, maxLength, placeholder, disabled, autoFocus, onKeyDown }) => {
     const id = React.useId();
     return h("div", { "data-buzz-ui": "", className: "buzz-field" },
       h("label", { className: "buzz-field-label", htmlFor: id }, label,
         optional ? h(Fragment, null, " ", h("span", { className: "buzz-field-optional" }, "Optional")) : null),
-      h("textarea", { id, rows, maxLength, placeholder, value, disabled,
+      h("textarea", { id, rows, maxLength, placeholder, value, disabled, autoFocus, onKeyDown,
         "data-buzz-ui": "", className: "buzz-textarea", "data-variant": "text", "data-surface": "inset", "data-appearance": "outlined",
         "data-invalid": error ? "" : undefined, "aria-invalid": error ? "true" : undefined,
         onChange: (event) => onChange(event.target.value) }),
@@ -336,7 +348,7 @@ function buzzUi(React, { nativeSelect = false } = {}) {
   /** A column of sections, cards or fields. `as: "form"` makes it the form
    * (with `onSubmit`); gap 4 between sections, 2 within a field. */
   const Stack = ({ as = "div", gap, onSubmit, children }) =>
-    h(as, { className: GAPS[one(VARIANTS.Stack.gap, gap)], onSubmit }, ...each(children));
+    h(as, { className: GAPS[one(VARIANTS.Stack.gap, gap)], onSubmit, style: { gridTemplateColumns: "minmax(0, 1fr)" } }, ...each(children));
   /** Builderlab's sign-in column: lines and a button, left-aligned. */
   const Column = ({ gap, children }) =>
     h("div", { "data-buzz-ui": "", className: one(VARIANTS.Column.gap, gap) === 2 ? "flex flex-col items-start gap-2" : "flex flex-col items-start gap-4" }, ...each(children));
@@ -377,8 +389,8 @@ function buzzUi(React, { nativeSelect = false } = {}) {
   /** A dock page's surface (Panel.tsx, laid out as Shared notes' page):
    * `header` (a PanelHeader) above a scrolling body. `fill`: the body has no
    * inset (an embedded browser fills it). */
-  const Page = ({ label, header, fill = false, children }) =>
-    h("section", { className: "panel", "data-buzz-surface": "", "data-shape": "panel", "aria-label": label },
+  const Page = ({ label, header, fill = false, onFocus, onBlur, children }) =>
+    h("section", { className: "panel", "data-buzz-surface": "", "data-shape": "panel", "aria-label": label, onFocus, onBlur },
       h("div", { "data-buzz-ui": "", style: { display: "flex", flexDirection: "column", height: "100%", minHeight: 0, containerType: "inline-size" } },
         header ?? null,
         h("div", { style: fill ? { display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }
@@ -386,8 +398,11 @@ function buzzUi(React, { nativeSelect = false } = {}) {
           ...each(children))));
 
   /** A drill-in inside a panel (PanelSubview): its bar stays put while the body scrolls. */
-  const Subview = ({ header, children }) =>
-    h("div", { "data-buzz-ui": "", style: { display: "flex", flexDirection: "column", height: "100%", minHeight: 0 } }, header, ...each(children));
+  const Subview = ({ header, footer, children }) =>
+    h("div", { "data-buzz-ui": "", style: { display: "flex", flexDirection: "column", height: "100%", minHeight: 0 } }, header, ...each(children), footer ?? null);
+  /** A panel's whole surface (a Subview's frame), which knows when it has focus. */
+  const Surface = ({ label, onFocus, onBlur, children }) =>
+    h("div", { "data-buzz-ui": "", role: "region", "aria-label": label, onFocus, onBlur, style: { display: "flex", flexDirection: "column", height: "100%", minHeight: 0 } }, ...each(children));
   /** A side panel's body: Buzz leaves the inset to the panel (as GitHub's). */
   const PanelBody = ({ children }) =>
     h("div", { "data-buzz-ui": "", style: { padding: "var(--space-panel-inset)", overflowY: "auto", minHeight: 0, flex: 1, display: "flex", flexDirection: "column", gap: "var(--space-4)", color: "var(--text-standard)" } },
@@ -420,7 +435,7 @@ function buzzUi(React, { nativeSelect = false } = {}) {
 
   /** Tabs.tsx, variant "panel" size "sm": pick one of a few items. The
    * indicator is measured from the selected tab, as Base UI does. */
-  const Tabs = ({ label, value, items, onChange }) => {
+  const Tabs = ({ label, value, items, onChange, variant = "panel" }) => {
     const list = React.useRef(null);
     const bar = React.useRef(null);
     React.useLayoutEffect(() => {
@@ -445,7 +460,7 @@ function buzzUi(React, { nativeSelect = false } = {}) {
       onChange(next.value);
       requestAnimationFrame?.(() => list.current?.querySelector?.('[role="tab"][aria-selected="true"]')?.focus());
     };
-    return h("div", { "data-buzz-ui": "", className: "buzz-tabs", "data-variant": "panel", "data-size": "sm", "data-orientation": "horizontal" },
+    return h("div", { "data-buzz-ui": "", className: "buzz-tabs", "data-variant": one(VARIANTS.Tabs.variant, variant), "data-size": "sm", "data-orientation": "horizontal" },
       h("div", { ref: list, role: "tablist", "aria-label": label, "aria-orientation": "horizontal", className: "buzz-tabs-list", "data-orientation": "horizontal", onKeyDown: keys },
         h("span", { ref: bar, className: "buzz-tabs-indicator", hidden: true }),
         ...items.map((item) => {
@@ -503,6 +518,208 @@ function buzzUi(React, { nativeSelect = false } = {}) {
   /** `.notice`: something that needs a person, not broken (a warning). */
   const Notice = ({ title, children }) =>
     h("div", { role: "status", className: "notice" }, title ? h("h3", null, title) : null, ...each(children));
+
+  // ---- Reviews: the work, the decision and the list ------------------------------
+
+  /** ValueChip.tsx: a short read-only value (a stake, a fact). `glyph`: an
+   * ICON name for its 12px mark; `emphasis`: the label in the standard weight
+   * (the stake), else the chip's own. */
+  const Chip = ({ label, glyph, title }) =>
+    h("span", { "data-buzz-ui": "", className: "buzz-value-chip" },
+      glyph && ICON[glyph] ? h("span", { className: "buzz-value-chip-icon", "aria-hidden": true }, icon(ICON[glyph], 12)) : null,
+      h("span", { className: "buzz-value-chip-text", title: title ?? (typeof label === "string" ? label : undefined) }, label));
+  /** Chips in a row that wraps. */
+  const ChipRow = ({ children }) => h("div", { className: "flex flex-wrap items-center gap-2", style: { minWidth: 0 } }, ...each(children));
+
+  /** Diffs' card (bundled/diffs, Diffs.module.css `.card`/`.fileHeader`):
+   * the frame around a change. */
+  const card = { minWidth: 0, overflow: "hidden", border: "1px solid var(--border-standard)", borderRadius: "var(--radius-control)", background: "var(--surface-panel)", color: "var(--text-standard)" };
+  const cardHeader = { display: "flex", alignItems: "center", gap: "var(--space-2)", padding: "var(--space-2) var(--space-3)", background: "var(--surface-inset)" };
+  /** Diffs' insert and delete fills (`--diff-code-insert/delete-background-color`):
+   * a tint on the words, never red text (red means broken). */
+  const RUN = { added: { background: "var(--affordance-success)", borderRadius: "var(--space-half)", textDecoration: "none" },
+    removed: { background: "var(--affordance-danger)", borderRadius: "var(--space-half)", textDecoration: "line-through" } };
+  /** A word diff as Diffs draws inserted and deleted code: `runs` of
+   * { kind: same | added | removed, text }, under its `label`. */
+  const DiffText = ({ label, runs }) =>
+    h("figure", { style: { ...card, margin: 0 } },
+      label ? h("figcaption", { className: "text-caption text-subtle", style: cardHeader }, label) : null,
+      h("p", { className: "m-0 text-body", style: { padding: "var(--space-3)", whiteSpace: "pre-wrap", overflowWrap: "anywhere" } },
+        ...runs.map((run, index) => run.kind === "same" ? h(Fragment, { key: index }, run.text)
+          : h(Fragment, { key: index },
+              h(run.kind === "added" ? "ins" : "del", { style: { ...RUN[run.kind], color: "inherit" } },
+                h("span", { className: "sr-only" }, run.kind === "added" ? "Added: " : "Removed: "), run.text),
+              // A removed word and its replacement read as two words.
+              run.kind === "removed" && runs[index + 1]?.kind === "added" ? " " : null))));
+
+  /** Settings before and after, in Diffs' card: each row its label, Now and
+   * After; a changed row's new value carries the insert tint, an unchanged
+   * row reads once, quietly. */
+  const ChangeTable = ({ rows, now = "Now", after = "After" }) =>
+    h("div", { "data-buzz-ui": "", role: "table", "aria-label": "Changes", style: card },
+      ...rows.map((row, index) => h("div", { key: index, role: "row", style: { display: "grid", gap: "var(--space-1)", padding: "var(--space-3)", borderTop: index ? "1px solid var(--border-standard)" : undefined } },
+        row.label ? h("span", { role: "rowheader", className: "text-caption text-subtle" }, row.label) : null,
+        row.changed
+          ? h(Fragment, null,
+              h("span", { role: "cell", className: "text-body-sm text-subtle", style: { display: "grid", gridTemplateColumns: "3.5rem minmax(0, 1fr)", gap: "var(--space-2)" } },
+                h("span", { className: "text-caption" }, now), h("span", { style: { overflowWrap: "anywhere" } }, row.before || "None")),
+              h("span", { role: "cell", className: "text-body text-standard", style: { display: "grid", gridTemplateColumns: "3.5rem minmax(0, 1fr)", gap: "var(--space-2)" } },
+                h("span", { className: "text-caption text-subtle" }, after), h("span", { style: { overflowWrap: "anywhere" } }, h("mark", { style: { ...RUN.added, color: "inherit" } }, row.after || "None"))))
+          : h("span", { role: "cell", className: "text-body-sm text-subtle", style: { overflowWrap: "anywhere" } }, `Unchanged: ${row.after || row.before || "None"}`))));
+
+  /** Before and after images, side by side in Diffs' card. `before`/`after`:
+   * data URLs; `loading`: the image is still coming. */
+  const MediaPair = ({ before, after, loading = false, label = "The work" }) => {
+    const figure = (src, caption) => h("figure", { key: caption, style: { margin: 0, display: "grid", gap: "var(--space-1)", minWidth: 0 } },
+      src ? h("img", { src, alt: `${label}: ${caption}`, style: { display: "block", width: "100%", height: "auto", borderRadius: "var(--radius-control)", background: "var(--surface-inset)" } })
+        : h("div", { role: "img", "aria-label": `${caption} loading`, style: { aspectRatio: "4 / 3", borderRadius: "var(--radius-control)", background: "var(--surface-inset)" } }),
+      h("figcaption", { className: "text-caption text-subtle" }, caption));
+    return h("div", { "data-buzz-ui": "", "aria-busy": loading || undefined, style: { ...card, display: "grid", gridTemplateColumns: before ? "repeat(2, minmax(0, 1fr))" : "minmax(0, 1fr)", gap: "var(--space-3)", padding: "var(--space-3)" } },
+      before ? figure(before, "Now") : null, figure(loading ? null : after, before ? "After" : "The new version"));
+  };
+
+  /** The bar fixed under a panel's body (Activity's toolbar border, at the
+   * bottom): a `status` line, then the actions. `stacked`: a field above. */
+  const DecisionBar = ({ status, stacked = false, children }) =>
+    h("div", { "data-buzz-ui": "", role: "group", "aria-label": "Decision", style: { flex: "0 0 auto", display: "flex", flexDirection: stacked ? "column" : "row", flexWrap: "wrap",
+        alignItems: stacked ? "stretch" : "center", justifyContent: "space-between", gap: "var(--space-2) var(--space-3)",
+        padding: "var(--space-3) var(--space-panel-inset)", borderTop: "1px solid var(--border-standard)", background: "var(--surface-panel)" } },
+      status ? h("div", { "aria-live": "polite", style: { minWidth: 0, flex: stacked ? undefined : "1 1 12rem" } }, status) : null,
+      ...(children == null ? [] : [stacked ? h("div", { key: "actions", className: "grid gap-2" }, ...each(children))
+        : h("div", { key: "actions", className: "flex flex-wrap items-center gap-2" }, ...each(children))]));
+
+  /** A placeholder in the real layout while it loads (Buzz has no skeleton:
+   * inset bars in the place of the lines). `layout`: item | list. */
+  const Skeleton = ({ layout = "item" }) => {
+    const bar = (width, height = "var(--space-3)", key) => h("span", { key, style: { display: "block", width, height, borderRadius: "var(--space-1)", background: "var(--surface-inset)" } });
+    const rows = layout === "list"
+      ? [0, 1, 2, 3].map((n) => h("span", { key: n, style: { display: "grid", gap: "var(--space-2)", padding: "var(--space-2) var(--space-control-inset)" } }, bar("40%", "var(--space-3)", "a"), bar(n % 2 ? "70%" : "85%", "var(--space-4)", "b")))
+      : [bar("30%", "var(--space-3)", "a"), bar("80%", "var(--space-6)", "b"), h("span", { key: "c", className: "flex flex-wrap items-center gap-2" }, bar("6rem", "var(--space-5)", "c1"), bar("4rem", "var(--space-5)", "c2"), bar("5rem", "var(--space-5)", "c3")), bar("100%", "8rem", "d")];
+    return h("div", { "data-buzz-ui": "", "aria-busy": true, style: { display: "grid", gap: "var(--space-4)" } }, h("span", { className: "sr-only", role: "status" }, "Loading"), ...rows);
+  };
+
+  /** Checkbox.tsx (Base UI Checkbox.Root) without its label: the row names it. */
+  const Checkbox = ({ checked, onCheckedChange, label, disabled, size = "md" }) =>
+    h("button", { type: "button", role: "checkbox", "aria-checked": !!checked, "aria-label": label, disabled,
+        "data-buzz-ui": "", className: "buzz-checkbox", "data-size": size === "sm" ? "sm" : "md",
+        "data-checked": checked ? "" : undefined, "data-disabled": disabled ? "" : undefined,
+        onClick: (event) => { event.stopPropagation(); if (!disabled) onCheckedChange(!checked); } },
+      checked ? h("span", { "aria-hidden": true, style: { display: "flex" } }, icon(ICON.check, size === "sm" ? 12 : 14)) : null);
+
+  /** Activity's row (MessageListRow, NavigationItem multiline) in a
+   * NavigationCard, so a Checkbox can sit beside it without nesting controls:
+   * `title` (the sender's place), `subtitle` (the preview's), `meta` (the
+   * date's). `picked`/`onPick`: an explicit selection; `quiet`: muted. */
+  const SelectRow = ({ title, subtitle, meta, avatar, thumbnail, selected = false, picked, onPick, pickLabel, onOpen, quiet = false }) =>
+    h("li", { style: { minWidth: 0, listStyle: "none" } },
+      h("div", { "data-buzz-ui": "", "data-navigation-card": "", "data-tone": "default", className: "navigation-card" },
+        h("div", { className: "navigation-card-row" },
+          h("button", { type: "button", "data-variant": "row", "data-multiline": "", "data-buzz-ui": "", className: "navigation-item",
+              "data-selected": selected ? "" : undefined, "aria-current": selected ? "true" : undefined, onClick: onOpen },
+            // MessageListRow's avatar slot (`.rowAvatar`): who made it.
+            avatar ? h("span", { style: { display: "grid", flex: "none", width: "var(--space-8)", height: "var(--space-8)", placeItems: "center", alignSelf: "flex-start", marginBlockStart: "var(--space-row-gap)" } }, avatar) : null,
+            h("span", { className: "navigation-item-label" },
+              h("span", { style: { display: "flex", flexDirection: "column", gap: "var(--space-1)", minWidth: 0, whiteSpace: "normal", paddingBlock: "var(--space-row-gap)" } },
+                h("span", { style: { display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: "var(--space-1) var(--space-control-inset)" } },
+                  h("strong", { className: `text-label-sm ${quiet ? "text-subtle" : "text-standard"}`, style: { minWidth: 0, overflowWrap: "anywhere" } }, title),
+                  meta ? h("span", { className: "text-caption text-subtle", style: { flex: "0 0 auto" } }, meta) : null),
+                subtitle ? h("span", { className: "text-body-sm text-subtle", style: { maxInlineSize: "64ch", overflow: "hidden", overflowWrap: "anywhere", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" } }, subtitle) : null,
+                thumbnail ? h("img", { src: thumbnail, alt: "", style: { display: "block", width: "100%", maxHeight: "5rem", objectFit: "cover", objectPosition: "top", borderRadius: "var(--radius-control)", border: "1px solid var(--border-standard)" } }) : null))),
+          onPick ? h("span", { style: { order: -1, flex: "none", display: "grid", placeItems: "center", paddingBlock: "calc(var(--space-row-gap) + var(--space-half))", paddingInlineStart: "var(--space-control-inset)" } },
+            h(Checkbox, { checked: !!picked, onCheckedChange: onPick, label: pickLabel ?? (typeof title === "string" ? `Select ${title}` : "Select") })) : null)));
+
+  /** A titled list of rows (Activity's list): `label` and a quiet `count`. */
+  const ListGroup = ({ label, count, children }) =>
+    h("section", { "data-buzz-ui": "", style: { display: "grid", gap: "var(--space-1)", minWidth: 0 } },
+      label ? h("h3", { className: "text-label-sm text-subtle", style: { margin: 0, padding: "0 var(--space-control-inset)", display: "flex", gap: "var(--space-2)" } },
+        h("span", null, label), count ? h("span", { className: "tabular-nums" }, String(count)) : null) : null,
+      h("ul", { role: "list", style: { margin: 0, padding: 0, display: "grid", gap: "1px" } }, ...each(children)));
+
+  /** Activity's workspace: the list pane beside the preview (Inbox.module.css
+   * `.workspace`, `.listPane`, `.scroll`). Too narrow for both, the preview
+   * takes the space while it shows something. */
+  const Split = ({ label, list, detail, showing = false }) => {
+    const box = React.useRef(null);
+    const [narrow, setNarrow] = React.useState(false);
+    React.useLayoutEffect(() => {
+      const node = box.current;
+      if (!node || typeof ResizeObserver !== "function") return undefined;
+      const watch = new ResizeObserver(() => setNarrow(node.clientWidth < 720));
+      watch.observe(node);
+      return () => watch.disconnect();
+    }, []);
+    const pane = { display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0 };
+    return h("div", { ref: box, "data-buzz-ui": "", style: { display: "flex", flex: 1, minWidth: 0, minHeight: 0 } },
+      narrow && showing ? null : h("div", { role: "region", "aria-label": label, style: { ...pane, flex: narrow ? 1 : "0 0 min(26rem, 42%)", borderRight: narrow ? undefined : "1px solid var(--border-standard)" } },
+        h("div", { style: { flex: 1, minHeight: 0, overflow: "auto", padding: "var(--space-3) var(--space-row-gap) var(--space-panel-inset)" } }, list)),
+      narrow && !showing ? null : h("div", { style: { ...pane, flex: 1 } }, detail));
+  };
+
+  /** Avatar.tsx at a row's size: a picture, or its name's first letter.
+   * `shape` squircle for an agent, circle for a person. */
+  const Avatar = ({ name, picture, size = "small", shape = "circle", label }) => {
+    const [failed, setFailed] = React.useState(false);
+    const letter = (Array.from(String(name ?? "").trim())[0] ?? "?").toUpperCase();
+    const dim = one(VARIANTS.Avatar.size, size);
+    return h("span", { className: "buzz-avatar-status", "data-size": dim, "data-shape": shape === "squircle" ? "squircle" : "circle" },
+      h("span", { "data-buzz-ui": "", className: "buzz-avatar", "data-size": dim, "data-avatar-shape": shape === "squircle" ? "squircle" : "circle", "data-fallback-surface": "subtle",
+          role: label ? "img" : undefined, "aria-label": label, "aria-hidden": label ? undefined : true },
+        picture && !failed
+          ? h("img", { src: picture, alt: "", loading: "lazy", decoding: "async", referrerPolicy: "no-referrer", "data-loaded": "true", onError: () => setFailed(true) })
+          : h("span", { "data-avatar-fallback": "", "aria-hidden": true }, letter)));
+  };
+  /** Who made something and what set it off, as Buzz writes a message's
+   * author line: the maker's Avatar and name (and the app they used), then
+   * the origin with its mark. `onOrigin` makes the origin open its thread. */
+  const Byline = ({ avatar, name, app, origin, originGlyph, onOrigin }) =>
+    h("div", { "data-buzz-ui": "", className: "flex flex-wrap items-center gap-2", style: { minWidth: 0 } },
+      avatar ?? null,
+      h("span", { className: "text-label-sm text-standard", style: { minWidth: 0, overflowWrap: "anywhere" } }, name),
+      app ? h("span", { className: "text-caption text-subtle" }, app) : null,
+      origin ? h("span", { className: "text-caption text-subtle", "aria-hidden": true }, "·") : null,
+      origin ? (onOrigin
+        ? h(Button, { variant: "link", size: "text", onClick: onOrigin }, h(Fragment, null, originGlyph && ICON[originGlyph] ? icon(ICON[originGlyph], 12, { style: { marginInlineEnd: "var(--space-1)", verticalAlign: "-1px" } }) : null, origin))
+        : h("span", { className: "flex items-center gap-1 text-caption text-subtle" }, originGlyph && ICON[originGlyph] ? icon(ICON[originGlyph], 12) : null, origin)) : null);
+  /** The work, big: a frame that takes the panel's height (Diffs' card,
+   * `.preview`), its toggle (Now / After) floating at the top. */
+  const Canvas = ({ label, toolbar, children }) =>
+    h("figure", { "aria-label": label, style: { ...card, margin: 0, position: "relative", display: "flex", flexDirection: "column", flex: "1 1 auto", minHeight: "min(34rem, 64vh)" } },
+      toolbar ? h("div", { style: { ...cardHeader, justifyContent: "space-between" } }, ...each(toolbar)) : null,
+      h("div", { style: { flex: 1, minHeight: 0, display: "flex", alignItems: "stretch", justifyContent: "center", overflow: "auto", background: "var(--surface-inset)" } }, ...each(children)));
+  /** A picture of the work filling the canvas (an image, or the platform's capture of a page). */
+  const CanvasImage = ({ src, alt }) => src
+    ? h("img", { src, alt, style: { display: "block", maxWidth: "100%", maxHeight: "100%", objectFit: "contain", margin: "auto" } })
+    : h("div", { role: "img", "aria-label": `${alt} loading`, "aria-busy": true, style: { flex: 1, background: "var(--surface-inset)" } });
+  /** A quiet line of short values (the stake, the facts), one line, cut short. */
+  const QuietLine = ({ glyph, children }) =>
+    h("p", { className: "m-0 text-caption text-subtle", style: { display: "flex", gap: "var(--space-1)", alignItems: "center", minWidth: 0 } },
+      glyph && ICON[glyph] ? icon(ICON[glyph], 12, { style: { flex: "none" } }) : null,
+      h("span", { style: { minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, children));
+  /** What approving permits, in two lines at most (the whole on hover). */
+  const Permits = (text) => h("p", { className: "m-0 text-body-sm text-standard", title: text, style: { display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" } }, text);
+  /** One review item's column: its heading, the canvas taking the rest, then details. */
+  const Article = ({ label, children }) =>
+    h("article", { "aria-label": label, style: { display: "flex", flexDirection: "column", gap: "var(--space-3)", flex: "1 0 auto", minHeight: "100%" } }, ...each(children));
+  /** The question, one or two lines, the heading of the item. */
+  const Question = (text) => h("h2", { className: "m-0 text-label", style: { display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden", overflowWrap: "anywhere" } }, text);
+
+  /** The finished work as a page, in Diffs' card (`.preview`: a bounded,
+   * scrolling frame) with an embedded view inside. */
+  const Frame = ({ label, children }) =>
+    h("div", { "data-buzz-ui": "", role: "group", "aria-label": label, style: { ...card, display: "flex", height: "min(28rem, 60vh)", minHeight: "16rem" } }, ...each(children));
+  /** A message's card (Diffs' DiffMessage card): a quiet frame around rows. */
+  const MessageCard = ({ label, children }) =>
+    h("div", { "data-buzz-ui": "", role: "group", "aria-label": label, style: { ...card, display: "grid" } }, ...each(children));
+  /** One row in a message's card: the question, its live state, Open. */
+  const MessageRow = ({ title, subtitle, avatar, thumbnail, loading = false, onOpen, openLabel = "Open" }) =>
+    h("div", { style: { display: "flex", alignItems: "center", gap: "var(--space-3)", padding: "var(--space-2) var(--space-3)", minWidth: 0 } },
+      thumbnail ? h("img", { src: thumbnail, alt: "", style: { width: "4.5rem", height: "3.25rem", objectFit: "cover", objectPosition: "top", flex: "none", borderRadius: "var(--radius-control)", border: "1px solid var(--border-standard)" } })
+        : avatar ? h("span", { style: { flex: "none", display: "grid" } }, avatar) : null,
+      h("span", { style: { display: "grid", gap: "var(--space-1)", minWidth: 0, flex: 1 } },
+        h("span", { className: "text-label-sm text-standard", style: { overflowWrap: "anywhere" } }, title),
+        loading ? h("span", { style: { display: "block", width: "40%", height: "var(--space-3)", borderRadius: "var(--space-1)", background: "var(--surface-inset)" } })
+          : subtitle ? h("span", { className: "text-caption text-subtle" }, subtitle) : null),
+      onOpen ? h(Button, { size: "sm", variant: "outline", onClick: onOpen }, openLabel) : null);
 
   // Text, in the roles Buzz's pages write.
   const Title = (text, props = {}) => h("h2", { ...props, className: "text-heading" }, text);
@@ -909,7 +1126,8 @@ function buzzUi(React, { nativeSelect = false } = {}) {
   const Code = (text) => h("code", { className: "text-body tabular-nums", style: { letterSpacing: "0.08em" } }, text);
 
   return { VARIANTS, SectionTitle, Group, Row, Button, Input, Switch, SwitchRow, Pill, Popup, Native, TextField, Stack, Column, Actions, Note, ErrorLine, Spinner, Status, Value, Alert, Code,
-    Header, IconButton, PanelHeader, Page, Subview, PanelBody, Fill, Toolbar, EmptyState, NavItem, Tabs, Disclosure, CountBadge, Dot, LinkChip, OneTimeCode, CodeColumn, Failure, Notice,
+    Header, IconButton, PanelHeader, Page, Subview, Surface, PanelBody, Fill, Toolbar, EmptyState, NavItem, Tabs, Disclosure, CountBadge, Dot, LinkChip, OneTimeCode, CodeColumn, Failure, Notice,
+    Frame, Avatar, Byline, Canvas, CanvasImage, QuietLine, Question, Permits, Article, Chip, ChipRow, DiffText, ChangeTable, MediaPair, DecisionBar, Skeleton, Checkbox, SelectRow, ListGroup, Split, MessageCard, MessageRow,
     Title, Heading, Paragraph, Caption, Strong, Lines, Line, Pre, ICON,
     AgentBrowse, AgentGrid, AgentCard, CardMark, AgentPortrait, AgentPanel, AgentProfile, NameInput, NameActions, Menu, AvatarChoices, HeaderTab, Picture, Glyph, COPIED, COPIED_FROM, AVATARS };
 }

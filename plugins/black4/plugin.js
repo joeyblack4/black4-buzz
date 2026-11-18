@@ -64,6 +64,52 @@ export function mintsPass(name, args, depth = 0) {
   if (tool === "call_tool" && depth < 4 && args && typeof args === "object") return mintsPass(args.name, args.arguments, depth + 1);
   return false;
 }
+/** Tools only a person's own click may reach: the Black 4 review card's
+ * decisions and voids. Platform Control marks them app-only (MCP Apps
+ * `_meta.ui.visibility: ["app"]`); these names are refused even if a server
+ * ever forgot the mark. People decide; agents never do. */
+export const APP_ONLY_TOOLS = Object.freeze(["decide_review_item", "void_review", "restore_review"]);
+const DECIDE_REFUSED = "Agents cannot decide, void or restore Black 4 reviews. The person decides each item in Buzz (Reviews) or in Black 4 Reviews.";
+/** Whether a listed tool is for the app only, never the model (MCP Apps
+ * visibility without "model"), or is one of APP_ONLY_TOOLS. */
+export function appOnly(tool) {
+  const name = String(tool?.name ?? "").trim().toLowerCase();
+  if (APP_ONLY_TOOLS.includes(name)) return true;
+  const visibility = tool?._meta?.ui?.visibility;
+  if (typeof visibility === "string") return visibility.trim().toLowerCase() !== "model";
+  if (Array.isArray(visibility)) return !visibility.some((entry) => String(entry).trim().toLowerCase() === "model");
+  return false;
+}
+/** Whether a tool call (directly, or through call_tool however nested) asks
+ * for an app-only tool: one of APP_ONLY_TOOLS or one listed as app-only. */
+export function decides(name, args, listed = new Set(), depth = 0) {
+  const tool = String(name ?? "").trim().toLowerCase();
+  if (APP_ONLY_TOOLS.includes(tool) || listed.has(tool)) return true;
+  if (tool === "call_tool" && depth < 4 && args) {
+    let inner = args;
+    if (typeof inner === "string") { try { inner = JSON.parse(inner); } catch { return false; } }
+    if (inner && typeof inner === "object") {
+      let nested = inner.arguments;
+      if (typeof nested === "string") { try { nested = JSON.parse(nested); } catch {} }
+      return decides(inner.name, nested, listed, depth + 1);
+    }
+  }
+  return false;
+}
+/** A tool result as the text an agent reads: never its `_meta` (decision
+ * tokens, preview grants), at any depth of any part. */
+export function agentText(result) {
+  const bare = (value, depth = 0) => {
+    if (Array.isArray(value)) return value.map((entry) => bare(entry, depth + 1));
+    if (!value || typeof value !== "object" || depth > 32) return value;
+    const out = {};
+    for (const [key, entry] of Object.entries(value)) if (key !== "_meta") out[key] = bare(entry, depth + 1);
+    return out;
+  };
+  return (Array.isArray(result?.content) ? result.content : [])
+    .map((part) => (part?.type === "text" ? String(part.text ?? "") : JSON.stringify(bare(part))))
+    .join("\n");
+}
 
 // ---- sign-in, the Black 4 MCP and the hardware door, over HTTPS -------------
 // Everything goes through `ctx.host.request` to the origins the manifest
@@ -390,6 +436,11 @@ export function createSession({ request, store = signInStore, now = () => Date.n
  * POST), as the signed-in person. A 401 refreshes the sign-in and asks once
  * more; a lost MCP session is opened again. Errors carry `code`: "signin"
  * when the sign-in is the problem, "offline" when Black 4 could not be reached. */
+/** What this client declares at initialize: MCP Apps (the review card's
+ * extension), so Black 4 may hand Reviews its decision tokens in `_meta`.
+ * The plugin keeps `_meta` from every agent (agentText), as MCP Apps hosts must. */
+export const CLIENT_CAPABILITIES = Object.freeze({ extensions: Object.freeze({ "io.modelcontextprotocol/ui": Object.freeze({ mimeTypes: Object.freeze(["text/html;profile=mcp-app"]) }) }) });
+
 export function createMcp({ request, session, url = MCP_URL, clientInfo = { name: "black4-buzz", version: "2.0.0" } } = {}) {
   let sessionId = null;
   let opening = null;
@@ -461,7 +512,7 @@ export function createMcp({ request, session, url = MCP_URL, clientInfo = { name
 
   const open = () => opening ??= (async () => {
     try {
-      const result = await post({ jsonrpc: "2.0", id: nextId++, method: "initialize", params: { protocolVersion: MCP_PROTOCOL, capabilities: {}, clientInfo } });
+      const result = await post({ jsonrpc: "2.0", id: nextId++, method: "initialize", params: { protocolVersion: MCP_PROTOCOL, capabilities: CLIENT_CAPABILITIES, clientInfo } });
       await post({ jsonrpc: "2.0", method: "notifications/initialized" }).catch(() => {});
       opened = result ?? {};
       return opened;
@@ -512,152 +563,6 @@ export function reviewUrl(target) {
   } catch { return null; }
 }
 
-// Reads only. The host's human website session remains the decision boundary.
-// No capability from MCP _meta is cached or exposed to conversation content.
-export function reviewReader(call) {
-  let queueFlight;
-  // Locators only, never review content or authority; every read is authorized
-  // again. Retains routing after a decision removes the review from the queue.
-  const businesses = new Map();
-  const queue = () => queueFlight ??= call("review_queue", {}).finally(() => { queueFlight = null; });
-  return async (target) => {
-    const safe = reviewUrl(target);
-    if (!safe) throw new Error("This is not a Black 4 review link.");
-    const url = new URL(safe);
-    const assetId = url.pathname.match(/^\/r\/([^/]+)/)?.[1];
-    if (!assetId) return queue();
-    // The URL is a locator, never an authority grant. The server checks reads.
-    let businessId = url.searchParams.get("business") || businesses.get(assetId);
-    if (!businessId) {
-      const list = await queue();
-      businessId = list.reviews?.find(review => review.assetId === assetId)?.businessId;
-    }
-    if (!businessId) throw new Error("This review is outside the loaded queue. Open the original review to inspect its history.");
-    const result = await call("open_review", { businessId, assetId, ...(url.searchParams.get("item") ? { itemKey: url.searchParams.get("item") } : {}) });
-    if (result.kind !== "black4_review" || result.assetId !== assetId || result.businessId !== businessId) throw new Error("The review response did not match this link.");
-    if (businesses.size >= 200) businesses.delete(businesses.keys().next().value);
-    businesses.set(assetId, businessId);
-    const item = result.items?.find(item => item.key === url.searchParams.get("item"));
-    const version = url.searchParams.get("v");
-    if (version && Number(version) !== (item?.version ?? result.version)) throw new Error("This link names an older version. Open the original review to compare versions before deciding.");
-    return result;
-  };
-}
-
-// Native React composition: the review panel, the message preview and,
-// without an embedded browser, the Reviews page. Drawn in Buzz's own parts
-// (buzzUi), so it reads as Buzz's Activity and panels in light and dark.
-// `useConnection` returns the connection status string or `{ status, detail, connect }`.
-/** `SignInPrompt` (optional) takes the place of the brief while signed out or
- * signing in: the same one action as every other Black 4 surface. */
-export function reviewSurface(React, read, HumanView, useConnection = () => "connected", SignInPrompt = null) {
-  const h = React.createElement;
-  const { Group, Row, Button, IconButton, PanelHeader, Subview, PanelBody, Header, EmptyState, NavItem, Tabs, Disclosure, CountBadge, Notice, Failure,
-    Column, Actions, Stack, SectionTitle, Title, Paragraph, Caption, Strong, Lines, Line, Note, Pre, Status, Value } = buzzUi(React);
-  const CONNECTION_TEXT = {
-    starting: "Connecting to Black 4…",
-    "signing-in": "Waiting for you to sign in to Black 4.",
-    "signed-out": "Not signed in to Black 4.",
-    stopped: "Black 4 is stopped.",
-    failed: "Black 4 is not connected.",
-  };
-  /** A recorded value as words: "not_run" → "Not run". */
-  const label = value => { const text = String(value ?? "Not recorded").replaceAll("_", " "); return text.charAt(0).toUpperCase() + text.slice(1); };
-  /** A titled card of rows, as Buzz's Settings sections. */
-  const section = (title, ...rows) => h("div", { key: title }, h(SectionTitle, { title }), h(Group, null, ...rows));
-  function Surface({ target, compact = false, open }) {
-    const bridge = useConnection();
-    const link = typeof bridge === "string" ? { status: bridge } : bridge ?? { status: "failed" };
-    const connection = link.status;
-    const [result, setResult] = React.useState(null);
-    const [error, setError] = React.useState("");
-    const [revision, refresh] = React.useState(0);
-    const [selected, select] = React.useState(null);
-    const [human, showHuman] = React.useState(null);
-    const [loaded, setLoaded] = React.useState(null);
-    React.useEffect(() => select(null), [target]);
-    React.useEffect(() => {
-      let active = true;
-      setResult(null); setError(""); showHuman(null);
-      if (connection !== "connected") return () => { active = false; };
-      read(target).then(value => { if (active) { setResult(value); setLoaded(new Date()); } }, reason => { if (active) setError(reason.message); });
-      return () => { active = false; };
-    }, [target, revision, connection]);
-    const again = () => refresh(v => v + 1);
-    const reload = h(IconButton, { key: "refresh", label: "Refresh", glyph: "refresh", large: true, onClick: again });
-    const web = (url, text = "Open original review", variant = "subtle") => HumanView
-      ? h(Button, { key: "web", variant, onClick: () => showHuman(url) }, text)
-      : h(Button, { key: "web", variant, href: reviewUrl(url) }, text);
-    // The body of the panel (its host draws the title bar), or a line in a message.
-    const wrap = (...children) => compact ? h(Column, { gap: 2 }, ...children) : h(PanelBody, null, ...children);
-    if (human) return h(Subview, { header:
-      h(PanelHeader, { title: "Black 4 review", navigation: h(IconButton, { label: "Back to the brief", glyph: "back", large: true, onClick: () => { showHuman(null); again(); } }) }) },
-      h(HumanView, { url: human }));
-    // Recovery happens where the person is. Connect only shows once nothing is
-    // in progress, so a click never restarts a sign-in the browser is holding.
-    if (SignInPrompt && ["signed-out", "signing-in", "idle"].includes(connection)) return wrap(h(SignInPrompt, { compact }));
-    if (connection !== "connected") return wrap(h(Column, null,
-      Line(CONNECTION_TEXT[connection] ?? `Black 4: ${connection}.`, { role: "status" }),
-      link.detail ? Line(link.detail) : null,
-      link.connect && (connection === "failed" || connection === "stopped")
-        ? h(Button, { variant: "prominent", onClick: link.connect }, "Connect Black 4")
-        : null));
-    if (error) return wrap(h(Failure, { message: error, retry: again, retryLabel: "Try again" }), compact && open ? h(Button, { size: "sm", onClick: open }, "Inspect review") : web(target));
-    if (!result) return wrap(Status("Loading your review…"));
-    if (result.kind === "black4_review_queue") {
-      const reviews = result.reviews ?? [];
-      return wrap(
-        h(Header, { eyebrow: "Black 4", title: result.total ? `${result.total} decisions waiting` : "Your decisions",
-          actions: [reload, web(target, "Full queue and history", "ghost")] }),
-        result.stalledTotal ? h(Notice, { title: "Approved work needs follow-through" }, h("p", { key: "p" }, `${result.stalledTotal} approved items have no execution after 10 minutes. Approval is not completion.`)) : null,
-        result.note ? Note(result.note) : null,
-        reviews.length
-          ? h("div", { role: "list", "aria-label": "Reviews waiting" }, ...reviews.map(review => h("div", { key: review.assetId, role: "listitem" },
-              h(NavItem, { multiline: true, "aria-label": `Open ${review.title} for ${review.businessName}`,
-                onClick: () => { const url = new URL(review.reviewUrl); url.searchParams.set("business", review.businessId); open?.(url.href); },
-                label: Lines(Caption(review.businessName), Strong(review.title), Caption(`${review.items.length} shown · ${review.items[0]?.age ?? "age unknown"}`)),
-                trailing: h(CountBadge, { count: review.items.length, label: `${review.items.length} items` }) }))))
-          : result.total ? null : h(EmptyState, { glyph: "inbox", title: "Nothing waiting for your decision", description: "Reviews your agents raise for you appear here." }),
-        result.truncated ? Note(`Showing ${result.listed} pending items. The full queue includes the rest.`) : null);
-    }
-    const items = result.items ?? [];
-    const item = items.find(item => item.key === selected) ?? items.find(item => item.key === result.focusItemKey) ?? items[0];
-    if (!item) return wrap(h(EmptyState, { glyph: "inbox", title: "No visible items in this review", action: web(target) }));
-    const card = item.card ?? {};
-    const brief = item.brief ?? {};
-    const status = item.decision ? `${label(item.decision.verdict)} · ${label(item.decision.executionStatus)}` : label(item.status);
-    if (compact) return wrap(Caption(`${result.businessName} · ${status} · v${item.version}`), Strong(card.question || item.title),
-      item.action ? Line(item.action) : null, h(Button, { size: "sm", variant: "prominent", onClick: open }, `Inspect ${items.length > 1 ? `${items.length} items` : "review"}`));
-    const row = (title, text, fallback) => h(Row, { key: title, title, description: text || fallback });
-    return h(Subview, { header:
-      h(PanelHeader, { title: result.businessName,
-        navigation: h(IconButton, { label: "Back to the queue", glyph: "back", large: true, onClick: () => open?.("https://app.black4.ai/reviews") }),
-        actions: [reload] }) },
-      h(PanelBody, null,
-        items.length > 1 ? h(Tabs, { label: "Review items", value: item.key, onChange: select, items: items.map((entry, index) => ({ value: entry.key, label: `${index + 1}. ${entry.title}` })) }) : null,
-        h(Stack, { key: item.key, as: "article", gap: "section" },
-          h(Stack, { gap: 2 }, Caption(`${status} · Version ${item.version}`), Title(card.question || item.title), item.action ? Paragraph(item.action) : null),
-          card.recommend ? section("Recommendation", h(Row, { key: "r", title: label(card.recommend.answer), description: card.recommend.why })) : null,
-          section("What changes", row("Current", brief.before, "Current state not supplied."), row("Proposed", brief.after, "Proposed state not supplied.")),
-          card.ifYes || card.ifNo ? section("The choice", row("If approved", card.ifYes || brief.expectedResult, "Impact not supplied."), row("If left as is", card.ifNo, "Impact not supplied.")) : null,
-          card.tradeoff ? section("Tradeoff", row("Tradeoff", card.tradeoff)) : null,
-          section("Why this work", row("Why", brief.why, "Rationale not supplied."), brief.successMeasure ? row("Success looks like", brief.successMeasure) : null),
-          item.decision ? section("Decision and follow-through", h(Row, { key: "d", title: "Decision", trailing: Value(status) }),
-            item.decision.feedback ? row("Feedback", item.decision.feedback) : null,
-            row("Decided", item.decision.decidedAt, "Date unknown"), row("Completed", item.decision.completedAt, "Not recorded")) : null,
-          h(Disclosure, { title: "Evidence, provenance and exact request" },
-            h(Column, { gap: 2 },
-              Line(`Made by ${item.madeBy || "not recorded"}. Requested by ${item.requestedBy || "not recorded"}.`),
-              brief.baselineSource ? Line(`${brief.baselineSource} · ${brief.baselineObservedAt || "date not recorded"}`) : null,
-              ...(card.facts ?? []).map((fact) => Line(fact)),
-              item.change ? Pre(JSON.stringify(item.change, null, 2)) : Line("No provider request is pinned to this item."))),
-          h(Column, { gap: 2 },
-            web(item.reviewUrl, item.decidable ? "View work and decide" : "View work and decision history", "prominent"),
-            Caption(`Read ${loaded?.toLocaleTimeString() ?? "just now"}. Decisions save in your signed-in review. Return here to refresh.`)))));
-  }
-  return Surface;
-}
-
 export function apply(ctx) {
   const React = ctx.react;
 
@@ -675,6 +580,7 @@ export function apply(ctx) {
     agentLink: { status: "idle" },
     hardware: "hidden", // hidden | offered: the Black 4 hardware agent type
     hardwareError: "", // one sentence when the hardware type failed
+    reviewsError: "", // one sentence when Reviews failed to start
     // Black 4 asked for this sign-in to be approved again in a browser
     // (renew_signin): "idle" (unused too long; status is "idle" too) or
     // "hardware" (a pass needs a recent approval).
@@ -701,7 +607,8 @@ export function apply(ctx) {
     return ctx.host.request(input);
   };
   const session = createSession({ request: hostRequest });
-  const mcp = createMcp({ request: hostRequest, session });
+  // The running revision, so Black 4 can tell which plugin build called it.
+  const mcp = createMcp({ request: hostRequest, session, clientInfo: { name: "black4-buzz", version: `2.0.0+${String(ctx.pluginOwner?.revision ?? "unknown").slice(0, 12)}` } });
   let retry = 0;
   let retryTimer = null;
   let stopped = false;
@@ -786,16 +693,17 @@ export function apply(ctx) {
     }
   };
 
-  const textOf = (result) =>
-    (result?.content ?? [])
-      .map((part) => (part.type === "text" ? part.text : JSON.stringify(part)))
-      .join("\n");
+  // What an agent reads of a result: its text, never its `_meta`.
+  const textOf = agentText;
+  /** Tools the server listed as app-only: never offered, refused by name. */
+  let appOnlyNames = new Set();
 
   const toolCall = (name) => async (client, context, args) => {
     // Only this plugin's own hardware provider mints door passes. An agent's
     // call carries the person's sign-in, so Black 4 cannot tell it apart.
     if (mintsPass(name, args)) throw new Error(PASS_REFUSED);
     if (renews(name, args)) throw new Error(RENEW_REFUSED);
+    if (decides(name, args, appOnlyNames)) throw new Error(DECIDE_REFUSED);
     if (state.status !== "connected") {
       throw new Error(
         `Black 4 is not connected in Buzz (${state.status}${state.detail ? `: ${state.detail}` : ""}). ` +
@@ -805,6 +713,16 @@ export function apply(ctx) {
       );
     }
     let input = args ?? {};
+    // A review an agent raises from a conversation points back to it: when the
+    // agent passes no threadId, it defaults to the thread (else the channel)
+    // the call came from. A default for an optional parameter, never an override.
+    const reviewThread = context?.root ?? context?.channel;
+    if (typeof reviewThread === "string" && reviewThread) {
+      if (name === "start_review" && input && typeof input === "object" && input.threadId == null) input = { ...input, threadId: reviewThread };
+      if (name === "call_tool" && String(input?.name ?? "").trim().toLowerCase() === "start_review" && input.arguments && typeof input.arguments === "object" && input.arguments.threadId == null) {
+        input = { ...input, arguments: { ...input.arguments, threadId: reviewThread } };
+      }
+    }
     if (name === "resolve_channel_business" && context?.channel) {
       const relay = relayFor(client);
       input = {
@@ -836,6 +754,7 @@ export function apply(ctx) {
       const name = PREFIX + tool.name;
       if (registered.has(name)) continue;
       if (mintsPass(tool.name) || renews(tool.name)) continue; // never offered to agents
+      if (appOnly(tool)) { appOnlyNames.add(String(tool.name).trim().toLowerCase()); continue; } // the person's click only
       if (!/^[a-z][a-z0-9_]{0,63}$/.test(name)) {
         note(`Skipped a tool whose name Buzz refuses: ${tool.name}`);
         continue;
@@ -879,9 +798,12 @@ export function apply(ctx) {
     queueTimer = null;
     queueFlight = null;
   };
+  /** Reviews hears every queue the badge reads (no polling of its own). */
+  let onQueue = () => {};
   const noteQueue = (queue) => {
     const total = Number(queue?.total);
     update({ waiting: Number.isFinite(total) ? Math.max(0, Math.trunc(total)) : null });
+    if (queue?.kind === "black4_review_queue") onQueue(queue);
   };
   const pollQueue = async () => {
     if (stopped || state.status !== "connected" || queueFlight) return;
@@ -890,7 +812,8 @@ export function apply(ctx) {
     let queue = null;
     try {
       const result = await flight;
-      if (!result?.isError) queue = JSON.parse(textOf(result));
+      // { data: queue } today; older servers answered the queue bare.
+      if (!result?.isError) { const value = readAnswer(result); queue = value?.data && !value.kind ? value.data : value; }
     } catch {}
     if (queueFlight === flight) queueFlight = null;
     if (attempt !== generation || stopped || state.status !== "connected") return;
@@ -1422,91 +1345,47 @@ export function apply(ctx) {
 
   const h = React.createElement;
 
-  const readReview = reviewReader(async (name, args) => {
-    if (state.status !== "connected") throw new Error("Black 4 is reconnecting. Try again once connected.");
-    const attempt = generation;
-    const result = await request("tools/call", { name, arguments: args });
-    if (result?.isError) throw new Error(textOf(result));
-    const value = JSON.parse(textOf(result));
-    // A queue the person just read is the freshest count the badge can show.
-    if (name === "review_queue" && attempt === generation && state.status === "connected") noteQueue(value);
-    return value;
-  });
   // Every Black 4 screen draws in Buzz's own parts.
   const ui = buzzUi(React);
-  const NativeReview = reviewSurface(React, readReview,
-    ctx.browser.available ? function HumanReview({ url }) {
-      return h(ctx.browser.View, { url, storage: "black4-reviews", label: "Black 4: view work and decide" });
-    } : null,
-    () => { const current = useBridgeState(); return { status: current.status, detail: current.detail, connect: reconnect }; },
-    SignInPrompt);
 
-  // Queue → exact review → back, inside one native composition.
-  function ReviewPanel({ target }) {
-    const [current, setCurrent] = React.useState(target);
-    React.useEffect(() => setCurrent(target), [target]);
-    return h(NativeReview, { target: current, open: (url) => setCurrent(url) });
-  }
-
-  // The full inbox uses the same authenticated human session as the website.
-  // MCP remains the agent transport and never receives decision capabilities.
-  // Without an embedded browser the page is the native queue and brief; its
-  // "View work & decide" link opens the website in the default browser.
-  // While signed out, Sign in sits above the inbox; the inbox keeps its place,
-  // so signing in never reloads it.
-  function ReviewsWorkspace() {
-    const current = useBridgeState();
-    const out = ["signed-out", "signing-in", "idle"].includes(current.status);
-    return ctx.browser.available
-      ? h(ui.Page, { label: "Reviews", fill: true, header: h(ui.PanelHeader, { title: "Reviews" }) },
-          out ? h(ui.Toolbar, { key: "signin" }, h(SignInPrompt, { compact: true })) : null,
-          h(ui.Fill, { key: "view" }, h(ctx.browser.View, { url: "https://app.black4.ai/reviews?experience=buzz", storage: "black4-reviews", label: "Black 4 decision inbox" })))
-      : h(ui.Page, { label: "Reviews", fill: true }, h(ReviewPanel, { target: "https://app.black4.ai/reviews" }));
-  }
-
-  // Shown on the dock entry: decisions waiting on the connected account, as
-  // Buzz's count badge. Signed out, Buzz's unread dot, its reason on hover.
-  function ReviewsBadge() {
-    const current = useBridgeState();
-    if (current.status === "idle") return ui.Dot({ label: "Approve your Black 4 sign-in in your browser" });
-    if (current.status === "signed-out") return ui.Dot({ label: current.detail ? `Sign in to Black 4. ${current.detail}` : "Sign in to Black 4" });
-    if (current.status !== "connected" || !current.waiting) return null;
-    return ui.CountBadge({ count: current.waiting, label: `${current.waiting} decisions waiting for the connected Black 4 account` });
-  }
-
-  ctx.pages.register({ id: "reviews", title: "Reviews", primary: true, placement: "dock", layout: "workspace", badge: ReviewsBadge, component: ReviewsWorkspace });
-
-  ctx.panels.register({
-    id: "reviews",
-    title: "Black 4 Reviews",
-    order: 0,
-    matches: (target) => Boolean(reviewUrl(target)),
-    component: ReviewPanel,
-    channelPlacement: "side",
-    channelLauncher: function ReviewsLauncher({ available, toggle, pressed }) {
-      if (!available()) return null;
-      return ui.IconButton({ label: "Open your Black 4 review queue", glyph: "decisions", "aria-expanded": pressed, "data-channel-panel-toggle": "",
-        onClick: (event) => { event?.currentTarget?.focus?.(); toggle("https://app.black4.ai/reviews"); } });
+  // ---- Reviews: its own scope, so a fault there never stops the MCP --------
+  // The bridge is all Reviews gets: the connection, raw reads and the one
+  // decision tool (their `_meta` stays inside Reviews), the queue the badge
+  // poll already reads, and the shared Sign in. Agents never reach `call`.
+  const queueListeners = new Set();
+  onQueue = (queue) => { for (const listener of [...queueListeners]) { try { listener(queue); } catch {} } };
+  const reviews = reviewsSlot(ctx, {
+    use: () => { const current = useBridgeState(); return { status: current.status, detail: current.detail, waiting: current.waiting, connect: reconnect }; },
+    call: async (name, args, { timeoutMs = LINK_TIMEOUT_MS } = {}) => {
+      if (state.status !== "connected") throw Object.assign(new Error("Black 4 is reconnecting. Try again once connected."), { code: "offline" });
+      const attempt = generation;
+      const result = await request("tools/call", { name, arguments: args }, { timeoutMs });
+      // A queue the person just read is the freshest count the badge can show.
+      if (name === "review_queue" && attempt === generation && state.status === "connected" && !result?.isError) {
+        try { const value = readAnswer(result); noteQueue(value?.data && !value.kind ? value.data : value); } catch {}
+      }
+      return result;
+    },
+    queue: { subscribe: (listener) => { queueListeners.add(listener); return () => queueListeners.delete(listener); }, refresh: () => { clearTimeout(queueTimer); void pollQueue(); } },
+    // Every status change: Reviews forgets the last connection's data when it ends.
+    status: { subscribe: (listener) => { const each = () => listener(state.status); listeners.add(each); each(); return () => listeners.delete(each); } },
+    SignInPrompt,
+    browser: ctx.browser?.available ? ctx.browser.View : null,
+    // A maker's name and picture from the community's profiles, as Buzz shows a member.
+    profile: (pubkey) => {
+      try {
+        const profiles = ctx.relay?.snapshot?.()?.session?.profiles;
+        const found = profiles?.snapshot?.().get(pubkey);
+        if (!found) void profiles?.ensure?.([pubkey])?.catch?.(() => {});
+        return found ? { name: found.name, picture: found.picture } : null;
+      } catch { return null; }
+    },
+    report: (error) => {
+      console.warn("[black4] Reviews failed:", error);
+      update({ reviewsError: `Reviews is unavailable in this Buzz: ${String(error?.message ?? error).slice(0, 200)}` });
     },
   });
-
-  // The host owns the anchor, click routing and modifier/new-window behavior.
-  // Inline content must not introduce a nested button or its own navigation.
-  ctx.conversation.registerLink?.({
-    id: "review-link", title: "Black 4 review", order: 0,
-    matches: (url) => Boolean(reviewUrl(url)),
-    component: function ReviewLink() {
-      return h(ui.LinkChip, { label: "Black 4 review" });
-    },
-  });
-
-  ctx.conversation.registerLinkPreview?.({
-    id: "review-preview", title: "Black 4 decision brief", order: -10,
-    matches: (url) => Boolean(reviewUrl(url)) && /\/r\//.test(new URL(url).pathname),
-    component: function ReviewPreview({ url, open }) {
-      return h(NativeReview, { target: url, compact: true, open });
-    },
-  });
+  ctx.effect(() => () => reviews.dispose());
 
   // One prompt, one button. The result stays where the button was.
   function AgentAccess({ link, connected, hardware }) {
@@ -1652,6 +1531,7 @@ export function apply(ctx) {
               connected && current.renewal && current.agentLink?.status !== "approval" ? h(SignInPrompt, { renewal: true }) : null)),
         connected ? h(AgentAccess, { link: current.agentLink, connected: true, hardware: current.hardware === "offered" }) : null,
         current.hardwareError ? ui.ErrorLine(current.hardwareError) : null,
+        current.reviewsError ? ui.ErrorLine(current.reviewsError) : null,
         current.log.length ? h(ui.Disclosure, { title: "Connection log" }, ui.Pre(current.log.join("\n"))) : null));
   }
 
@@ -2489,7 +2369,17 @@ function buzzUi(React, { nativeSelect = false } = {}) {
     dots: ["M4 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0", "M11 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0", "M18 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0"],
     x: ["M18 6l-12 12", "M6 6l12 12"],
     robot: ["M6 6a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2l0 -4", "M12 2v2", "M9 12v9", "M15 12v9", "M5 16l4 -2", "M15 14l4 2", "M9 18h6", "M10 8v.01", "M14 8v.01"],
-    link: ["M9 15l6 -6", "M11 6l.463 -.536a5 5 0 0 1 7.071 7.072l-.534 .464", "M13 18l-.397 .534a5.068 5.068 0 0 1 -7.127 0a4.972 4.972 0 0 1 0 -7.071l.524 -.463"] };
+    link: ["M9 15l6 -6", "M11 6l.463 -.536a5 5 0 0 1 7.071 7.072l-.534 .464", "M13 18l-.397 .534a5.068 5.068 0 0 1 -7.127 0a4.972 4.972 0 0 1 0 -7.071l.524 -.463"],
+    // chevron-up, chevron-down, currency-dollar, users, alert-triangle, minus
+    up: "M6 15l6 -6l6 6", down: "M6 9l6 6l6 -6",
+    money: ["M16.7 8a3 3 0 0 0 -2.7 -2h-4a3 3 0 0 0 0 6h4a3 3 0 0 1 0 6h-4a3 3 0 0 1 -2.7 -2", "M12 3v3m0 12v3"],
+    people: ["M5 7a4 4 0 1 0 8 0a4 4 0 1 0 -8 0", "M3 21v-2a4 4 0 0 1 4 -4h4a4 4 0 0 1 4 4v2", "M16 3.13a4 4 0 0 1 0 7.75", "M21 21v-2a4 4 0 0 0 -3 -3.85"],
+    alert: ["M12 9v4", "M10.363 3.591l-8.106 13.534a1.914 1.914 0 0 0 1.636 2.871h16.214a1.914 1.914 0 0 0 1.636 -2.87l-8.106 -13.536a1.914 1.914 0 0 0 -3.274 0z", "M12 16h.01"],
+    minus: "M5 12l14 0",
+    // clock (a scheduled job), message (asked in a conversation), sparkles (on its own)
+    clock: ["M3 12a9 9 0 1 0 18 0a9 9 0 0 0 -18 0", "M12 7v5l3 3"],
+    message: ["M8 9h8", "M8 13h6", "M18 4a3 3 0 0 1 3 3v8a3 3 0 0 1 -3 3h-5l-5 3v-3h-2a3 3 0 0 1 -3 -3v-8a3 3 0 0 1 3 -3h12z"],
+    sparkles: ["M16 18a2 2 0 0 1 2 2a2 2 0 0 1 2 -2a2 2 0 0 1 -2 -2a2 2 0 0 1 -2 2zm0 -12a2 2 0 0 1 2 2a2 2 0 0 1 2 -2a2 2 0 0 1 -2 -2a2 2 0 0 1 -2 2zm-7 12a6 6 0 0 1 6 -6a6 6 0 0 1 -6 -6a6 6 0 0 1 -6 6a6 6 0 0 1 6 6z"] };
   const h = React.createElement;
   const Fragment = React.Fragment;
   /** The variants each part takes, all ones Buzz styles (kit/uses.json
@@ -2501,6 +2391,8 @@ function buzzUi(React, { nativeSelect = false } = {}) {
     Input: { controlSize: ["md", "sm"] },
     Stack: { gap: [4, 2, "section"] },
     Column: { gap: [4, 2] },
+    Tabs: { variant: ["panel", "segmented"] },
+    Avatar: { size: ["small", "compact", "tiny"] },
   };
   const one = (list, value) => (list.includes(value) ? value : list[0]);
   const icon = (path, size, props = {}) => h("svg", { xmlns: "http://www.w3.org/2000/svg", width: `${size / 16}rem`, height: `${size / 16}rem`,
@@ -2690,12 +2582,12 @@ function buzzUi(React, { nativeSelect = false } = {}) {
 
   /** Field.tsx around Textarea.tsx (AgentInstructions): label, the text, a
    * muted description or the error. */
-  const TextField = ({ label, description, error, optional = false, value, onChange, rows = 8, maxLength, placeholder, disabled }) => {
+  const TextField = ({ label, description, error, optional = false, value, onChange, rows = 8, maxLength, placeholder, disabled, autoFocus, onKeyDown }) => {
     const id = React.useId();
     return h("div", { "data-buzz-ui": "", className: "buzz-field" },
       h("label", { className: "buzz-field-label", htmlFor: id }, label,
         optional ? h(Fragment, null, " ", h("span", { className: "buzz-field-optional" }, "Optional")) : null),
-      h("textarea", { id, rows, maxLength, placeholder, value, disabled,
+      h("textarea", { id, rows, maxLength, placeholder, value, disabled, autoFocus, onKeyDown,
         "data-buzz-ui": "", className: "buzz-textarea", "data-variant": "text", "data-surface": "inset", "data-appearance": "outlined",
         "data-invalid": error ? "" : undefined, "aria-invalid": error ? "true" : undefined,
         onChange: (event) => onChange(event.target.value) }),
@@ -2710,7 +2602,7 @@ function buzzUi(React, { nativeSelect = false } = {}) {
   /** A column of sections, cards or fields. `as: "form"` makes it the form
    * (with `onSubmit`); gap 4 between sections, 2 within a field. */
   const Stack = ({ as = "div", gap, onSubmit, children }) =>
-    h(as, { className: GAPS[one(VARIANTS.Stack.gap, gap)], onSubmit }, ...each(children));
+    h(as, { className: GAPS[one(VARIANTS.Stack.gap, gap)], onSubmit, style: { gridTemplateColumns: "minmax(0, 1fr)" } }, ...each(children));
   /** Builderlab's sign-in column: lines and a button, left-aligned. */
   const Column = ({ gap, children }) =>
     h("div", { "data-buzz-ui": "", className: one(VARIANTS.Column.gap, gap) === 2 ? "flex flex-col items-start gap-2" : "flex flex-col items-start gap-4" }, ...each(children));
@@ -2751,8 +2643,8 @@ function buzzUi(React, { nativeSelect = false } = {}) {
   /** A dock page's surface (Panel.tsx, laid out as Shared notes' page):
    * `header` (a PanelHeader) above a scrolling body. `fill`: the body has no
    * inset (an embedded browser fills it). */
-  const Page = ({ label, header, fill = false, children }) =>
-    h("section", { className: "panel", "data-buzz-surface": "", "data-shape": "panel", "aria-label": label },
+  const Page = ({ label, header, fill = false, onFocus, onBlur, children }) =>
+    h("section", { className: "panel", "data-buzz-surface": "", "data-shape": "panel", "aria-label": label, onFocus, onBlur },
       h("div", { "data-buzz-ui": "", style: { display: "flex", flexDirection: "column", height: "100%", minHeight: 0, containerType: "inline-size" } },
         header ?? null,
         h("div", { style: fill ? { display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }
@@ -2760,8 +2652,11 @@ function buzzUi(React, { nativeSelect = false } = {}) {
           ...each(children))));
 
   /** A drill-in inside a panel (PanelSubview): its bar stays put while the body scrolls. */
-  const Subview = ({ header, children }) =>
-    h("div", { "data-buzz-ui": "", style: { display: "flex", flexDirection: "column", height: "100%", minHeight: 0 } }, header, ...each(children));
+  const Subview = ({ header, footer, children }) =>
+    h("div", { "data-buzz-ui": "", style: { display: "flex", flexDirection: "column", height: "100%", minHeight: 0 } }, header, ...each(children), footer ?? null);
+  /** A panel's whole surface (a Subview's frame), which knows when it has focus. */
+  const Surface = ({ label, onFocus, onBlur, children }) =>
+    h("div", { "data-buzz-ui": "", role: "region", "aria-label": label, onFocus, onBlur, style: { display: "flex", flexDirection: "column", height: "100%", minHeight: 0 } }, ...each(children));
   /** A side panel's body: Buzz leaves the inset to the panel (as GitHub's). */
   const PanelBody = ({ children }) =>
     h("div", { "data-buzz-ui": "", style: { padding: "var(--space-panel-inset)", overflowY: "auto", minHeight: 0, flex: 1, display: "flex", flexDirection: "column", gap: "var(--space-4)", color: "var(--text-standard)" } },
@@ -2794,7 +2689,7 @@ function buzzUi(React, { nativeSelect = false } = {}) {
 
   /** Tabs.tsx, variant "panel" size "sm": pick one of a few items. The
    * indicator is measured from the selected tab, as Base UI does. */
-  const Tabs = ({ label, value, items, onChange }) => {
+  const Tabs = ({ label, value, items, onChange, variant = "panel" }) => {
     const list = React.useRef(null);
     const bar = React.useRef(null);
     React.useLayoutEffect(() => {
@@ -2819,7 +2714,7 @@ function buzzUi(React, { nativeSelect = false } = {}) {
       onChange(next.value);
       requestAnimationFrame?.(() => list.current?.querySelector?.('[role="tab"][aria-selected="true"]')?.focus());
     };
-    return h("div", { "data-buzz-ui": "", className: "buzz-tabs", "data-variant": "panel", "data-size": "sm", "data-orientation": "horizontal" },
+    return h("div", { "data-buzz-ui": "", className: "buzz-tabs", "data-variant": one(VARIANTS.Tabs.variant, variant), "data-size": "sm", "data-orientation": "horizontal" },
       h("div", { ref: list, role: "tablist", "aria-label": label, "aria-orientation": "horizontal", className: "buzz-tabs-list", "data-orientation": "horizontal", onKeyDown: keys },
         h("span", { ref: bar, className: "buzz-tabs-indicator", hidden: true }),
         ...items.map((item) => {
@@ -2877,6 +2772,208 @@ function buzzUi(React, { nativeSelect = false } = {}) {
   /** `.notice`: something that needs a person, not broken (a warning). */
   const Notice = ({ title, children }) =>
     h("div", { role: "status", className: "notice" }, title ? h("h3", null, title) : null, ...each(children));
+
+  // ---- Reviews: the work, the decision and the list ------------------------------
+
+  /** ValueChip.tsx: a short read-only value (a stake, a fact). `glyph`: an
+   * ICON name for its 12px mark; `emphasis`: the label in the standard weight
+   * (the stake), else the chip's own. */
+  const Chip = ({ label, glyph, title }) =>
+    h("span", { "data-buzz-ui": "", className: "buzz-value-chip" },
+      glyph && ICON[glyph] ? h("span", { className: "buzz-value-chip-icon", "aria-hidden": true }, icon(ICON[glyph], 12)) : null,
+      h("span", { className: "buzz-value-chip-text", title: title ?? (typeof label === "string" ? label : undefined) }, label));
+  /** Chips in a row that wraps. */
+  const ChipRow = ({ children }) => h("div", { className: "flex flex-wrap items-center gap-2", style: { minWidth: 0 } }, ...each(children));
+
+  /** Diffs' card (bundled/diffs, Diffs.module.css `.card`/`.fileHeader`):
+   * the frame around a change. */
+  const card = { minWidth: 0, overflow: "hidden", border: "1px solid var(--border-standard)", borderRadius: "var(--radius-control)", background: "var(--surface-panel)", color: "var(--text-standard)" };
+  const cardHeader = { display: "flex", alignItems: "center", gap: "var(--space-2)", padding: "var(--space-2) var(--space-3)", background: "var(--surface-inset)" };
+  /** Diffs' insert and delete fills (`--diff-code-insert/delete-background-color`):
+   * a tint on the words, never red text (red means broken). */
+  const RUN = { added: { background: "var(--affordance-success)", borderRadius: "var(--space-half)", textDecoration: "none" },
+    removed: { background: "var(--affordance-danger)", borderRadius: "var(--space-half)", textDecoration: "line-through" } };
+  /** A word diff as Diffs draws inserted and deleted code: `runs` of
+   * { kind: same | added | removed, text }, under its `label`. */
+  const DiffText = ({ label, runs }) =>
+    h("figure", { style: { ...card, margin: 0 } },
+      label ? h("figcaption", { className: "text-caption text-subtle", style: cardHeader }, label) : null,
+      h("p", { className: "m-0 text-body", style: { padding: "var(--space-3)", whiteSpace: "pre-wrap", overflowWrap: "anywhere" } },
+        ...runs.map((run, index) => run.kind === "same" ? h(Fragment, { key: index }, run.text)
+          : h(Fragment, { key: index },
+              h(run.kind === "added" ? "ins" : "del", { style: { ...RUN[run.kind], color: "inherit" } },
+                h("span", { className: "sr-only" }, run.kind === "added" ? "Added: " : "Removed: "), run.text),
+              // A removed word and its replacement read as two words.
+              run.kind === "removed" && runs[index + 1]?.kind === "added" ? " " : null))));
+
+  /** Settings before and after, in Diffs' card: each row its label, Now and
+   * After; a changed row's new value carries the insert tint, an unchanged
+   * row reads once, quietly. */
+  const ChangeTable = ({ rows, now = "Now", after = "After" }) =>
+    h("div", { "data-buzz-ui": "", role: "table", "aria-label": "Changes", style: card },
+      ...rows.map((row, index) => h("div", { key: index, role: "row", style: { display: "grid", gap: "var(--space-1)", padding: "var(--space-3)", borderTop: index ? "1px solid var(--border-standard)" : undefined } },
+        row.label ? h("span", { role: "rowheader", className: "text-caption text-subtle" }, row.label) : null,
+        row.changed
+          ? h(Fragment, null,
+              h("span", { role: "cell", className: "text-body-sm text-subtle", style: { display: "grid", gridTemplateColumns: "3.5rem minmax(0, 1fr)", gap: "var(--space-2)" } },
+                h("span", { className: "text-caption" }, now), h("span", { style: { overflowWrap: "anywhere" } }, row.before || "None")),
+              h("span", { role: "cell", className: "text-body text-standard", style: { display: "grid", gridTemplateColumns: "3.5rem minmax(0, 1fr)", gap: "var(--space-2)" } },
+                h("span", { className: "text-caption text-subtle" }, after), h("span", { style: { overflowWrap: "anywhere" } }, h("mark", { style: { ...RUN.added, color: "inherit" } }, row.after || "None"))))
+          : h("span", { role: "cell", className: "text-body-sm text-subtle", style: { overflowWrap: "anywhere" } }, `Unchanged: ${row.after || row.before || "None"}`))));
+
+  /** Before and after images, side by side in Diffs' card. `before`/`after`:
+   * data URLs; `loading`: the image is still coming. */
+  const MediaPair = ({ before, after, loading = false, label = "The work" }) => {
+    const figure = (src, caption) => h("figure", { key: caption, style: { margin: 0, display: "grid", gap: "var(--space-1)", minWidth: 0 } },
+      src ? h("img", { src, alt: `${label}: ${caption}`, style: { display: "block", width: "100%", height: "auto", borderRadius: "var(--radius-control)", background: "var(--surface-inset)" } })
+        : h("div", { role: "img", "aria-label": `${caption} loading`, style: { aspectRatio: "4 / 3", borderRadius: "var(--radius-control)", background: "var(--surface-inset)" } }),
+      h("figcaption", { className: "text-caption text-subtle" }, caption));
+    return h("div", { "data-buzz-ui": "", "aria-busy": loading || undefined, style: { ...card, display: "grid", gridTemplateColumns: before ? "repeat(2, minmax(0, 1fr))" : "minmax(0, 1fr)", gap: "var(--space-3)", padding: "var(--space-3)" } },
+      before ? figure(before, "Now") : null, figure(loading ? null : after, before ? "After" : "The new version"));
+  };
+
+  /** The bar fixed under a panel's body (Activity's toolbar border, at the
+   * bottom): a `status` line, then the actions. `stacked`: a field above. */
+  const DecisionBar = ({ status, stacked = false, children }) =>
+    h("div", { "data-buzz-ui": "", role: "group", "aria-label": "Decision", style: { flex: "0 0 auto", display: "flex", flexDirection: stacked ? "column" : "row", flexWrap: "wrap",
+        alignItems: stacked ? "stretch" : "center", justifyContent: "space-between", gap: "var(--space-2) var(--space-3)",
+        padding: "var(--space-3) var(--space-panel-inset)", borderTop: "1px solid var(--border-standard)", background: "var(--surface-panel)" } },
+      status ? h("div", { "aria-live": "polite", style: { minWidth: 0, flex: stacked ? undefined : "1 1 12rem" } }, status) : null,
+      ...(children == null ? [] : [stacked ? h("div", { key: "actions", className: "grid gap-2" }, ...each(children))
+        : h("div", { key: "actions", className: "flex flex-wrap items-center gap-2" }, ...each(children))]));
+
+  /** A placeholder in the real layout while it loads (Buzz has no skeleton:
+   * inset bars in the place of the lines). `layout`: item | list. */
+  const Skeleton = ({ layout = "item" }) => {
+    const bar = (width, height = "var(--space-3)", key) => h("span", { key, style: { display: "block", width, height, borderRadius: "var(--space-1)", background: "var(--surface-inset)" } });
+    const rows = layout === "list"
+      ? [0, 1, 2, 3].map((n) => h("span", { key: n, style: { display: "grid", gap: "var(--space-2)", padding: "var(--space-2) var(--space-control-inset)" } }, bar("40%", "var(--space-3)", "a"), bar(n % 2 ? "70%" : "85%", "var(--space-4)", "b")))
+      : [bar("30%", "var(--space-3)", "a"), bar("80%", "var(--space-6)", "b"), h("span", { key: "c", className: "flex flex-wrap items-center gap-2" }, bar("6rem", "var(--space-5)", "c1"), bar("4rem", "var(--space-5)", "c2"), bar("5rem", "var(--space-5)", "c3")), bar("100%", "8rem", "d")];
+    return h("div", { "data-buzz-ui": "", "aria-busy": true, style: { display: "grid", gap: "var(--space-4)" } }, h("span", { className: "sr-only", role: "status" }, "Loading"), ...rows);
+  };
+
+  /** Checkbox.tsx (Base UI Checkbox.Root) without its label: the row names it. */
+  const Checkbox = ({ checked, onCheckedChange, label, disabled, size = "md" }) =>
+    h("button", { type: "button", role: "checkbox", "aria-checked": !!checked, "aria-label": label, disabled,
+        "data-buzz-ui": "", className: "buzz-checkbox", "data-size": size === "sm" ? "sm" : "md",
+        "data-checked": checked ? "" : undefined, "data-disabled": disabled ? "" : undefined,
+        onClick: (event) => { event.stopPropagation(); if (!disabled) onCheckedChange(!checked); } },
+      checked ? h("span", { "aria-hidden": true, style: { display: "flex" } }, icon(ICON.check, size === "sm" ? 12 : 14)) : null);
+
+  /** Activity's row (MessageListRow, NavigationItem multiline) in a
+   * NavigationCard, so a Checkbox can sit beside it without nesting controls:
+   * `title` (the sender's place), `subtitle` (the preview's), `meta` (the
+   * date's). `picked`/`onPick`: an explicit selection; `quiet`: muted. */
+  const SelectRow = ({ title, subtitle, meta, avatar, thumbnail, selected = false, picked, onPick, pickLabel, onOpen, quiet = false }) =>
+    h("li", { style: { minWidth: 0, listStyle: "none" } },
+      h("div", { "data-buzz-ui": "", "data-navigation-card": "", "data-tone": "default", className: "navigation-card" },
+        h("div", { className: "navigation-card-row" },
+          h("button", { type: "button", "data-variant": "row", "data-multiline": "", "data-buzz-ui": "", className: "navigation-item",
+              "data-selected": selected ? "" : undefined, "aria-current": selected ? "true" : undefined, onClick: onOpen },
+            // MessageListRow's avatar slot (`.rowAvatar`): who made it.
+            avatar ? h("span", { style: { display: "grid", flex: "none", width: "var(--space-8)", height: "var(--space-8)", placeItems: "center", alignSelf: "flex-start", marginBlockStart: "var(--space-row-gap)" } }, avatar) : null,
+            h("span", { className: "navigation-item-label" },
+              h("span", { style: { display: "flex", flexDirection: "column", gap: "var(--space-1)", minWidth: 0, whiteSpace: "normal", paddingBlock: "var(--space-row-gap)" } },
+                h("span", { style: { display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: "var(--space-1) var(--space-control-inset)" } },
+                  h("strong", { className: `text-label-sm ${quiet ? "text-subtle" : "text-standard"}`, style: { minWidth: 0, overflowWrap: "anywhere" } }, title),
+                  meta ? h("span", { className: "text-caption text-subtle", style: { flex: "0 0 auto" } }, meta) : null),
+                subtitle ? h("span", { className: "text-body-sm text-subtle", style: { maxInlineSize: "64ch", overflow: "hidden", overflowWrap: "anywhere", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" } }, subtitle) : null,
+                thumbnail ? h("img", { src: thumbnail, alt: "", style: { display: "block", width: "100%", maxHeight: "5rem", objectFit: "cover", objectPosition: "top", borderRadius: "var(--radius-control)", border: "1px solid var(--border-standard)" } }) : null))),
+          onPick ? h("span", { style: { order: -1, flex: "none", display: "grid", placeItems: "center", paddingBlock: "calc(var(--space-row-gap) + var(--space-half))", paddingInlineStart: "var(--space-control-inset)" } },
+            h(Checkbox, { checked: !!picked, onCheckedChange: onPick, label: pickLabel ?? (typeof title === "string" ? `Select ${title}` : "Select") })) : null)));
+
+  /** A titled list of rows (Activity's list): `label` and a quiet `count`. */
+  const ListGroup = ({ label, count, children }) =>
+    h("section", { "data-buzz-ui": "", style: { display: "grid", gap: "var(--space-1)", minWidth: 0 } },
+      label ? h("h3", { className: "text-label-sm text-subtle", style: { margin: 0, padding: "0 var(--space-control-inset)", display: "flex", gap: "var(--space-2)" } },
+        h("span", null, label), count ? h("span", { className: "tabular-nums" }, String(count)) : null) : null,
+      h("ul", { role: "list", style: { margin: 0, padding: 0, display: "grid", gap: "1px" } }, ...each(children)));
+
+  /** Activity's workspace: the list pane beside the preview (Inbox.module.css
+   * `.workspace`, `.listPane`, `.scroll`). Too narrow for both, the preview
+   * takes the space while it shows something. */
+  const Split = ({ label, list, detail, showing = false }) => {
+    const box = React.useRef(null);
+    const [narrow, setNarrow] = React.useState(false);
+    React.useLayoutEffect(() => {
+      const node = box.current;
+      if (!node || typeof ResizeObserver !== "function") return undefined;
+      const watch = new ResizeObserver(() => setNarrow(node.clientWidth < 720));
+      watch.observe(node);
+      return () => watch.disconnect();
+    }, []);
+    const pane = { display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0 };
+    return h("div", { ref: box, "data-buzz-ui": "", style: { display: "flex", flex: 1, minWidth: 0, minHeight: 0 } },
+      narrow && showing ? null : h("div", { role: "region", "aria-label": label, style: { ...pane, flex: narrow ? 1 : "0 0 min(26rem, 42%)", borderRight: narrow ? undefined : "1px solid var(--border-standard)" } },
+        h("div", { style: { flex: 1, minHeight: 0, overflow: "auto", padding: "var(--space-3) var(--space-row-gap) var(--space-panel-inset)" } }, list)),
+      narrow && !showing ? null : h("div", { style: { ...pane, flex: 1 } }, detail));
+  };
+
+  /** Avatar.tsx at a row's size: a picture, or its name's first letter.
+   * `shape` squircle for an agent, circle for a person. */
+  const Avatar = ({ name, picture, size = "small", shape = "circle", label }) => {
+    const [failed, setFailed] = React.useState(false);
+    const letter = (Array.from(String(name ?? "").trim())[0] ?? "?").toUpperCase();
+    const dim = one(VARIANTS.Avatar.size, size);
+    return h("span", { className: "buzz-avatar-status", "data-size": dim, "data-shape": shape === "squircle" ? "squircle" : "circle" },
+      h("span", { "data-buzz-ui": "", className: "buzz-avatar", "data-size": dim, "data-avatar-shape": shape === "squircle" ? "squircle" : "circle", "data-fallback-surface": "subtle",
+          role: label ? "img" : undefined, "aria-label": label, "aria-hidden": label ? undefined : true },
+        picture && !failed
+          ? h("img", { src: picture, alt: "", loading: "lazy", decoding: "async", referrerPolicy: "no-referrer", "data-loaded": "true", onError: () => setFailed(true) })
+          : h("span", { "data-avatar-fallback": "", "aria-hidden": true }, letter)));
+  };
+  /** Who made something and what set it off, as Buzz writes a message's
+   * author line: the maker's Avatar and name (and the app they used), then
+   * the origin with its mark. `onOrigin` makes the origin open its thread. */
+  const Byline = ({ avatar, name, app, origin, originGlyph, onOrigin }) =>
+    h("div", { "data-buzz-ui": "", className: "flex flex-wrap items-center gap-2", style: { minWidth: 0 } },
+      avatar ?? null,
+      h("span", { className: "text-label-sm text-standard", style: { minWidth: 0, overflowWrap: "anywhere" } }, name),
+      app ? h("span", { className: "text-caption text-subtle" }, app) : null,
+      origin ? h("span", { className: "text-caption text-subtle", "aria-hidden": true }, "·") : null,
+      origin ? (onOrigin
+        ? h(Button, { variant: "link", size: "text", onClick: onOrigin }, h(Fragment, null, originGlyph && ICON[originGlyph] ? icon(ICON[originGlyph], 12, { style: { marginInlineEnd: "var(--space-1)", verticalAlign: "-1px" } }) : null, origin))
+        : h("span", { className: "flex items-center gap-1 text-caption text-subtle" }, originGlyph && ICON[originGlyph] ? icon(ICON[originGlyph], 12) : null, origin)) : null);
+  /** The work, big: a frame that takes the panel's height (Diffs' card,
+   * `.preview`), its toggle (Now / After) floating at the top. */
+  const Canvas = ({ label, toolbar, children }) =>
+    h("figure", { "aria-label": label, style: { ...card, margin: 0, position: "relative", display: "flex", flexDirection: "column", flex: "1 1 auto", minHeight: "min(34rem, 64vh)" } },
+      toolbar ? h("div", { style: { ...cardHeader, justifyContent: "space-between" } }, ...each(toolbar)) : null,
+      h("div", { style: { flex: 1, minHeight: 0, display: "flex", alignItems: "stretch", justifyContent: "center", overflow: "auto", background: "var(--surface-inset)" } }, ...each(children)));
+  /** A picture of the work filling the canvas (an image, or the platform's capture of a page). */
+  const CanvasImage = ({ src, alt }) => src
+    ? h("img", { src, alt, style: { display: "block", maxWidth: "100%", maxHeight: "100%", objectFit: "contain", margin: "auto" } })
+    : h("div", { role: "img", "aria-label": `${alt} loading`, "aria-busy": true, style: { flex: 1, background: "var(--surface-inset)" } });
+  /** A quiet line of short values (the stake, the facts), one line, cut short. */
+  const QuietLine = ({ glyph, children }) =>
+    h("p", { className: "m-0 text-caption text-subtle", style: { display: "flex", gap: "var(--space-1)", alignItems: "center", minWidth: 0 } },
+      glyph && ICON[glyph] ? icon(ICON[glyph], 12, { style: { flex: "none" } }) : null,
+      h("span", { style: { minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, children));
+  /** What approving permits, in two lines at most (the whole on hover). */
+  const Permits = (text) => h("p", { className: "m-0 text-body-sm text-standard", title: text, style: { display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" } }, text);
+  /** One review item's column: its heading, the canvas taking the rest, then details. */
+  const Article = ({ label, children }) =>
+    h("article", { "aria-label": label, style: { display: "flex", flexDirection: "column", gap: "var(--space-3)", flex: "1 0 auto", minHeight: "100%" } }, ...each(children));
+  /** The question, one or two lines, the heading of the item. */
+  const Question = (text) => h("h2", { className: "m-0 text-label", style: { display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden", overflowWrap: "anywhere" } }, text);
+
+  /** The finished work as a page, in Diffs' card (`.preview`: a bounded,
+   * scrolling frame) with an embedded view inside. */
+  const Frame = ({ label, children }) =>
+    h("div", { "data-buzz-ui": "", role: "group", "aria-label": label, style: { ...card, display: "flex", height: "min(28rem, 60vh)", minHeight: "16rem" } }, ...each(children));
+  /** A message's card (Diffs' DiffMessage card): a quiet frame around rows. */
+  const MessageCard = ({ label, children }) =>
+    h("div", { "data-buzz-ui": "", role: "group", "aria-label": label, style: { ...card, display: "grid" } }, ...each(children));
+  /** One row in a message's card: the question, its live state, Open. */
+  const MessageRow = ({ title, subtitle, avatar, thumbnail, loading = false, onOpen, openLabel = "Open" }) =>
+    h("div", { style: { display: "flex", alignItems: "center", gap: "var(--space-3)", padding: "var(--space-2) var(--space-3)", minWidth: 0 } },
+      thumbnail ? h("img", { src: thumbnail, alt: "", style: { width: "4.5rem", height: "3.25rem", objectFit: "cover", objectPosition: "top", flex: "none", borderRadius: "var(--radius-control)", border: "1px solid var(--border-standard)" } })
+        : avatar ? h("span", { style: { flex: "none", display: "grid" } }, avatar) : null,
+      h("span", { style: { display: "grid", gap: "var(--space-1)", minWidth: 0, flex: 1 } },
+        h("span", { className: "text-label-sm text-standard", style: { overflowWrap: "anywhere" } }, title),
+        loading ? h("span", { style: { display: "block", width: "40%", height: "var(--space-3)", borderRadius: "var(--space-1)", background: "var(--surface-inset)" } })
+          : subtitle ? h("span", { className: "text-caption text-subtle" }, subtitle) : null),
+      onOpen ? h(Button, { size: "sm", variant: "outline", onClick: onOpen }, openLabel) : null);
 
   // Text, in the roles Buzz's pages write.
   const Title = (text, props = {}) => h("h2", { ...props, className: "text-heading" }, text);
@@ -3283,12 +3380,1359 @@ function buzzUi(React, { nativeSelect = false } = {}) {
   const Code = (text) => h("code", { className: "text-body tabular-nums", style: { letterSpacing: "0.08em" } }, text);
 
   return { VARIANTS, SectionTitle, Group, Row, Button, Input, Switch, SwitchRow, Pill, Popup, Native, TextField, Stack, Column, Actions, Note, ErrorLine, Spinner, Status, Value, Alert, Code,
-    Header, IconButton, PanelHeader, Page, Subview, PanelBody, Fill, Toolbar, EmptyState, NavItem, Tabs, Disclosure, CountBadge, Dot, LinkChip, OneTimeCode, CodeColumn, Failure, Notice,
+    Header, IconButton, PanelHeader, Page, Subview, Surface, PanelBody, Fill, Toolbar, EmptyState, NavItem, Tabs, Disclosure, CountBadge, Dot, LinkChip, OneTimeCode, CodeColumn, Failure, Notice,
+    Frame, Avatar, Byline, Canvas, CanvasImage, QuietLine, Question, Permits, Article, Chip, ChipRow, DiffText, ChangeTable, MediaPair, DecisionBar, Skeleton, Checkbox, SelectRow, ListGroup, Split, MessageCard, MessageRow,
     Title, Heading, Paragraph, Caption, Strong, Lines, Line, Pre, ICON,
     AgentBrowse, AgentGrid, AgentCard, CardMark, AgentPortrait, AgentPanel, AgentProfile, NameInput, NameActions, Menu, AvatarChoices, HeaderTab, Picture, Glyph, COPIED, COPIED_FROM, AVATARS };
 }
 // ---- end buzz-ui kit ----
 export { buzzUi };
+
+// ---- reviews: stamped from src/reviews/ by `npm run build`; edit it there ----
+// ---- Reviews: what the person reads and decides --------------------------------
+// Reads go through the Black 4 MCP as the signed-in person. Decisions go
+// through `decide_review_item`, an app-only tool, with the single-use decision
+// token `open_review` hands this module in its result's `_meta`. The tokens
+// live only in this closure: never logged, stored, put in a URL, rendered, or
+// handed to anything else. A decision is sent only after `propose` (called by
+// a person's click or key press) and its Undo window; disposing the module
+// cancels every decision still waiting, so nothing is sent after that.
+
+/** The Black 4 review card's private part of a tool result (Platform Control
+ * REVIEW_CARD_META_KEY). */
+const REVIEW_CARD_META = "ai.black4/review-card";
+/** A decision waits this long for Undo before it is sent (the web's buffer). */
+const REVIEW_UNDO_MS = 8 * 1000;
+/** How long a decision may take before its outcome is unknown and read again. */
+const REVIEW_DECIDE_TIMEOUT_MS = 30 * 1000;
+/** A token this close to expiry is renewed (open_review again) before use. */
+const REVIEW_TOKEN_RENEW_MS = 20 * 1000;
+/** A review read this recently is shown again without asking. */
+const REVIEW_FRESH_MS = 60 * 1000;
+/** Refusals after which the review is read again for its new state. */
+const REVIEW_CONFLICTS = Object.freeze(["stale_review", "decision_exists"]);
+const REVIEW_TOKEN_CODES = Object.freeze(["decision_token_expired", "decision_token_used", "decision_token_invalid", "decision_token_required"]);
+/** Decisions sent at once at most (Platform Control answers 429 past 4 for a customer). */
+const REVIEW_PARALLEL = 3;
+const REVIEW_VERDICTS = Object.freeze(["approved", "changes_requested", "rejected"]);
+const REVIEWS_HOME = "https://app.black4.ai/reviews";
+
+/** A review link as a locator, never an authority: `{ kind: "queue",
+ * businessId? }` or `{ kind: "review", assetId, businessId?, itemKey?,
+ * version? }`, or null for anything but the Black 4 review surface. */
+function reviewLocator(target) {
+  const safe = reviewUrl(target);
+  if (!safe) return null;
+  const url = new URL(safe);
+  const businessId = url.searchParams.get("business") || undefined;
+  const assetId = url.pathname.match(/^\/r\/([a-zA-Z0-9_-]+)/)?.[1];
+  if (!assetId) return { kind: "queue", ...(businessId ? { businessId } : {}) };
+  const version = Number(url.searchParams.get("v"));
+  return { kind: "review", assetId, ...(businessId ? { businessId } : {}),
+    ...(url.searchParams.get("item") ? { itemKey: url.searchParams.get("item") } : {}),
+    ...(Number.isInteger(version) && version > 0 ? { version } : {}) };
+}
+
+/** The link for one item, with its business so it opens without a lookup. */
+function reviewLink({ assetId, businessId, itemKey, version } = {}) {
+  if (!assetId) return businessId ? `${REVIEWS_HOME}?business=${encodeURIComponent(businessId)}` : REVIEWS_HOME;
+  const url = new URL(`https://app.black4.ai/r/${encodeURIComponent(assetId)}`);
+  if (version) url.searchParams.set("v", String(version));
+  if (itemKey) url.searchParams.set("item", itemKey);
+  if (businessId) url.searchParams.set("business", businessId);
+  return url.href;
+}
+
+const reviewItemId = (businessId, assetId, key) => `${businessId}/${assetId}/${key}`;
+const reviewAssetKey = (businessId, assetId) => `${businessId}/${assetId}`;
+
+/** Everything waiting, in queue order, one entry per item: what next and
+ * previous step through. Approved work that is blocked or stalled is not here. */
+function reviewOrder(queue) {
+  return reviewGroups(queue).flatMap((group) => group.items);
+}
+/** Every waiting item in the order the server listed them. */
+function reviewListed(queue) {
+  const out = [];
+  for (const review of queue?.reviews ?? []) {
+    for (const item of review.items ?? []) {
+      out.push({ id: reviewItemId(review.businessId, review.assetId, item.key), businessId: review.businessId, businessName: review.businessName,
+        assetId: review.assetId, reviewTitle: review.title, key: item.key, version: item.version, title: item.title, question: item.question,
+        stake: item.stake, age: item.age, brief: item.brief, workType: item.workType, threadId: item.threadId ?? review.threadId ?? null,
+        madeBy: item.madeBy ?? review.madeBy ?? null, requestedBy: item.requestedBy ?? review.requestedBy ?? null, job: item.job ?? review.job ?? null,
+        producer: item.producer ?? review.producer ?? null, origin: item.origin ?? review.origin ?? null });
+    }
+  }
+  return out;
+}
+
+/** The queue grouped by business, in the order businesses first appear. */
+function reviewGroups(queue) {
+  const groups = new Map();
+  for (const entry of reviewListed(queue)) {
+    if (!groups.has(entry.businessId)) groups.set(entry.businessId, { businessId: entry.businessId, businessName: entry.businessName, items: [] });
+    groups.get(entry.businessId).items.push(entry);
+  }
+  // Similar work side by side: within a business, items of one work type
+  // together, in the order each type first waits.
+  for (const group of groups.values()) {
+    const first = new Map();
+    group.items.forEach((entry, index) => { if (!first.has(entry.workType)) first.set(entry.workType, index); });
+    group.items = group.items.map((entry, index) => ({ entry, index })).sort((a, b) => first.get(a.entry.workType) - first.get(b.entry.workType) || a.index - b.index).map(({ entry }) => entry);
+  }
+  return [...groups.values()];
+}
+
+/** Where a review came from, when the server says (staff only): the Buzz
+ * thread and the job run that made it. Flat fields: `threadId`, and `job`
+ * { jobId, jobName, runId, startedAt }. */
+function reviewOrigin(review, item) {
+  const text = (value) => (typeof value === "string" && value.trim() ? plain(value, 200) : undefined);
+  const job = item?.job ?? review?.job ?? null;
+  const out = {
+    threadId: text(item?.threadId ?? review?.threadId),
+    jobId: text(job?.jobId),
+    jobName: text(job?.jobName),
+    runId: text(job?.runId),
+  };
+  return Object.fromEntries(Object.entries(out).filter(([, value]) => value));
+}
+
+/** Who made a review item and what set it off, for its byline:
+ * `{ maker: { name, pubkey?, app?, agent }, origin: { kind: job | request |
+ * proactive, text, threadId? } }`. Reads Platform Control's structured
+ * `producer` and `origin` when present; until then `madeBy` is shown whole
+ * (nothing is parsed out of it), with `job`, `requestedBy` and `threadId`. */
+function reviewByline(review, item) {
+  const text = (value, max = 160) => (typeof value === "string" && value.trim() ? plain(value, max) : undefined);
+  const key = (value) => (/^[0-9a-f]{64}$/i.test(String(value ?? "")) ? String(value).toLowerCase() : undefined);
+  const producer = item?.producer ?? review?.producer;
+  const said = item?.origin ?? review?.origin;
+  const job = item?.job ?? review?.job;
+  const threadId = text(item?.threadId ?? review?.threadId, 200);
+  const requestedBy = text(item?.requestedBy ?? review?.requestedBy, 120);
+  const maker = producer && typeof producer === "object"
+    ? { pubkey: key(producer.agentPubkey ?? producer.pubkey), name: text(producer.agentName ?? producer.name ?? producer.person, 80) ?? "Unknown",
+        app: text(producer.app ?? producer.harness, 60), agent: !!(producer.agentPubkey ?? producer.pubkey ?? producer.agentName) }
+    : { name: text(item?.madeBy ?? review?.madeBy, 160) ?? "Unknown maker", agent: false };
+  let origin;
+  if (said && typeof said === "object" && ["job", "request", "proactive"].includes(said.kind)) {
+    origin = { kind: said.kind, text: text(said.label ?? said.text, 120) ?? (said.kind === "job" ? "Scheduled run" : said.kind === "request" ? "Asked for" : "Proactive") };
+  } else if (job && (job.jobName || job.jobId)) origin = { kind: "job", text: `${text(job.jobName, 80) ?? "A job"} · scheduled run` };
+  else if (requestedBy && !/^proactive$/i.test(requestedBy)) origin = { kind: "request", text: `Asked by ${requestedBy}` };
+  else origin = { kind: "proactive", text: "On its own initiative" };
+  if (threadId) origin.threadId = threadId;
+  return { maker, origin };
+}
+
+/** An item's state in words, from its own decision fields: approval is never
+ * shown as completion. */
+function reviewState(item, receipt) {
+  if (receipt && receipt.state !== "saved") {
+    if (receipt.state === "pending") return { tone: "pending", text: receipt.verdict === "approved" ? "Approving" : receipt.verdict === "rejected" ? "Rejecting" : "Asking for changes" };
+    if (receipt.state === "sending") return { tone: "pending", text: "Saving" };
+  }
+  const decision = receipt?.decision ?? item?.decision;
+  if (!decision) {
+    if (!item || item.status === "awaiting_decision" || item.decidable) return { tone: "waiting", text: "Waiting for you" };
+    const not = { decided: "Decided", newer_version: "A newer version is coming", customer_approver: "The customer's approver decides",
+      another_approver: "Another approver decides", administrator_only: "An administrator decides", view_only: "View only" };
+    return { tone: "quiet", text: not[item.status] ?? "Not yours to decide" };
+  }
+  const by = decision.reviewer ? ` by ${plain(decision.reviewer, 80)}` : "";
+  if (decision.verdict === "changes_requested") return { tone: "done", text: `Changes asked${by}` };
+  if (decision.verdict === "rejected") return { tone: "done", text: `Rejected${by}` };
+  const run = { pending: "waiting to run", in_progress: "running", completed: decision.releaseOutcome === "did_not_go_live" ? "done, not live" : "done",
+    blocked: "blocked", not_applicable: "nothing to run" }[decision.executionStatus] ?? "waiting to run";
+  return { tone: decision.executionStatus === "completed" ? "done" : "approved", text: `Approved${by} · ${run}` };
+}
+
+/** The Reviews data: reads, the decision tokens and every decision's receipt.
+ * `call(name, args, { timeoutMs })` answers the raw MCP tools/call result. */
+function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = (id) => clearTimeout(id),
+  undoMs = REVIEW_UNDO_MS, timeoutMs = REVIEW_DECIDE_TIMEOUT_MS } = {}) {
+  const tokens = new Map(); // item id -> { token, version, expiresAt }: this closure only
+  const previews = new Map(); // item id -> { after, before }: { url, contentType }
+  const captures = new Map(); // item id -> { url, contentType }: the platform's picture of the work, when it sends one
+  const reviews = new Map(); // asset key -> { data, readAt }
+  const flights = new Map(); // asset key -> a read in flight
+  const businesses = new Map(); // assetId -> businessId (locators only)
+  const receipts = new Map(); // item id -> receipt
+  const timers = new Map(); // item id -> undo timer
+  const images = new Map(); // `${id}/${which}` -> Promise<data URL | null>
+  const pictures = new Map(); // `${id}/${which}` -> data URL, once read
+  const listeners = new Set();
+  let queue = null;
+  let queueFlight = null;
+  let serverNeedsBusiness = false;
+  let revision = 0;
+  let epoch = 0; // moves on at reset: answers to an older connection go nowhere
+  let disposed = false;
+
+  const changed = () => { revision += 1; for (const listener of [...listeners]) { try { listener(); } catch {} } };
+  const remember = (assetId, businessId) => {
+    if (!assetId || !businessId) return;
+    if (businesses.size >= 500) businesses.delete(businesses.keys().next().value);
+    businesses.set(assetId, businessId);
+  };
+  /** The answer's data, its private part kept apart. */
+  const answer = (result) => {
+    const meta = result?._meta?.[REVIEW_CARD_META];
+    const bare = result && typeof result === "object" ? { ...result } : result;
+    if (bare && typeof bare === "object") delete bare._meta;
+    const data = readAnswer(bare);
+    return { data: data?.data && data.kind === undefined ? data.data : data, meta };
+  };
+
+  const noteQueue = (value) => {
+    if (!value || value.kind !== "black4_review_queue") return;
+    queue = value;
+    for (const review of value.reviews ?? []) remember(review.assetId, review.businessId);
+    for (const entry of [...(value.blocked ?? []), ...(value.stalled ?? [])]) remember(entry.assetId, entry.businessId);
+    changed();
+  };
+  const readQueue = () => queueFlight ??= (async () => {
+    try {
+      const { data } = answer(await call("review_queue", {}));
+      if (data?.kind !== "black4_review_queue") throw new Error("Black 4 answered with something Reviews cannot show.");
+      noteQueue(data);
+      return data;
+    } finally { queueFlight = null; }
+  })();
+
+  /** Keeps a review's tokens and previews here and returns its data. */
+  const keep = (data, meta) => {
+    const key = reviewAssetKey(data.businessId, data.assetId);
+    remember(data.assetId, data.businessId);
+    for (const item of data.items ?? []) {
+      const id = reviewItemId(data.businessId, data.assetId, item.key);
+      const minted = meta?.decisionTokens?.[item.key];
+      if (data.decideIn === "card" && item.decidable && typeof minted?.token === "string" && Number.isInteger(minted.version)) {
+        tokens.set(id, { token: minted.token, version: minted.version, expiresAt: Date.parse(minted.expiresAt) || now() + 15 * 60 * 1000 });
+      } else tokens.delete(id);
+      const after = meta?.previews?.[item.key];
+      const before = meta?.beforePreviews?.[item.key];
+      if (after || before) previews.set(id, { after, before });
+      const capture = meta?.captures?.[item.key]?.desktop ?? meta?.captures?.[item.key];
+      if (typeof capture?.url === "string") captures.set(id, { url: capture.url, contentType: capture.contentType ?? "image/png" });
+      // A decision the server now shows replaces a receipt still unsure of it.
+      const receipt = receipts.get(id);
+      if (receipt && item.decision && ["unknown", "conflict"].includes(receipt.state)) receipts.set(id, { ...receipt, state: "saved", decision: item.decision });
+    }
+    reviews.set(key, { data, readAt: now() });
+    changed();
+    return data;
+  };
+
+  const ask = async (args) => {
+    const { data, meta } = answer(await call("open_review", args));
+    if (data?.kind !== "black4_review" || data.assetId !== args.assetId || (args.businessId && data.businessId !== args.businessId)) {
+      throw new Error("The review Black 4 sent does not match this link.");
+    }
+    return keep(data, meta);
+  };
+  /** Which business a review belongs to, without asking when it is known. */
+  const businessOf = (locator) => locator.businessId || businesses.get(locator.assetId)
+    || queue?.reviews?.find((review) => review.assetId === locator.assetId)?.businessId;
+
+  /** One review, read again unless a fresh copy is here. Resolves the
+   * business from the link, then what is known, then open_review without it,
+   * then the queue (older servers). Rejects with `code: "elsewhere"` (not a
+   * fault) when this account's queue does not hold it. */
+  const open = async (locator, { fresh = false } = {}) => {
+    if (!locator?.assetId) throw new Error("This is not a Black 4 review link.");
+    let businessId = businessOf(locator);
+    if (businessId) {
+      const cached = reviews.get(reviewAssetKey(businessId, locator.assetId));
+      if (!fresh && cached && now() - cached.readAt < REVIEW_FRESH_MS) return cached.data;
+    }
+    const flightKey = `${businessId ?? "?"}/${locator.assetId}`;
+    if (flights.has(flightKey)) return flights.get(flightKey);
+    const flight = (async () => {
+      if (!businessId && !serverNeedsBusiness) {
+        try { return await ask({ assetId: locator.assetId, ...(locator.itemKey ? { itemKey: locator.itemKey } : {}) }); } catch (error) {
+          // A server that needs businessId refuses the input; it is asked by business from now on.
+          if (error?.serverCode === "review_not_found") throw Object.assign(new Error("This review isn't waiting in your queue."), { code: "elsewhere" });
+          if (error?.code === "rpc" || /businessId|required|invalid/i.test(String(error?.message))) serverNeedsBusiness = true;
+          else throw error;
+        }
+      }
+      if (!businessId) businessId = businessOf(locator) ?? (await readQueue(), businessOf(locator));
+      if (!businessId) throw Object.assign(new Error("This review isn't waiting in your queue."), { code: "elsewhere" });
+      return ask({ businessId, assetId: locator.assetId });
+    })().finally(() => flights.delete(flightKey));
+    flights.set(flightKey, flight);
+    return flight;
+  };
+
+  const cachedReview = (businessId, assetId) => reviews.get(reviewAssetKey(businessId, assetId))?.data ?? null;
+  /** A review already read for this locator, its business found from what is known. */
+  const peek = (locator) => { const businessId = locator?.assetId ? businessOf(locator) : null; return businessId ? cachedReview(businessId, locator.assetId) : null; };
+  const canDecide = (review, item) => !!review && !!item && review.decideIn === "card" && item.decidable === true
+    && tokens.has(reviewItemId(review.businessId, review.assetId, item.key));
+
+  /** An image of the item's work as a data URL, read through get_review_file
+   * (the MCP origin only): `which` is "after" (the preview) or "before". */
+  const image = (businessId, assetId, key, which = "after") => {
+    const id = reviewItemId(businessId, assetId, key);
+    const cacheKey = `${id}/${which}`;
+    if (images.has(cacheKey)) return images.get(cacheKey);
+    const link = which === "capture" ? captures.get(id) : previews.get(id)?.[which];
+    const read = (async () => {
+      if (!link?.url || !/^image\//.test(String(link.contentType ?? ""))) return null;
+      // The link names the file; only its path is used, never the link itself.
+      const match = String(link.url).match(/^https:\/\/[^/]+\/v\/[^/]+\/(.+)$/);
+      if (!match) return null;
+      const path = match[1].split("/").map((part) => { try { return decodeURIComponent(part); } catch { return part; } }).join("/");
+      const item = cachedReview(businessId, assetId)?.items?.find((entry) => entry.key === key);
+      const result = await call("get_review_file", { businessId, assetId, path, ...(item?.version ? { version: item.version } : {}) });
+      if (result?.isError) return null;
+      const part = (result?.content ?? []).find((entry) => entry?.type === "image" && typeof entry.data === "string");
+      if (!part || !/^image\/(png|jpeg|gif|webp|avif)$/.test(String(part.mimeType))) return null;
+      return `data:${part.mimeType};base64,${part.data}`;
+    })().catch(() => null);
+    if (images.size >= 60) images.delete(images.keys().next().value);
+    images.set(cacheKey, read);
+    read.then((src) => { if (src) { if (pictures.size >= 60) pictures.delete(pictures.keys().next().value); pictures.set(cacheKey, src); changed(); } });
+    return read;
+  };
+
+  // ---- deciding ----------------------------------------------------------------
+  const setReceipt = (id, receipt) => {
+    if (receipt) receipts.set(id, receipt); else receipts.delete(id);
+    changed();
+  };
+  /** Marks the cached item decided with the server's own decision. */
+  const decided = (receipt, decision) => {
+    const cached = reviews.get(reviewAssetKey(receipt.businessId, receipt.assetId));
+    if (cached) {
+      cached.data = { ...cached.data, items: (cached.data.items ?? []).map((item) => item.key !== receipt.key ? item
+        : { ...item, decidable: false, status: "decided", decision: { ...(item.decision ?? {}), ...decision } }) };
+    }
+    if (queue?.reviews) {
+      queue = { ...queue, total: Math.max(0, (queue.total ?? 1) - 1), reviews: queue.reviews
+        .map((review) => review.assetId !== receipt.assetId || review.businessId !== receipt.businessId ? review
+          : { ...review, items: (review.items ?? []).filter((item) => item.key !== receipt.key) })
+        .filter((review) => review.items.length) };
+    }
+  };
+  /** Reads the review again and settles a receipt from the item's own decision. */
+  const settle = async (id, fallback) => {
+    const receipt = receipts.get(id);
+    if (!receipt) return;
+    let item;
+    try {
+      const data = await open({ assetId: receipt.assetId, businessId: receipt.businessId }, { fresh: true });
+      item = data.items?.find((entry) => entry.key === receipt.key);
+    } catch {}
+    if (disposed || !receipts.get(id)) return; // undone or cleared meanwhile
+    if (item?.decision) {
+      const mine = item.decision.verdict === receipt.verdict;
+      setReceipt(id, { ...receipt, state: mine ? "saved" : "conflict", decision: item.decision,
+        message: mine ? "" : "Someone else decided this item first." });
+      if (mine) decided(receipt, item.decision);
+      return;
+    }
+    if (item && item.version !== receipt.version) {
+      setReceipt(id, { ...receipt, state: "conflict", code: "stale_review", message: "A newer version arrived. Read it, then decide again." });
+      return;
+    }
+    setReceipt(id, { ...receipt, ...fallback });
+  };
+
+  const send = async (id) => {
+    const receipt = receipts.get(id);
+    if (!receipt || disposed) return;
+    const mine = epoch;
+    const stale = () => mine !== epoch || disposed;
+    setReceipt(id, { ...receipt, state: "sending", message: "" });
+    let token = tokens.get(id);
+    try {
+      if (!token || token.expiresAt - now() < REVIEW_TOKEN_RENEW_MS) {
+        await open({ assetId: receipt.assetId, businessId: receipt.businessId }, { fresh: true });
+        if (stale()) return;
+        token = tokens.get(id);
+        const item = cachedReview(receipt.businessId, receipt.assetId)?.items?.find((entry) => entry.key === receipt.key);
+        if (item?.decision) return settle(id);
+        if (!token) {
+          setReceipt(id, { ...receipt, state: "conflict", code: "not_decidable", message: "This item can't be decided here any more." });
+          return;
+        }
+      }
+      // A renewed token can name a version the person has not seen: nothing is sent.
+      if (token.version !== receipt.version) {
+        setReceipt(id, { ...receipt, state: "conflict", code: "stale_review", message: "A newer version arrived. Read it, then decide again." });
+        return;
+      }
+    } catch (error) {
+      setReceipt(id, { ...receipt, state: "failed", message: plain(error?.message ?? error, 200) || "Couldn't reach Black 4." });
+      return;
+    }
+    tokens.delete(id); // single use, whatever the answer
+    let result;
+    try {
+      let timer;
+      const late = new Promise((_, reject) => { timer = setTimer(() => reject(Object.assign(new Error("No answer in time."), { code: "timeout" })), timeoutMs); });
+      const ask = () => call("decide_review_item", {
+        businessId: receipt.businessId, assetId: receipt.assetId, version: receipt.version, itemKey: receipt.key,
+        verdict: receipt.verdict, decisionToken: token.token, ...(receipt.feedback ? { feedback: receipt.feedback } : {}),
+      }, { timeoutMs });
+      // Too many at once (HTTP 429): the same call with the same token is safe
+      // to repeat (Platform Control returns the saved decision), after a pause.
+      const attempt = async (left) => {
+        try { return await ask(); } catch (error) {
+          if (left > 0 && /HTTP 429/.test(String(error?.message)) && !stale()) {
+            await new Promise((resolve) => setTimer(resolve, 1500));
+            return attempt(left - 1);
+          }
+          throw error;
+        }
+      };
+      try {
+        result = await Promise.race([attempt(3), late]);
+      } finally { clearTimer(timer); }
+    } catch (error) {
+      if (stale()) return;
+      // It may or may not have arrived: read before claiming anything.
+      if (["timeout", "offline", "http"].includes(error?.code) || !error?.code) {
+        setReceipt(id, { ...receipt, state: "unknown", message: "Checking whether it saved…" });
+        return settle(id, { state: "unknown", message: "Couldn't confirm it saved." });
+      }
+      setReceipt(id, { ...receipt, state: "failed", message: plain(error?.message ?? error, 200) });
+      return;
+    }
+    if (stale()) return;
+    let data;
+    try { data = answer(result).data; } catch (error) {
+      const code = error?.serverCode;
+      if (REVIEW_CONFLICTS.includes(code)) {
+        setReceipt(id, { ...receipt, state: "conflict", code, message: code === "decision_exists" ? "This item was already decided." : "A newer version arrived. Read it, then decide again." });
+        return settle(id, { state: "conflict", code, message: receipts.get(id)?.message });
+      }
+      if (REVIEW_TOKEN_CODES.includes(code)) return settle(id, { state: "failed", code, message: "That decision link lapsed. Try again." });
+      setReceipt(id, { ...receipt, state: "failed", code, message: plain(error?.message ?? error, 200) || "Black 4 refused the decision." });
+      return;
+    }
+    const decision = data?.decision;
+    if (!decision || decision.itemKey !== receipt.key || decision.verdict !== receipt.verdict) {
+      setReceipt(id, { ...receipt, state: "unknown", message: "Checking whether it saved…" });
+      return settle(id, { state: "unknown", message: "Couldn't confirm it saved." });
+    }
+    decided(receipt, decision);
+    setReceipt(id, { ...receipt, state: "saved", decision, message: "" });
+  };
+
+  // At most REVIEW_PARALLEL decisions in flight (bulk approvals): the server
+  // limits a customer's parallel calls.
+  const waiting = [];
+  let inFlight = 0;
+  const enqueue = (id) => { waiting.push(id); pump(); };
+  const pump = () => {
+    while (inFlight < REVIEW_PARALLEL && waiting.length && !disposed) {
+      const id = waiting.shift();
+      inFlight += 1;
+      send(id).finally(() => { inFlight -= 1; pump(); });
+    }
+  };
+  /** A person chose a verdict: it waits `undoMs` for Undo, then is sent.
+   * Ask for changes and Reject need feedback. Returns the receipt, or null. */
+  const propose = ({ review, item, verdict, feedback = "" }) => {
+    if (disposed || !review || !item || !REVIEW_VERDICTS.includes(verdict)) return null;
+    const id = reviewItemId(review.businessId, review.assetId, item.key);
+    if (["pending", "sending", "saved"].includes(receipts.get(id)?.state)) return receipts.get(id);
+    if (!canDecide(review, item)) return null;
+    const note = String(feedback ?? "").trim().slice(0, 8000);
+    if (verdict !== "approved" && !note) return null;
+    const receipt = { id, state: "pending", verdict, feedback: note, businessId: review.businessId, businessName: review.businessName, assetId: review.assetId,
+      key: item.key, version: item.version, title: item.card?.question || item.title, deadline: now() + undoMs, message: "" };
+    clearTimer(timers.get(id));
+    timers.set(id, setTimer(() => { timers.delete(id); enqueue(id); }, undoMs));
+    setReceipt(id, receipt);
+    return receipt;
+  };
+  /** Stops a decision still in its Undo window: nothing was sent. */
+  const undo = (id) => {
+    if (receipts.get(id)?.state !== "pending") return false;
+    clearTimer(timers.get(id));
+    timers.delete(id);
+    setReceipt(id, null);
+    return true;
+  };
+  /** The same intent again, now (a person's click). */
+  const retry = (id) => {
+    const receipt = receipts.get(id);
+    if (!receipt || receipt.state !== "failed") return;
+    enqueue(id);
+  };
+  /** Reads an unsure receipt's item again. */
+  const recheck = (id) => {
+    const receipt = receipts.get(id);
+    if (!receipt || !["unknown", "conflict"].includes(receipt.state)) return Promise.resolve();
+    return settle(id, { state: receipt.state, message: receipt.message });
+  };
+  /** Forgets a conflict once the person loads the new version. */
+  const clear = (id) => { if (["conflict", "failed", "unknown"].includes(receipts.get(id)?.state)) setReceipt(id, null); };
+
+  return {
+    subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
+    get revision() { return revision; },
+    get queue() { return queue; },
+    noteQueue, readQueue, open, cachedReview, peek, canDecide, image,
+    /** An image of the work already read (`after`, `before` or `capture`), or null. */
+    picture: (businessId, assetId, key, which = "after") => pictures.get(`${reviewItemId(businessId, assetId, key)}/${which}`) ?? null,
+    /** Which picture of the work there is to show: the platform's capture, else an image preview. */
+    pictureKind: (businessId, assetId, key) => {
+      const id = reviewItemId(businessId, assetId, key);
+      if (captures.has(id)) return "capture";
+      return /^image\//.test(String(previews.get(id)?.after?.contentType ?? "")) ? "after" : null;
+    },
+    hasBefore: (businessId, assetId, key) => /^image\//.test(String(previews.get(reviewItemId(businessId, assetId, key))?.before?.contentType ?? "")),
+    /** The work's own preview link (a page or file the server shared for
+     * showing the work), or null. Never a decision token. */
+    preview: (businessId, assetId, key) => {
+      const link = previews.get(reviewItemId(businessId, assetId, key))?.after;
+      return typeof link?.url === "string" && /^https:\/\//.test(link.url) && !/^image\//.test(String(link.contentType ?? "")) ? link.url : null;
+    },
+    receipt: (id) => receipts.get(id) ?? null,
+    /** Forgets everything of the last connection: cancels any decision still in
+     * its Undo window (nothing is sent) and drops tokens, reviews and receipts. */
+    reset() {
+      for (const timer of timers.values()) clearTimer(timer);
+      timers.clear();
+      waiting.length = 0;
+      for (const map of [tokens, previews, captures, reviews, flights, businesses, receipts, images, pictures]) map.clear();
+      queue = null;
+      queueFlight = null;
+      serverNeedsBusiness = false;
+      epoch += 1;
+      changed();
+    },
+    receipts: () => [...receipts.values()],
+    propose, undo, retry, recheck, clear,
+    dispose() {
+      disposed = true;
+      for (const timer of timers.values()) clearTimer(timer);
+      timers.clear();
+      tokens.clear();
+      listeners.clear();
+    },
+  };
+}
+
+/** A word diff of two texts, as runs `{ kind: "same" | "added" | "removed", text }`.
+ * Whole words and their spaces; long texts fall back to one removed and one added run. */
+function wordDiff(before, after) {
+  const split = (text) => String(text ?? "").match(/\s+|[^\s]+/g) ?? [];
+  const a = split(before), b = split(after);
+  if (a.length * b.length > 250000) return [...(a.length ? [{ kind: "removed", text: a.join("") }] : []), ...(b.length ? [{ kind: "added", text: b.join("") }] : [])];
+  const table = Array.from({ length: a.length + 1 }, () => new Uint32Array(b.length + 1));
+  for (let i = a.length - 1; i >= 0; i--) for (let j = b.length - 1; j >= 0; j--) table[i][j] = a[i] === b[j] ? table[i + 1][j + 1] + 1 : Math.max(table[i + 1][j], table[i][j + 1]);
+  const runs = [];
+  const push = (kind, text) => { const last = runs[runs.length - 1]; if (last?.kind === kind) last.text += text; else runs.push({ kind, text }); };
+  let i = 0, j = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) { push("same", a[i]); i++; j++; }
+    else if (table[i + 1][j] >= table[i][j + 1]) push("removed", a[i++]);
+    else push("added", b[j++]);
+  }
+  while (i < a.length) push("removed", a[i++]);
+  while (j < b.length) push("added", b[j++]);
+  return runs;
+}
+
+// ---- Reviews: the screens ------------------------------------------------------
+// Drawn only with the Buzz UI kit. The work is the hero: the agent's artifact,
+// live, filling a canvas, under one line with who made it and the question.
+// A thin strip at the bottom says what approving permits and decides; every
+// reason, the evidence and the exact request sit in one closed disclosure.
+
+/** The screens over one reviewData store. `bridge`: { use, SignInPrompt,
+ * browser, openThread? }. */
+function reviewScreens(React, store, bridge) {
+  const h = React.createElement;
+  const ui = buzzUi(React);
+  const { Button, IconButton, PanelHeader, Subview, PanelBody, EmptyState, Column, Actions, Stack, SectionTitle, Title, Caption, Strong, Lines, Line, Note, Status,
+    Disclosure, Group, Row, Pre, Failure, TextField, CountBadge, Chip, ChipRow, DiffText, ChangeTable, MediaPair, DecisionBar, Skeleton, SelectRow, ListGroup, Split, Toolbar,
+    Avatar, Byline: BylineLine, Canvas, CanvasImage, QuietLine, Question, Tabs } = ui;
+
+  const CONNECTION_TEXT = {
+    starting: "Connecting to Black 4…",
+    "signing-in": "Waiting for you to sign in to Black 4.",
+    "signed-out": "Not signed in to Black 4.",
+    stopped: "Black 4 is stopped.",
+    failed: "Black 4 is not connected.",
+  };
+  const VERDICT_WORDS = { approved: "Approve", changes_requested: "Ask for changes", rejected: "Reject" };
+  const COMPOSE = {
+    changes_requested: { label: "What should change?", send: "Ask for changes" },
+    rejected: { label: "Why reject it?", send: "Reject" },
+  };
+
+  /** Re-renders when the store changes. */
+  const useStore = () => {
+    const [, setTick] = React.useState(0);
+    React.useEffect(() => store.subscribe(() => setTick((n) => n + 1)), []);
+    return store.revision;
+  };
+  const useConnection = () => {
+    const raw = bridge.use();
+    return typeof raw === "string" ? { status: raw } : raw ?? { status: "failed" };
+  };
+  /** A clock that ticks while `active` (Undo countdowns). */
+  const useTicking = (active) => {
+    const [, setTick] = React.useState(0);
+    React.useEffect(() => {
+      if (!active) return undefined;
+      const timer = setInterval(() => setTick((n) => n + 1), 250);
+      return () => clearInterval(timer);
+    }, [active]);
+  };
+  const capital = (text) => (text ? text.charAt(0).toUpperCase() + text.slice(1) : text);
+  const STAKE_GLYPH = { money: "money", customers: "people", risk: "alert", none: null };
+
+  /** Where Black 4 stands, while not connected: Sign in, or a line. */
+  function NotConnected({ link, compact = false }) {
+    if (bridge.SignInPrompt && ["signed-out", "signing-in", "idle"].includes(link.status)) return h(bridge.SignInPrompt, { compact });
+    return h(Column, { gap: 2 },
+      Line(CONNECTION_TEXT[link.status] ?? `Black 4: ${link.status}.`, { role: "status" }),
+      link.detail ? Line(link.detail) : null,
+      link.connect && (link.status === "failed" || link.status === "stopped") ? h(Button, { variant: "prominent", size: compact ? "sm" : "md", onClick: link.connect }, "Connect Black 4") : null);
+  }
+
+  // ---- who made it -----------------------------------------------------------------
+  const ORIGIN_GLYPH = { job: "clock", request: "message", proactive: "sparkles" };
+  /** The maker (a Buzz identity when the review names an agent key) and what
+   * set it off. `size`: the avatar's. */
+  function Byline({ review, item, size = "small" }) {
+    const { maker, origin } = reviewByline(review, item);
+    const profile = maker.pubkey ? bridge.profile?.(maker.pubkey) : null;
+    const name = profile?.name || maker.name;
+    const canOpen = origin.threadId && bridge.openThread;
+    return h(BylineLine, {
+      avatar: h(Avatar, { name, picture: profile?.picture, size, shape: maker.agent ? "squircle" : "circle" }),
+      name, app: maker.app, origin: origin.text, originGlyph: ORIGIN_GLYPH[origin.kind],
+      onOrigin: canOpen ? () => bridge.openThread(origin) : undefined,
+    });
+  }
+  /** The same, as one line of words (queue rows, message cards). */
+  const bylineWords = (review, item) => { const { maker, origin } = reviewByline(review, item); return `${maker.name} · ${origin.text}`; };
+
+  // ---- the work itself: a canvas, by kind of work -------------------------------------
+  /** An image of the work (or the platform's capture of a page), loaded through the MCP. */
+  function usePicture(review, item, which) {
+    const [src, setSrc] = React.useState(() => (which ? store.picture(review.businessId, review.assetId, item.key, which) : null));
+    React.useEffect(() => {
+      let live = true;
+      if (!which) return undefined;
+      setSrc(store.picture(review.businessId, review.assetId, item.key, which));
+      store.image(review.businessId, review.assetId, item.key, which).then((value) => { if (live) setSrc(value); });
+      return () => { live = false; };
+    }, [review.assetId, item.key, item.version, which]);
+    return src ?? store.picture(review.businessId, review.assetId, item.key, which ?? "after");
+  }
+  /** Canvas renderers, by kind: the artifact page; an image (Now / After); else
+   * the plain fallback for reviews that carry no work to show. */
+  const CANVAS = {
+    /** The agent's artifact, live: the review's own preview of the work (never
+     * the review application), with the platform's capture behind it while it loads. */
+    page({ review, item, link }) {
+      const capture = usePicture(review, item, store.pictureKind(review.businessId, review.assetId, item.key) === "capture" ? "capture" : null);
+      return h(Canvas, { label: `The work: ${item.title}` },
+        bridge.browser
+          ? h(bridge.browser, { key: link, url: link, storage: "black4-review-work", label: `The work: ${item.title}` })
+          : h(CanvasImage, { src: capture, alt: item.title }));
+    },
+    /** An image, large, with Now / After when there is a before. */
+    media({ review, item }) {
+      const before = store.hasBefore(review.businessId, review.assetId, item.key);
+      const [which, setWhich] = React.useState("after");
+      const shown = before ? which : "after";
+      const src = usePicture(review, item, shown);
+      return h(Canvas, { label: `The work: ${item.title}`,
+        toolbar: before ? [Caption(item.card?.show?.label ?? item.title), h(Tabs, { key: "toggle", variant: "segmented", label: "Show", value: shown, onChange: setWhich,
+          items: [{ value: "before", label: "Now" }, { value: "after", label: "After" }] })] : null },
+        h(CanvasImage, { src, alt: `${item.title}: ${shown === "before" ? "now" : "after"}` }));
+    },
+    /** Older reviews with no work to show: plain and quiet. */
+    fallback({ item }) {
+      const show = item.card?.show;
+      const brief = item.brief ?? {};
+      let change = null;
+      if (show?.type === "fields" && show.rows?.length) {
+        change = h(ChangeTable, { rows: show.rows.map((row) => ({ label: row.label, before: row.before ?? "", after: row.after ?? "", changed: (row.before ?? "") !== (row.after ?? "") })) });
+      } else if (show?.type === "text") change = h(DiffText, { label: show.label, runs: wordDiff(show.before ?? "", show.after ?? "") });
+      else if (show?.type === "list" && show.rows?.length) {
+        change = h("div", null, show.label ? h(SectionTitle, { title: show.label }) : null,
+          h(Group, null, ...show.rows.map((row, index) => h(Row, { key: `${index}`, title: row.label, description: row.detail }))));
+      } else if (brief.before || brief.after) change = h(ChangeTable, { rows: [{ label: "", before: brief.before ?? "", after: brief.after ?? "", changed: brief.before !== brief.after }] });
+      return change ?? Note(item.action || "No change was attached.");
+    },
+  };
+  /** Which canvas a review item gets: its artifact page, its image, else the fallback. */
+  function Work({ review, item }) {
+    const link = store.preview(review.businessId, review.assetId, item.key);
+    if (link) return CANVAS.page({ review, item, link });
+    if (store.pictureKind(review.businessId, review.assetId, item.key) || item.card?.show?.type === "media") return h(CANVAS.media, { review, item });
+    return h(CANVAS.fallback, { item });
+  }
+
+  /** Why, evidence, provenance and the pinned request: one closed disclosure. */
+  function Details({ review, item }) {
+    const card = item.card ?? {};
+    const brief = item.brief ?? {};
+    const change = item.change && !item.change.erased ? item.change : null;
+    const origin = reviewOrigin(review, item);
+    const row = (title, text) => (text ? h(Row, { key: title, title, description: text }) : null);
+    return h(Disclosure, { title: "Details" },
+      h(Stack, { gap: 4 },
+        h(Group, null,
+          row("Recommendation", card.recommend?.answer ? `${capital(String(card.recommend.answer))}${card.recommend.why ? `: ${card.recommend.why}` : ""}` : ""),
+          row("Stake", card.stake?.text),
+          row("Facts", (card.facts ?? []).join(" · ")),
+          row("If yes", card.ifYes || brief.expectedResult),
+          row("If no", card.ifNo),
+          row("Tradeoff", card.tradeoff),
+          row("Why", brief.why),
+          row("Before", brief.before),
+          row("After", brief.after),
+          row("Success looks like", brief.successMeasure),
+          row("Evidence", brief.baselineSource ? `${brief.baselineSource}${brief.baselineObservedAt ? ` · ${brief.baselineObservedAt}` : ""}` : ""),
+          row("Made by", item.madeBy ?? review.madeBy),
+          row("Asked by", item.requestedBy),
+          row("Job", origin.jobName || origin.jobId),
+          row("Version", `${item.version}${review.title ? ` of ${review.title}` : ""}`)),
+        change ? h("div", null, h(SectionTitle, { title: "Pinned request" }),
+          h(Stack, { gap: 2 },
+            Caption(`${change.method} ${change.endpoint} · ${change.connector}${change.connection ? ` (${change.connection})` : ""}${change.records != null ? ` · ${change.records} records` : ""}`),
+            Pre(change.lines.map((line) => `${line.label}: ${line.value}`).join("\n") + (change.more ? `\n… ${change.more} more` : "")))) : null));
+  }
+
+  // ---- deciding --------------------------------------------------------------------
+  /** The bar at the bottom: Approve, Ask for changes, Reject; then Undo; then the receipt. */
+  function Decide({ review, item, onReload, autoFocus, compose, setCompose }) {
+    useStore();
+    const id = reviewItemId(review.businessId, review.assetId, item.key);
+    const receipt = store.receipt(id);
+    const [feedback, setFeedback] = React.useState("");
+    React.useEffect(() => { setFeedback(""); }, [id, item.version, compose]);
+    useTicking(receipt?.state === "pending");
+    if (receipt?.state === "pending") {
+      const left = Math.max(1, Math.ceil((receipt.deadline - Date.now()) / 1000));
+      const words = { approved: "Approving", changes_requested: "Asking for changes", rejected: "Rejecting" }[receipt.verdict];
+      return h(DecisionBar, { status: Status(`${words} in ${left} s`) },
+        h(Button, { key: "undo", variant: "outline", autoFocus: true, onClick: () => store.undo(id) }, "Undo"));
+    }
+    if (receipt?.state === "sending") return h(DecisionBar, { status: Status("Saving…") });
+    if (receipt?.state === "unknown") {
+      return h(DecisionBar, { status: Line(receipt.message || "Couldn't confirm it saved.") },
+        h(Button, { key: "check", onClick: () => void store.recheck(id) }, "Check again"));
+    }
+    if (receipt?.state === "conflict") {
+      return h(DecisionBar, { status: Line(receipt.message || "This item changed.") },
+        h(Button, { key: "load", variant: "prominent", onClick: () => { store.clear(id); onReload(); } }, "Load the new version"));
+    }
+    if (receipt?.state === "failed") {
+      return h(DecisionBar, { status: Line(`${receipt.message || "It didn't save."}`, { danger: true, role: "alert" }) },
+        h(Button, { key: "retry", variant: "prominent", onClick: () => store.retry(id) }, `Try ${VERDICT_WORDS[receipt.verdict].toLowerCase()} again`),
+        h(Button, { key: "cancel", variant: "outline", onClick: () => store.clear(id) }, "Cancel"));
+    }
+    const decision = receipt?.decision ?? item.decision;
+    if (decision || !item.decidable) {
+      return h(DecisionBar, { status: Strong(reviewState(item, receipt).text) },
+        decision?.feedback ? Caption(decision.feedback) : null);
+    }
+    if (!store.canDecide(review, item)) {
+      // This connection got no decision token: say so quietly; never the website.
+      return h(DecisionBar, { status: Line("Deciding isn't available on this connection yet.") },
+        h(Button, { key: "retry", variant: "outline", onClick: onReload }, "Retry"));
+    }
+    if (compose) {
+      const words = COMPOSE[compose];
+      const send = () => { if (store.propose({ review, item, verdict: compose, feedback })) { setCompose(null); setFeedback(""); } };
+      return h(DecisionBar, { stacked: true },
+        h(TextField, { key: "feedback", label: words.label, value: feedback, onChange: setFeedback, rows: 3, maxLength: 8000, autoFocus: true,
+          onKeyDown: (event) => { if (event.key === "Escape") { event.stopPropagation(); setCompose(null); } else if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) send(); } }),
+        h(Actions, { key: "actions" },
+          h(Button, { key: "send", variant: compose === "rejected" ? "destructive" : "prominent", disabled: !feedback.trim(), onClick: send }, words.send),
+          h(Button, { key: "cancel", variant: "outline", onClick: () => setCompose(null) }, "Cancel")));
+    }
+    const card = item.card ?? {};
+    return h(DecisionBar, { status: h(Stack, { gap: 2 },
+        h(QuietLine, { glyph: STAKE_GLYPH[card.stake?.kind] ?? null }, card.stake?.text || (card.facts ?? []).join(" · ") || review.businessName),
+        item.action ? ui.Permits(item.action) : null) },
+      h(Button, { key: "approve", variant: "prominent", autoFocus, "aria-keyshortcuts": "A", onClick: () => store.propose({ review, item, verdict: "approved" }) }, "Approve"),
+      h(Button, { key: "changes", variant: "outline", "aria-keyshortcuts": "C", onClick: () => setCompose("changes_requested") }, "Ask for changes"),
+      h(Button, { key: "reject", variant: "ghost", onClick: () => setCompose("rejected") }, "Reject"));
+  }
+
+  // ---- one item --------------------------------------------------------------------
+  /** One review item, work first, with the decision bar. `entry`: a locator
+   * `{ businessId?, assetId, itemKey? }`. `step`: { position, total, next,
+   * previous } from the queue; `onBack`: to the queue. `onCommand` receives
+   * this item's key commands while it is shown (shortcuts). */
+  function ReviewItem({ entry, step, onBack, onCommand, onSaved, frame = true }) {
+    const link = useConnection();
+    useStore();
+    const [state, setState] = React.useState({ review: null, error: null });
+    const [revision, setRevision] = React.useState(0);
+    const [compose, setCompose] = React.useState(null);
+    const key = `${entry?.businessId ?? ""}/${entry?.assetId ?? ""}`;
+    React.useEffect(() => setCompose(null), [key, entry?.itemKey]);
+    React.useEffect(() => {
+      let live = true;
+      if (link.status !== "connected" || !entry?.assetId) return () => { live = false; };
+      const cached = entry.businessId ? store.cachedReview(entry.businessId, entry.assetId) : null;
+      setState({ review: cached, error: null });
+      store.open(entry, { fresh: revision > 0 }).then((review) => { if (live) setState({ review, error: null }); }, (error) => { if (live) setState({ review: null, error }); });
+      return () => { live = false; };
+    }, [key, link.status, revision]);
+    const shown = state.review && entry?.assetId === state.review.assetId ? state.review : store.peek(entry);
+    const review = shown ? (store.cachedReview(shown.businessId, shown.assetId) ?? shown) : null;
+    // The next item is read while this one is on screen, so stepping is instant.
+    const upcoming = step?.upcoming;
+    React.useEffect(() => {
+      // Its review, and the picture of its work, so the canvas swaps at once.
+      if (link.status === "connected" && upcoming?.assetId && upcoming.assetId !== review?.assetId) {
+        store.open(upcoming).then((next) => {
+          const key = upcoming.itemKey ?? next.focusItemKey ?? next.items?.[0]?.key;
+          const kind = key ? store.pictureKind(next.businessId, next.assetId, key) : null;
+          if (kind) store.image(next.businessId, next.assetId, key, kind);
+        }, () => {});
+      }
+    }, [upcoming?.assetId, review?.assetId, link.status]);
+    const item = review ? (review.items.find((candidate) => candidate.key === entry.itemKey) ?? review.items.find((candidate) => candidate.key === review.focusItemKey) ?? review.items[0]) : null;
+    const id = review && item ? reviewItemId(review.businessId, review.assetId, item.key) : null;
+    const receipt = id ? store.receipt(id) : null;
+    // A saved decision moves on to the next waiting item by itself.
+    const savedRef = React.useRef(receipt?.state === "saved");
+    React.useEffect(() => {
+      const saved = receipt?.state === "saved";
+      if (saved && !savedRef.current && step?.next) {
+        const timer = setTimeout(() => { onSaved?.(id); step.next(); }, 900);
+        savedRef.current = saved;
+        return () => clearTimeout(timer);
+      }
+      savedRef.current = saved;
+      return undefined;
+    }, [receipt?.state, id]);
+    // Key commands for this item (the surface's shortcuts call them).
+    React.useEffect(() => {
+      if (!onCommand) return undefined;
+      return onCommand({
+        approve: review && item && !receipt && !compose && store.canDecide(review, item) ? () => store.propose({ review, item, verdict: "approved" }) : null,
+        changes: review && item && !receipt && store.canDecide(review, item) ? () => setCompose("changes_requested") : null,
+        reject: review && item && !receipt && store.canDecide(review, item) ? () => setCompose("rejected") : null,
+        undo: receipt?.state === "pending" ? () => store.undo(id) : null,
+      });
+    }, [id, receipt?.state, review?.decideIn, compose, store.revision]);
+
+    const header = (title) => h(PanelHeader, { title,
+      navigation: onBack ? h(IconButton, { label: "Back to the queue", glyph: "back", large: true, onClick: onBack }) : null,
+      actions: [
+        step && step.position ? Caption(`${step.position} of ${step.total}`) : null,
+        step ? h(IconButton, { key: "prev", label: "Previous decision (K)", glyph: "up", large: true, disabled: !step.previous, onClick: () => step.previous?.() }) : null,
+        step ? h(IconButton, { key: "next", label: "Next decision (J)", glyph: "down", large: true, disabled: !step.next, onClick: () => step.next?.() }) : null,
+        h(IconButton, { key: "refresh", label: "Refresh", glyph: "refresh", large: true, onClick: () => setRevision((n) => n + 1) }),
+      ].filter(Boolean) });
+    const wrap = (title, body, bar = null) => frame
+      ? h(Subview, { header: header(title), footer: bar }, h(PanelBody, null, body))
+      : h(Stack, { gap: 4 }, body, bar);
+
+    if (link.status !== "connected") return wrap("Reviews", h(NotConnected, { link }));
+    if (state.error) {
+      const elsewhere = state.error.code === "elsewhere";
+      return wrap("Reviews", elsewhere
+        ? Line("This review isn't waiting for you.")
+        : h(Failure, { message: plain(state.error.message, 300), retry: () => setRevision((n) => n + 1), retryLabel: "Try again" }));
+    }
+    // While the next item loads, the strip keeps its place under a placeholder.
+    if (!review) return wrap("Reviews", h(Skeleton, { layout: "item" }), h(DecisionBar, { status: Caption("Loading…") }));
+    if (!item) return wrap(review.businessName, Line("Nothing in this review is shown to you."));
+    const card = item.card ?? {};
+    const body = h(ui.Article, { key: id, label: card.question || item.title },
+      h(Stack, { gap: 2 }, h(Byline, { review, item }), Question(card.question || item.title)),
+      h(Work, { review, item }),
+      h(Details, { review, item }));
+    return wrap(review.businessName, body, h(Decide, { review, item, compose, setCompose, onReload: () => setRevision((n) => n + 1) }));
+  }
+
+  // ---- the queue -----------------------------------------------------------------
+  /** A row's line: the question, else the title. */
+  const questionOf = (entry) => {
+    const cached = store.cachedReview(entry.businessId, entry.assetId)?.items?.find((item) => item.key === entry.key);
+    return { question: cached?.card?.question || entry.question || entry.title, stake: cached?.card?.stake?.text || entry.stake?.text || entry.brief || "" };
+  };
+  const receiptWords = (receipt) => receipt ? reviewState(null, receipt).text + (receipt.state === "failed" ? " · didn't save" : receipt.state === "unknown" ? " · unconfirmed" : receipt.state === "conflict" ? " · changed" : "") : "";
+
+  /** The list: approved work that needs a push (quiet, at the top), then
+   * every waiting item grouped by business. Selection is explicit. */
+  function QueueList({ queue, selectedId, onOpen, picked, onPick, filter, onFilter, notes }) {
+    useStore();
+    const groups = reviewGroups(queue).filter((group) => !filter || group.businessId === filter);
+    const attention = [...(queue.stalled ?? []).map((entry) => ({ ...entry, why: `Not started · ${entry.waitingOn ? `waiting on ${entry.waitingOn}` : "nobody has picked it up"}` })),
+      ...(queue.blocked ?? []).map((entry) => ({ ...entry, why: entry.note ? `Blocked · ${entry.note}` : "Blocked" }))]
+      .filter((entry) => !filter || entry.businessId === filter);
+    const filterName = filter ? (groups[0]?.businessName ?? attention[0]?.businessName ?? "this business") : "";
+    return h(Stack, { gap: 4 },
+      filter ? h(Actions, null, Caption(`Only ${filterName}`), h(Button, { size: "sm", variant: "link", onClick: () => onFilter(null) }, "Show all")) : null,
+      attention.length ? h(ListGroup, { label: "Approved, not finished", count: attention.length },
+        ...attention.map((entry) => h(SelectRow, { key: `a${entry.decisionId}`, title: entry.title, subtitle: entry.why, meta: entry.age, quiet: true,
+          selected: selectedId === reviewItemId(entry.businessId, entry.assetId, entry.key),
+          onOpen: () => onOpen({ businessId: entry.businessId, assetId: entry.assetId, itemKey: entry.key }) }))) : null,
+      ...groups.map((group) => h(ListGroup, { key: group.businessId, label: group.businessName, count: group.items.length },
+        ...group.items.map((entry) => {
+          const { question, stake } = questionOf(entry);
+          const receipt = store.receipt(entry.id);
+          const { maker } = reviewByline(null, entry);
+          const profile = maker.pubkey ? bridge.profile?.(maker.pubkey) : null;
+          const kind = store.pictureKind(entry.businessId, entry.assetId, entry.key);
+          return h(SelectRow, { key: entry.id, title: question, subtitle: notes?.get(entry.id) || receiptWords(receipt) || `${bylineWords(null, entry)}${stake ? ` · ${stake}` : ""}`, meta: entry.age,
+            avatar: h(Avatar, { name: profile?.name || maker.name, picture: profile?.picture, size: "small", shape: maker.agent ? "squircle" : "circle" }),
+            thumbnail: kind ? store.picture(entry.businessId, entry.assetId, entry.key, kind) : null,
+            selected: selectedId === entry.id,
+            picked: onPick ? picked?.has(entry.id) : undefined, pickLabel: `Select ${question}`,
+            onPick: onPick ? (value) => onPick(entry.id, value) : undefined,
+            onOpen: () => onOpen({ businessId: entry.businessId, assetId: entry.assetId, itemKey: entry.key }) });
+        }))),
+      !groups.length && !attention.length ? h(EmptyState, { glyph: "inbox", title: filter ? `Nothing waiting for ${filterName}` : "Nothing is waiting for you", frame: "none" }) : null,
+      queue.truncated ? Note(`Showing ${queue.listed} of ${queue.total}. Decide some to see the rest.`) : null);
+  }
+
+  /** Approves the picked items together: each its own call, token and receipt. */
+  // First every review is read (for its tokens), then every approval starts
+  // at once, so one Undo stops them all and nothing starts after it.
+  const approveTogether = async (ids, order) => {
+    const entries = order.filter((entry) => ids.has(entry.id));
+    const ready = [];
+    const refused = [];
+    await Promise.all(entries.map(async (entry) => {
+      try {
+        const review = await store.open({ businessId: entry.businessId, assetId: entry.assetId });
+        const item = review.items.find((candidate) => candidate.key === entry.key);
+        if (item && store.canDecide(review, item)) ready.push({ entry, review, item });
+        else refused.push(entry.id);
+      } catch { refused.push(entry.id); }
+    }));
+    const proposed = [];
+    for (const { entry, review, item } of entries.map((entry) => ready.find((candidate) => candidate.entry === entry)).filter(Boolean)) {
+      if (store.propose({ review, item, verdict: "approved" })) proposed.push(entry.id); else refused.push(entry.id);
+    }
+    return { proposed, refused };
+  };
+
+  return { useStore, useConnection, NotConnected, ReviewItem, QueueList, Work, Decide, Byline, bylineWords, approveTogether, questionOf, receiptWords };
+}
+
+// ---- Reviews: what it gives Buzz -----------------------------------------------
+// The dock page (Activity's list and preview), the side panel, the message
+// card, the Team sidebar's Decisions section, key commands and OS
+// notifications. Started in its own scope (reviewsSlot), so a fault here is
+// reported in Settings and never stops the MCP connection or the agent tools.
+
+/** Services Reviews needs. The rest (navigation, shortcuts, notifications,
+ * sidebarSections) it reads with ctx.reflect.get and uses when Buzz has them:
+ * Buzz has no optional inject. */
+const REVIEWS_INJECT = Object.freeze(["react", "pages", "panels", "conversation"]);
+const REVIEWS_PAGE = "reviews";
+/** The page's route: { business?, asset?, item? } (a sidebar row, a notification). */
+const REVIEWS_ROUTE = Object.freeze({ version: 1, validate: (params) => !!params && typeof params === "object" && !Array.isArray(params)
+  && Object.entries(params).every(([key, value]) => ["business", "asset", "item"].includes(key) && typeof value === "string" && value.length <= 200) });
+/** Review links in a message's text, in order, once each. */
+function reviewLinksIn(text) {
+  const out = [];
+  for (const match of String(text ?? "").matchAll(/https:\/\/app\.black4\.ai\/r\/[A-Za-z0-9_-]+(?:\?[^\s<>()\[\]"'`]*)?/g)) {
+    const url = reviewUrl(match[0].replace(/[.,;:!?]+$/, ""));
+    if (url && !out.includes(url) && out.length < 12) out.push(url);
+  }
+  return out;
+}
+
+/** Where the next and previous item are, in queue order, from `entry`. */
+function reviewStep(order, entry, remembered = 0) {
+  const at = order.findIndex((candidate) => candidate.assetId === entry?.assetId && (!entry?.itemKey || candidate.key === entry.itemKey)
+    && (!entry?.businessId || candidate.businessId === entry.businessId));
+  // A decided item leaves the queue: the item that followed it now sits in its place.
+  const index = at >= 0 ? at : Math.min(remembered, order.length);
+  return {
+    index: at >= 0 ? at : index,
+    found: at >= 0,
+    next: at >= 0 ? order[at + 1] ?? null : order[index] ?? null,
+    previous: at >= 0 ? order[at - 1] ?? null : order[index - 1] ?? null,
+  };
+}
+
+/** New things worth an OS notification, against what was seen before. */
+function reviewNews(queue, seen) {
+  const waiting = reviewOrder(queue).filter((entry) => !seen.waiting.has(entry.id));
+  const blocked = (queue?.blocked ?? []).filter((entry) => !seen.blocked.has(entry.decisionId));
+  return { waiting, blocked };
+}
+
+function reviewsPart(ctx, bridge) {
+  const React = ctx.react;
+  const h = React.createElement;
+  const ui = buzzUi(React);
+  const store = reviewData(bridge.call, bridge.timing ?? {});
+  /** A service Buzz may not have: undefined when it is missing. */
+  const optional = (name) => { try { return ctx.reflect?.get?.(name) ?? undefined; } catch { return undefined; } };
+  const pluginId = ctx.pluginOwner?.id ?? "ai.black4";
+  const pageTarget = (params) => ({ version: 1, kind: "page", pluginId, pageId: REVIEWS_PAGE, ...(params && Object.keys(params).length ? { route: { version: 1, params } } : {}) });
+  const screens = reviewScreens(React, store, { use: bridge.use, SignInPrompt: bridge.SignInPrompt, browser: bridge.browser, openThread: bridge.openThread, profile: bridge.profile });
+  const { ReviewItem, QueueList, useStore, useConnection, NotConnected, approveTogether } = screens;
+  const disposers = [];
+  const own = (dispose) => { if (typeof dispose === "function") disposers.push(dispose); else if (dispose?.dispose) disposers.push(() => dispose.dispose()); };
+
+  // ---- what the page shows: shared with the sidebar and notifications ----------
+  let view = { filter: null, entry: null };
+  const viewListeners = new Set();
+  const setView = (patch) => { view = { ...view, ...patch }; for (const listener of [...viewListeners]) listener(); };
+  const useView = () => {
+    const [, setTick] = React.useState(0);
+    React.useEffect(() => { const listener = () => setTick((n) => n + 1); viewListeners.add(listener); return () => viewListeners.delete(listener); }, []);
+    return view;
+  };
+
+  // ---- key commands: only while a Reviews surface is shown and focused ---------
+  let commands = null; // the item on screen: { approve, undo }
+  let surface = null; // { next, previous, changes } of the focused surface
+  let surfaceFocused = false;
+  const focusIn = () => { surfaceFocused = true; };
+  const focusOut = (event) => { if (!event?.currentTarget?.contains?.(event.relatedTarget)) surfaceFocused = false; };
+  const onCommand = (value) => { commands = value; return () => { if (commands === value) commands = null; }; };
+  const typing = () => {
+    const active = globalThis.document?.activeElement;
+    return !!active && (/^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName) || active.isContentEditable);
+  };
+
+  /** Next, previous and the position in the queue for `entry`. */
+  function useStepping(entry, setEntry) {
+    useStore();
+    const order = reviewOrder(store.queue);
+    const remembered = React.useRef(0);
+    const step = reviewStep(order, entry, remembered.current);
+    if (step.found) remembered.current = step.index;
+    const go = (target) => target ? () => setEntry({ businessId: target.businessId, assetId: target.assetId, itemKey: target.key }) : null;
+    const upcoming = step.next ? { businessId: step.next.businessId, assetId: step.next.assetId, itemKey: step.next.key } : null;
+    return { position: step.found ? step.index + 1 : 0, total: order.length, next: go(step.next), previous: go(step.previous), upcoming };
+  }
+
+  /** A queue read on demand, for surfaces opened before the badge's first read. */
+  function useQueue() {
+    useStore();
+    const link = useConnection();
+    const [error, setError] = React.useState(null);
+    React.useEffect(() => {
+      if (link.status !== "connected" || store.queue) return;
+      store.readQueue().then(() => setError(null), (reason) => setError(reason));
+    }, [link.status]);
+    return { link, queue: link.status === "connected" ? store.queue : null, error, retry: () => store.readQueue().then(() => setError(null), setError) };
+  }
+
+  // ---- the dock page: the list beside the item, as Activity -------------------
+  function ReviewsPage({ navigation: pageNavigation } = {}) {
+    const { link, queue, error, retry } = useQueue();
+    const current = useView();
+    // Opened from a sidebar row or a notification: its business, or its item.
+    const params = pageNavigation?.target?.route?.params;
+    React.useEffect(() => {
+      if (!params || typeof params !== "object") return;
+      setView({ filter: params.business ?? null, entry: params.asset ? { businessId: params.business, assetId: params.asset, itemKey: params.item } : view.entry });
+    }, [pageNavigation?.entryId]);
+    const [picked, setPicked] = React.useState(() => new Set());
+    // { ids, refused, preparing } for the last Approve N: its countdown and what it couldn't do.
+    const [bulk, setBulk] = React.useState(null);
+    const setEntry = (entry) => setView({ entry });
+    // The first waiting item is open from the start: one less click per session.
+    const first = reviewOrder(queue)[0];
+    React.useEffect(() => {
+      if (!view.entry && first && !view.filter) setView({ entry: { businessId: first.businessId, assetId: first.assetId, itemKey: first.key } });
+    }, [first?.id]);
+    const step = useStepping(current.entry, setEntry);
+    surface = { next: step.next, previous: step.previous };
+    React.useEffect(() => () => { surface = null; surfaceFocused = false; }, []);
+    const order = reviewOrder(queue);
+    // Picks that left the queue (decided) drop out of the selection.
+    const live = new Set([...picked].filter((id) => order.some((entry) => entry.id === id)));
+    const pick = (id, value) => setPicked((now) => { const next = new Set(now); if (value) next.add(id); else next.delete(id); return next; });
+    const pending = (bulk?.ids ?? []).map((id) => store.receipt(id)).filter((receipt) => receipt?.state === "pending");
+    const [, tick] = React.useState(0);
+    React.useEffect(() => {
+      if (!pending.length) return undefined;
+      const timer = setInterval(() => tick((n) => n + 1), 250);
+      return () => clearInterval(timer);
+    }, [pending.length > 0]);
+    const approve = async () => {
+      const ids = new Set(live);
+      setBulk({ ids: [], refused: [], preparing: true });
+      const { proposed, refused } = await approveTogether(ids, order);
+      setPicked(new Set());
+      setBulk({ ids: proposed, refused, preparing: false });
+    };
+    const undoAll = () => { for (const receipt of pending) store.undo(receipt.id); };
+    const notes = new Map((bulk?.refused ?? []).map((id) => [id, "Can't be approved here: open it to see why"]));
+    let toolbar = null;
+    if (pending.length) {
+      toolbar = h(ui.Toolbar, { key: "bulk" }, ui.Status(`Approving ${pending.length} in ${Math.max(1, Math.ceil((Math.min(...pending.map((receipt) => receipt.deadline)) - Date.now()) / 1000))} s`),
+        h(ui.Button, { size: "sm", variant: "outline", onClick: undoAll }, "Undo"));
+    } else if (bulk?.refused?.length && !live.size) {
+      toolbar = h(ui.Toolbar, { key: "bulk" }, ui.Line(`${bulk.refused.length} couldn't be approved here.`),
+        h(ui.Button, { size: "sm", variant: "ghost", onClick: () => setBulk(null) }, "Dismiss"));
+    } else if (live.size) {
+      toolbar = h(ui.Toolbar, { key: "bulk" }, ui.Strong(`${live.size} selected`),
+        h(ui.Button, { size: "sm", variant: "prominent", loading: !!bulk?.preparing, onClick: () => void approve() }, `Approve ${live.size}`),
+        h(ui.Button, { size: "sm", variant: "ghost", onClick: () => setPicked(new Set()) }, "Clear"));
+    }
+    let list;
+    if (link.status !== "connected") list = h(NotConnected, { link });
+    else if (error && !queue) list = h(ui.Failure, { message: plain(error.message, 300), retry, retryLabel: "Try again" });
+    else if (!queue) list = h(ui.Skeleton, { layout: "list" });
+    else list = h(QueueList, { queue, selectedId: current.entry ? order[reviewStep(order, current.entry).index]?.id : null, onOpen: setEntry,
+      picked: live, onPick: pick, notes, filter: current.filter, onFilter: (filter) => setView({ filter }) });
+    const detail = current.entry
+      ? h(ReviewItem, { key: "item", entry: current.entry, step, onCommand, frame: true })
+      : link.status === "connected" && queue ? h(ui.EmptyState, { glyph: "decisions", title: order.length ? "Choose a decision" : "Nothing to decide", frame: "none" }) : null;
+    return h(ui.Page, { label: "Reviews", fill: true, header: h(ui.PanelHeader, { title: "Reviews", actions: [h(ui.IconButton, { key: "refresh", label: "Refresh", glyph: "refresh", large: true, onClick: () => bridge.queue.refresh() })] }),
+      onFocus: focusIn, onBlur: focusOut },
+      toolbar,
+      h(ui.Split, { key: "split", label: "Decisions waiting", list, detail }));
+  }
+
+  // ---- the side panel: one item, stepping through the queue -------------------
+  function ReviewPanel({ target }) {
+    const locator = reviewLocator(target);
+    const [entry, setEntry] = React.useState(locator?.kind === "review" ? locator : null);
+    const [filter, setFilter] = React.useState(locator?.kind === "queue" ? locator.businessId ?? null : null);
+    React.useEffect(() => {
+      const next = reviewLocator(target);
+      setEntry(next?.kind === "review" ? next : null);
+      if (next?.kind === "queue") setFilter(next.businessId ?? null);
+    }, [target]);
+    const step = useStepping(entry, setEntry);
+    const { link, queue, error, retry } = useQueue();
+    let body;
+    if (entry) body = h(ReviewItem, { entry, step, onBack: () => setEntry(null), onCommand });
+    else {
+      let list;
+      if (link.status !== "connected") list = h(NotConnected, { link });
+      else if (error && !queue) list = h(ui.Failure, { message: plain(error.message, 300), retry, retryLabel: "Try again" });
+      else if (!queue) list = h(ui.Skeleton, { layout: "list" });
+      else list = h(QueueList, { queue, onOpen: setEntry, filter, onFilter: setFilter });
+      body = h(ui.Subview, { header: h(ui.PanelHeader, { title: queue?.total ? `${queue.total} waiting` : "Reviews",
+        actions: [h(ui.IconButton, { key: "refresh", label: "Refresh", glyph: "refresh", large: true, onClick: () => bridge.queue.refresh() })] }) }, h(ui.PanelBody, null, list));
+    }
+    surface = { next: step.next, previous: step.previous };
+    React.useEffect(() => () => { surface = null; surfaceFocused = false; }, []);
+    return h(ui.Surface, { label: "Black 4 Reviews", onFocus: focusIn, onBlur: focusOut }, body);
+  }
+
+  // ---- the dock badge ---------------------------------------------------------
+  function ReviewsBadge() {
+    const current = useConnection();
+    if (current.status === "idle") return ui.Dot({ label: "Approve your Black 4 sign-in in your browser" });
+    if (current.status === "signed-out") return ui.Dot({ label: current.detail ? `Sign in to Black 4. ${current.detail}` : "Sign in to Black 4" });
+    if (current.status !== "connected" || !current.waiting) return null;
+    return ui.CountBadge({ count: current.waiting, label: `${current.waiting} decisions waiting for the connected Black 4 account` });
+  }
+
+  ctx.pages.register({ id: REVIEWS_PAGE, title: "Reviews", primary: true, placement: "dock", layout: "workspace", route: REVIEWS_ROUTE, badge: ReviewsBadge, component: ReviewsPage });
+  ctx.panels.register({
+    id: "reviews", title: "Black 4 Reviews", order: 0,
+    matches: (target) => Boolean(reviewUrl(target)),
+    component: ReviewPanel,
+    channelPlacement: "side",
+    channelLauncher: function ReviewsLauncher({ available, toggle, pressed }) {
+      if (!available()) return null;
+      return ui.IconButton({ label: "Open your Black 4 review queue", glyph: "decisions", "aria-expanded": pressed, "data-channel-panel-toggle": "",
+        onClick: (event) => { event?.currentTarget?.focus?.(); toggle(REVIEWS_HOME); } });
+    },
+  });
+
+  // ---- in the conversation ----------------------------------------------------
+  // The host owns the anchor and its click; the chip draws no control of its own.
+  ctx.conversation.registerLink?.({
+    id: "review-link", title: "Black 4 review", order: 0,
+    matches: (url) => Boolean(reviewUrl(url)),
+    component: function ReviewLink() { return h(ui.LinkChip, { label: "Black 4 review" }); },
+  });
+  /** One row per review link: the question and its live state. */
+  function LinkRow({ url, open }) {
+    useStore();
+    const link = useConnection();
+    const locator = reviewLocator(url);
+    const [failed, setFailed] = React.useState(null);
+    const [opened, setOpened] = React.useState(null); // { businessId, assetId } once read
+    React.useEffect(() => {
+      if (link.status !== "connected" || !locator?.assetId) return;
+      store.open(locator).then((review) => { setFailed(null); setOpened({ businessId: review.businessId, assetId: review.assetId }); }, (error) => setFailed(error));
+    }, [url, link.status]);
+    const businessId = opened?.businessId ?? locator?.businessId ?? reviewOrder(store.queue).find((entry) => entry.assetId === locator?.assetId)?.businessId;
+    const review = locator?.assetId && businessId ? store.cachedReview(businessId, locator.assetId) : null;
+    const item = review ? (review.items.find((candidate) => candidate.key === locator.itemKey) ?? review.items[0]) : null;
+    const receipt = review && item ? store.receipt(reviewItemId(review.businessId, review.assetId, item.key)) : null;
+    const state = item ? reviewState(item, receipt) : null;
+    const title = item ? (item.card?.question || item.title) : failed?.code === "elsewhere" ? "A Black 4 review" : failed ? "A Black 4 review" : "Loading the review…";
+    const { maker } = item ? reviewByline(review, item) : { maker: null };
+    const profile = maker?.pubkey ? bridge.profile?.(maker.pubkey) : null;
+    const kind = item ? store.pictureKind(review.businessId, review.assetId, item.key) : null;
+    React.useEffect(() => { if (kind) store.image(review.businessId, review.assetId, item.key, kind); }, [kind, item?.key]);
+    return h(ui.MessageRow, { title,
+      subtitle: state ? `${review.businessName} · ${screens.bylineWords(review, item)} · ${state.text}` : failed ? (failed.code === "elsewhere" ? "Not in your queue" : "Couldn't read it") : "",
+      avatar: maker ? h(ui.Avatar, { name: profile?.name || maker.name, picture: profile?.picture, size: "small", shape: maker.agent ? "squircle" : "circle" }) : null,
+      thumbnail: kind ? store.picture(review.businessId, review.assetId, item.key, kind) : null,
+      loading: !item && !failed && link.status === "connected", onOpen: open, openLabel: "Open" });
+  }
+  function ReviewPreview({ url, open }) {
+    const link = useConnection();
+    if (link.status !== "connected") return h(ui.MessageCard, { label: "Black 4 review" }, h(NotConnected, { link, compact: true }));
+    return h(ui.MessageCard, { label: "Black 4 review" }, h(LinkRow, { url, open }));
+  }
+  /** One card per message for every review link in it, under the message. */
+  function ReviewMessageCard({ message, open }) {
+    const link = useConnection();
+    const urls = reviewLinksIn(message?.content);
+    if (!urls.length) return null;
+    const label = urls.length === 1 ? "Black 4 decision" : `${urls.length} Black 4 decisions`;
+    if (link.status !== "connected") return h(ui.MessageCard, { label }, h(NotConnected, { link, compact: true }));
+    return h(ui.MessageCard, { label }, ...urls.map((url) => h(LinkRow, { key: url, url, open: () => open?.(url) })));
+  }
+  if (typeof ctx.conversation.registerAccessory === "function") {
+    ctx.conversation.registerAccessory({ id: "review-decisions", title: "Black 4 decisions", order: -10, placement: "message", component: ReviewMessageCard });
+  } else {
+    // An older Buzz: one compact card per link.
+    ctx.conversation.registerLinkPreview?.({
+      id: "review-preview", title: "Black 4 decision", order: -10,
+      matches: (url) => Boolean(reviewUrl(url)) && /\/r\//.test(new URL(url).pathname),
+      component: ReviewPreview,
+    });
+  }
+
+  // ---- the Team sidebar: Decisions, one row per business --------------------------
+  let sidebarRows = [];
+  let sidebarRevision = -1;
+  const rowsNow = () => {
+    if (sidebarRevision !== store.revision) {
+      sidebarRevision = store.revision;
+      const next = reviewGroups(store.queue).map((group) => ({ id: group.businessId, label: group.businessName, count: group.items.length }));
+      if (JSON.stringify(next) !== JSON.stringify(sidebarRows)) sidebarRows = next;
+    }
+    return sidebarRows;
+  };
+  try {
+    optional("sidebarSections")?.register?.({
+      version: 1, id: "decisions", title: "Decisions", icon: h(ui.Glyph, { name: "decisions" }),
+      rows: { snapshot: rowsNow, subscribe: (listener) => store.subscribe(listener) },
+      select: (row) => pageTarget({ business: row.id }),
+    });
+  } catch (error) { bridge.report?.(error); }
+
+  // ---- key commands: J/K or arrows to move, A approve, C ask for changes ----------
+  const navigationService = optional("navigation");
+  const onReviewsPage = () => {
+    try { const target = navigationService?.snapshot?.()?.entry?.target; return target?.kind === "page" && target.pluginId === pluginId && target.pageId === REVIEWS_PAGE; } catch { return false; }
+  };
+  const live = () => (surfaceFocused || onReviewsPage()) && !typing();
+  const keys = optional("shortcuts");
+  const shortcut = (id, title, binding, run, ready = () => true) => {
+    try { keys?.register?.({ id: `reviews.${id}`, title, binding, run, when: () => live() && ready() }); } catch (error) { bridge.report?.(error); }
+  };
+  shortcut("next", "Next decision", [{ key: "j" }, { key: "ArrowDown" }], () => surface?.next?.(), () => !!surface?.next);
+  shortcut("previous", "Previous decision", [{ key: "k" }, { key: "ArrowUp" }], () => surface?.previous?.(), () => !!surface?.previous);
+  shortcut("approve", "Approve this decision", { key: "a" }, () => commands?.approve?.(), () => !!commands?.approve);
+  shortcut("changes", "Ask for changes", { key: "c" }, () => commands?.changes?.(), () => !!commands?.changes);
+  shortcut("reject", "Reject", { key: "r" }, () => commands?.reject?.(), () => !!commands?.reject);
+  shortcut("undo", "Undo the decision", { key: "z", mod: true }, () => commands?.undo?.(), () => !!commands?.undo);
+
+  // ---- the queue the badge already polls: notifications --------------------------
+  const seen = { started: false, waiting: new Set(), blocked: new Set() };
+  const notify = (queue) => {
+    const news = reviewNews(queue, seen);
+    for (const entry of reviewOrder(queue)) seen.waiting.add(entry.id);
+    for (const entry of queue?.blocked ?? []) seen.blocked.add(entry.decisionId);
+    if (!seen.started) { seen.started = true; return; } // the first read is what was already there
+    const post = (category, input) => { try { Promise.resolve(category?.submit?.(input)).catch(() => {}); } catch {} };
+    if (news.waiting.length) {
+      const first = news.waiting[0];
+      post(waitingNotes, { sourceKey: `waiting:${news.waiting.map((entry) => entry.id).join(",")}`.slice(0, 1024),
+        title: news.waiting.length === 1 ? "A decision is waiting" : `${news.waiting.length} decisions are waiting`,
+        body: news.waiting.length === 1 ? `${first.businessName}: ${first.question || first.title}` : [...new Set(news.waiting.map((entry) => entry.businessName))].join(", "),
+        target: pageTarget(news.waiting.length === 1 ? { business: first.businessId, asset: first.assetId, item: first.key } : {}) });
+    }
+    for (const entry of news.blocked.slice(0, 3)) {
+      post(blockedNotes, { sourceKey: `blocked:${entry.decisionId}`, title: "Approved work is blocked",
+        body: `${entry.businessName}: ${entry.title}${entry.note ? `. ${plain(entry.note, 160)}` : ""}`,
+        target: pageTarget({ business: entry.businessId, asset: entry.assetId, item: entry.key }) });
+    }
+  };
+  // Two switches in Settings → Notifications, driven by the badge's own poll.
+  let waitingNotes = null;
+  let blockedNotes = null;
+  try {
+    const notifications = optional("notifications");
+    waitingNotes = notifications?.register?.({ id: "decisions", label: "Black 4 decisions waiting" }) ?? null;
+    blockedNotes = notifications?.register?.({ id: "decisions-blocked", label: "Black 4 approved work blocked" }) ?? null;
+  } catch (error) { bridge.report?.(error); }
+  own(bridge.queue.subscribe((queue) => { store.noteQueue(queue); notify(queue); }));
+  // Signed out, reconnecting or another account: nothing of the last one stays.
+  let lastStatus = null;
+  own(bridge.status?.subscribe?.((status) => {
+    if (status !== "connected" && lastStatus === "connected") {
+      store.reset();
+      seen.started = false; seen.waiting.clear(); seen.blocked.clear();
+      setView({ entry: null, filter: null });
+    }
+    lastStatus = status;
+  }));
+
+  return {
+    store,
+    dispose() {
+      for (const dispose of disposers.splice(0)) { try { dispose(); } catch {} }
+      store.dispose();
+      viewListeners.clear();
+    },
+    // For tests and the Settings card: what is on screen and the commands.
+    get commands() { return commands; },
+    get surface() { return surface; },
+    get live() { return live(); },
+    setView,
+  };
+}
+
+/** Starts Reviews in its own child scope. Whatever it throws goes to
+ * `bridge.report`, never up to the plugin. */
+function reviewsSlot(ctx, bridge) {
+  let scope = null;
+  let part = null;
+  const start = (child) => {
+    try { part = reviewsPart(child, bridge); } catch (error) { bridge.report?.(error); }
+  };
+  try {
+    if (typeof ctx.plugin === "function") {
+      scope = ctx.plugin({
+        name: "black4-reviews",
+        inject: REVIEWS_INJECT,
+        apply: (child) => {
+          start(child);
+          child.effect?.(() => () => { try { part?.dispose(); } catch {} part = null; });
+        },
+      });
+    } else start(ctx); // an older host, and the tests
+  } catch (error) {
+    bridge.report?.(error);
+  }
+  return {
+    get part() { return part; },
+    dispose() {
+      try { part?.dispose(); } catch {}
+      part = null;
+      const current = scope;
+      scope = null;
+      try { Promise.resolve(current?.dispose?.()).catch(() => {}); } catch {}
+    },
+  };
+}
+// ---- end reviews ----
+export { reviewByline, reviewLocator, reviewLink, reviewOrder, reviewGroups, reviewState, reviewData, wordDiff, reviewsPart, reviewsSlot, REVIEW_UNDO_MS };
 
 /** buzz-acp's own conversation levers, by the names the machine lists them
  * under (`controls` in its models reply: the bounds or values of each, and

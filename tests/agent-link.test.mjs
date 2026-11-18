@@ -107,7 +107,13 @@ async function harness(t, black4, { viewer = VIEWER, plugin = true, register, si
   };
   if (plugin) {
     // A child scope, as cordis gives one: its registrations end with it.
-    ctx.plugin = ({ apply: start, inject }) => {
+    ctx.plugin = ({ name, apply: start, inject }) => {
+      // Reviews runs in its own scope too; it injects only what it draws with.
+      if (name === "black4-reviews") {
+        assert.deepEqual(inject, ["react", "pages", "panels", "conversation"]);
+        start(Object.create(ctx));
+        return { dispose() {} };
+      }
       assert.deepEqual(inject, ["react", "host", "agents", "pages"]);
       const ended = [];
       const child = Object.create(ctx);

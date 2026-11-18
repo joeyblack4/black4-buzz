@@ -59,7 +59,10 @@ test("kit: each part draws with Buzz's classes, and Pill draws Buzz's popup or t
     "OneTimeCode", "Page", "PanelBody", "PanelHeader", "Paragraph", "Pill", "Popup", "Pre", "Row", "SectionTitle", "Spinner", "Stack", "Status", "Strong", "Subview",
     "Switch", "SwitchRow", "Tabs", "TextField", "Title", "Toolbar", "VARIANTS", "Value",
     "AVATARS", "AgentBrowse", "AgentCard", "AgentGrid", "AgentPanel", "AgentPortrait", "AgentProfile", "AvatarChoices", "COPIED", "COPIED_FROM", "CardMark",
-    "Glyph", "HeaderTab", "Menu", "NameActions", "NameInput", "Picture"].sort());
+    "Glyph", "HeaderTab", "Menu", "NameActions", "NameInput", "Picture",
+    // Reviews
+    "ChangeTable", "Checkbox", "Chip", "ChipRow", "DecisionBar", "DiffText", "Frame", "ListGroup", "MediaPair", "MessageCard", "MessageRow", "SelectRow", "Skeleton",
+    "Split", "Surface", "Avatar", "Byline", "Canvas", "CanvasImage", "QuietLine", "Question", "Permits", "Article"].sort());
   // A variant Buzz does not style draws the default, never an unstyled control.
   assert.equal(ui.Button({ variant: "glassy", size: "xl", shape: "round", children: "B" }).props["data-variant"], "subtle");
   assert.equal(ui.Button({ variant: "glassy", size: "xl", shape: "round", children: "B" }).props["data-size"], "md");

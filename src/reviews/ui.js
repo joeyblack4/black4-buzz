@@ -58,7 +58,7 @@ function reviewScreens(React, store, bridge) {
   }
 
   // ---- who made it -----------------------------------------------------------------
-  const ORIGIN_GLYPH = { job: "clock", request: "message", proactive: "sparkles" };
+  const ORIGIN_GLYPH = { job: "clock", request: "message", proactive: "sparkles", unknown: null };
   /** The maker (a Buzz identity when the review names an agent key) and what
    * set it off. `size`: the avatar's. */
   function Byline({ review, item, size = "small" }) {
@@ -68,12 +68,14 @@ function reviewScreens(React, store, bridge) {
     const canOpen = origin.threadId && bridge.openThread;
     return h(BylineLine, {
       avatar: h(Avatar, { name, picture: profile?.picture, size, shape: maker.agent ? "squircle" : "circle" }),
-      name, app: maker.app, origin: origin.text, originGlyph: ORIGIN_GLYPH[origin.kind],
+      name, badge: maker.signed ? "Signed" : undefined,
+      detail: [maker.app, maker.person ? `for ${maker.person}` : null].filter(Boolean).join(" · ") || undefined,
+      origin: origin.text, originGlyph: ORIGIN_GLYPH[origin.kind],
       onOrigin: canOpen ? () => bridge.openThread(origin) : undefined,
     });
   }
   /** The same, as one line of words (queue rows, message cards). */
-  const bylineWords = (review, item) => { const { maker, origin } = reviewByline(review, item); return `${maker.name} · ${origin.text}`; };
+  const bylineWords = (review, item) => { const { maker, origin } = reviewByline(review, item); return `${maker.name}${maker.signed ? " (signed)" : ""} · ${origin.text}`; };
 
   // ---- the work itself: a canvas, by kind of work -------------------------------------
   /** An image of the work (or the platform's capture of a page), loaded through the MCP. */
@@ -94,11 +96,21 @@ function reviewScreens(React, store, bridge) {
     /** The agent's artifact, live: the review's own preview of the work (never
      * the review application), with the platform's capture behind it while it loads. */
     page({ review, item, link }) {
+      const hasBefore = store.hasBeforeCapture(review.businessId, review.assetId, item.key);
+      const [which, setWhich] = React.useState("after");
+      const shown = hasBefore ? which : "after";
       const capture = usePicture(review, item, store.pictureKind(review.businessId, review.assetId, item.key) === "capture" ? "capture" : null);
-      return h(Canvas, { label: `The work: ${item.title}` },
+      const before = usePicture(review, item, hasBefore && shown === "before" ? "beforeCapture" : null);
+      const toolbar = hasBefore ? [Caption(item.title), h(Tabs, { key: "toggle", variant: "segmented", label: "Show", value: shown, onChange: setWhich,
+        items: [{ value: "before", label: "Now" }, { value: "after", label: "After" }] })] : null;
+      if (shown === "before") return h(Canvas, { label: `The page now: ${item.title}`, toolbar }, h(CanvasImage, { src: before, alt: `${item.title}: now` }));
+      // The live page over its capture: the capture shows until the page paints.
+      return h(Canvas, { label: `The work: ${item.title}`, toolbar },
         bridge.browser
-          ? h(bridge.browser, { key: link, url: link, storage: "black4-review-work", label: `The work: ${item.title}` })
-          : h(CanvasImage, { src: capture, alt: item.title }));
+          ? h(ui.Layers, { key: link }, capture ? h(CanvasImage, { src: capture, alt: item.title }) : null,
+              h(bridge.browser, { url: link, storage: "black4-review-work", label: `The work: ${item.title}` }))
+          : capture ? h(CanvasImage, { src: capture, alt: item.title })
+            : Note(item.capture === "pending" ? "Preparing a preview of the page." : "This page can't be shown here."));
     },
     /** An image, large, with Now / After when there is a before. */
     media({ review, item }) {
@@ -129,7 +141,10 @@ function reviewScreens(React, store, bridge) {
   /** Which canvas a review item gets: its artifact page, its image, else the fallback. */
   function Work({ review, item }) {
     const link = store.preview(review.businessId, review.assetId, item.key);
-    if (link) return CANVAS.page({ review, item, link });
+    // An item Black 4 marks as not work-first keeps its earlier look when it
+    // has a card to show; the page is still shown when that is all there is.
+    const older = item.workFirst === false && item.card?.show && item.card.show.type !== "media";
+    if (link && !older) return h(CANVAS.page, { review, item, link });
     if (store.pictureKind(review.businessId, review.assetId, item.key) || item.card?.show?.type === "media") return h(CANVAS.media, { review, item });
     return h(CANVAS.fallback, { item });
   }
@@ -346,7 +361,7 @@ function reviewScreens(React, store, bridge) {
           const kind = store.pictureKind(entry.businessId, entry.assetId, entry.key);
           return h(SelectRow, { key: entry.id, title: question, subtitle: notes?.get(entry.id) || receiptWords(receipt) || `${bylineWords(null, entry)}${stake ? ` · ${stake}` : ""}`, meta: entry.age,
             avatar: h(Avatar, { name: profile?.name || maker.name, picture: profile?.picture, size: "small", shape: maker.agent ? "squircle" : "circle" }),
-            thumbnail: kind ? store.picture(entry.businessId, entry.assetId, entry.key, kind) : null,
+            thumbnail: store.queuePicture(entry) ?? (kind ? store.picture(entry.businessId, entry.assetId, entry.key, kind) : null),
             selected: selectedId === entry.id,
             picked: onPick ? picked?.has(entry.id) : undefined, pickLabel: `Select ${question}`,
             onPick: onPick ? (value) => onPick(entry.id, value) : undefined,

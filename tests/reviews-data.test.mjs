@@ -207,14 +207,24 @@ test("signing out or switching account forgets everything: queue, reviews, token
   assert.equal(decideCalls(calls).length, 0, "the waiting decision was never sent");
 });
 
-test("the byline: who made it and what set it off, from structured fields when sent, madeBy whole otherwise", async () => {
+test("the byline: who made it and what set it off; a signed agent only when Black 4 verified its key", async () => {
   const { reviewByline } = await freshPlugin();
+  // Older servers: madeBy whole, origin from job / requestedBy.
   assert.deepEqual(reviewByline(null, { madeBy: "copy-bot · Mira", requestedBy: "proactive" }),
-    { maker: { name: "copy-bot · Mira", agent: false }, origin: { kind: "proactive", text: "On its own initiative" } });
+    { maker: { name: "copy-bot · Mira", agent: false, signed: false }, origin: { kind: "proactive", text: "On the agent's own initiative" } });
   assert.deepEqual(reviewByline(null, { madeBy: "x", requestedBy: "Pat Lee", threadId: "root-1" }).origin, { kind: "request", text: "Asked by Pat Lee", threadId: "root-1" });
-  assert.deepEqual(reviewByline(null, { madeBy: "x", job: { jobId: "j1", jobName: "Competitor watch" } }).origin, { kind: "job", text: "Competitor watch · scheduled run" });
+  assert.deepEqual(reviewByline(null, { madeBy: "x", job: { jobId: "j1", jobName: "Competitor watch" } }).origin, { kind: "job", text: "Scheduled job Competitor watch" });
+  // Platform Control's producer and origin (review-artifact slice A).
   const key = "ab".repeat(32);
-  assert.deepEqual(reviewByline(null, { producer: { agentPubkey: key, agentName: "Mira", app: "Buzz" } }).maker, { pubkey: key, name: "Mira", app: "Buzz", agent: true });
+  const signed = reviewByline(null, { madeBy: "ignored", producer: { agent: "Mira", agentKey: key, model: "Fable 5.2", effort: "high", app: "Claude Code", person: "pat@example.test", verified: { person: true, agentKey: true } },
+    origin: { kind: "job", job: { jobId: "j1", jobName: "Competitor watch", runId: "r1", startedAt: null } } });
+  assert.deepEqual(signed, { maker: { name: "Mira", agent: true, signed: true, pubkey: key, app: "Fable 5.2 via Claude Code", person: "pat@example.test", personVerified: true },
+    origin: { kind: "job", text: "Scheduled job Competitor watch" } });
+  const reported = reviewByline(null, { producer: { agent: "Mira", agentKey: key, model: null, effort: null, app: "Codex", person: null, verified: { person: false, agentKey: false } }, origin: { kind: "unknown" } });
+  assert.equal(reported.maker.signed, false, "a key the request did not sign is not shown as the agent's identity");
+  assert.equal(reported.maker.pubkey, undefined);
+  assert.deepEqual(reported.origin, { kind: "unknown", text: "What started it was not recorded" });
+  assert.deepEqual(reviewByline(null, { producer: { agent: null, verified: {} }, origin: { kind: "request", requestedBy: "Sam", threadId: "t9" } }).origin, { kind: "request", text: "Asked by Sam", threadId: "t9" });
 });
 
 test("too many at once (HTTP 429): the same call is sent again with the same token, and saves once", async () => {
@@ -230,4 +240,27 @@ test("too many at once (HTTP 429): the same call is sent again with the same tok
   assert.equal(sent.length, 2);
   assert.equal(sent[0].args.decisionToken, sent[1].args.decisionToken, "the same token, safe to repeat");
   assert.equal(store.receipt(receipt.id).state, "saved");
+});
+
+test("captures: the page's picture (and its before) from _meta, through get_review_file or else its own link; the queue's capture too", async () => {
+  const CAPTURE = "https://content.example.test/v/grant-c/_captures/hero-1440.jpg";
+  const { store, calls } = data({
+    open_review: () => tool(bakery(), { decisionTokens: {}, previews: { hero: { url: "https://content.example.test/v/g/index.html", contentType: "text/html" } }, beforePreviews: {},
+      captures: { hero: { desktop: { url: CAPTURE, expiresAt: "2099-01-01T00:00:00Z", contentType: "image/jpeg" }, phone: { url: "https://content.example.test/v/g/p.jpg", contentType: "image/jpeg" } } },
+      beforeCaptures: { hero: { desktop: { url: "https://content.example.test/v/g/before.jpg", contentType: "image/jpeg" } } } }),
+    get_review_file: (args) => args.path === "before.jpg" ? { content: [{ type: "image", data: "aGk=", mimeType: "image/jpeg" }] } : refusal("review_file_not_found"),
+  });
+  const review = await store.open({ assetId: "rv_bakery", businessId: "business-crumb" });
+  assert.equal(store.preview(review.businessId, review.assetId, "hero"), "https://content.example.test/v/g/index.html", "the live page");
+  assert.equal(store.pictureKind(review.businessId, review.assetId, "hero"), "capture");
+  assert.equal(store.hasBeforeCapture(review.businessId, review.assetId, "hero"), true);
+  assert.equal(await store.image(review.businessId, review.assetId, "hero", "capture"), CAPTURE, "not a review file: shown from its own exact-file link");
+  assert.equal(await store.image(review.businessId, review.assetId, "hero", "beforeCapture"), "data:image/jpeg;base64,aGk=", "a review file: read through the MCP");
+  assert.deepEqual(calls.filter((call) => call.name === "get_review_file").map((call) => call.args.path), ["_captures/hero-1440.jpg", "before.jpg"]);
+  // The queue's own capture link, when the platform sends one.
+  const entry = { businessId: "business-crumb", assetId: "rv_bakery", version: 1, capture: { url: CAPTURE, contentType: "image/jpeg" } };
+  assert.equal(store.queuePicture(entry), null, "asked for, not yet read");
+  await settle();
+  assert.equal(store.queuePicture(entry), CAPTURE);
+  assert.equal(store.queuePicture({ businessId: "b", assetId: "a" }), null, "an older queue sends none");
 });

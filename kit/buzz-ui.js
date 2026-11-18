@@ -582,14 +582,16 @@ function buzzUi(React, { nativeSelect = false } = {}) {
   /** Who made something and what set it off, as Buzz writes a message's
    * author line: the maker's Avatar and name (and the app they used), then
    * the origin with its mark. `onOrigin` makes the origin open its thread. */
-  const Byline = ({ avatar, name, app, origin, originGlyph, onOrigin }) =>
-    h("div", { "data-buzz-ui": "", className: "flex flex-wrap items-center gap-2", style: { minWidth: 0 } },
-      avatar ?? null,
-      h("span", { className: "text-label-sm text-standard", style: { minWidth: 0, overflowWrap: "anywhere" } }, name),
-      app ? h("span", { className: "text-caption text-subtle" }, app) : null,
-      origin ? h("span", { className: "text-caption text-subtle", "aria-hidden": true }, "·") : null,
+  const Byline = ({ avatar, name, badge, detail, origin, originGlyph, onOrigin }) =>
+    h("div", { "data-buzz-ui": "", style: { display: "grid", gap: "var(--space-1)", minWidth: 0 } },
+      h("div", { className: "flex flex-wrap items-center gap-2", style: { minWidth: 0 } },
+        avatar ?? null,
+        h("span", { className: "text-label-sm text-standard", style: { minWidth: 0, overflowWrap: "anywhere" } }, name),
+        // Badge.tsx (tone success): a fact Black 4 checked, not one the agent reported.
+        badge ? h("span", { "data-buzz-ui": "", className: "buzz-badge", "data-size": "xs", "data-tone": "success" }, badge) : null,
+        detail ? h("span", { className: "text-caption text-subtle", style: { minWidth: 0, overflowWrap: "anywhere" } }, detail) : null),
       origin ? (onOrigin
-        ? h(Button, { variant: "link", size: "text", onClick: onOrigin }, h(Fragment, null, originGlyph && ICON[originGlyph] ? icon(ICON[originGlyph], 12, { style: { marginInlineEnd: "var(--space-1)", verticalAlign: "-1px" } }) : null, origin))
+        ? h("span", null, h(Button, { variant: "link", size: "text", onClick: onOrigin }, h(Fragment, null, originGlyph && ICON[originGlyph] ? icon(ICON[originGlyph], 12, { style: { marginInlineEnd: "var(--space-1)", verticalAlign: "-1px" } }) : null, origin)))
         : h("span", { className: "flex items-center gap-1 text-caption text-subtle" }, originGlyph && ICON[originGlyph] ? icon(ICON[originGlyph], 12) : null, origin)) : null);
   /** The work, big: a frame that takes the panel's height (Diffs' card,
    * `.preview`), its toggle (Now / After) floating at the top. */
@@ -597,6 +599,10 @@ function buzzUi(React, { nativeSelect = false } = {}) {
     h("figure", { "aria-label": label, style: { ...card, margin: 0, position: "relative", display: "flex", flexDirection: "column", flex: "1 1 auto", minHeight: "min(34rem, 64vh)" } },
       toolbar ? h("div", { style: { ...cardHeader, justifyContent: "space-between" } }, ...each(toolbar)) : null,
       h("div", { style: { flex: 1, minHeight: 0, display: "flex", alignItems: "stretch", justifyContent: "center", overflow: "auto", background: "var(--surface-inset)" } }, ...each(children)));
+  /** Layers in the canvas, each filling it, the last on top (a live page over its capture). */
+  const Layers = ({ children }) =>
+    h("div", { style: { position: "relative", flex: 1, display: "grid", minHeight: 0 } },
+      ...each(children).filter(Boolean).map((child, index) => h("div", { key: index, style: { gridArea: "1 / 1", display: "flex", minHeight: 0, overflow: "hidden" } }, child)));
   /** A picture of the work filling the canvas (an image, or the platform's capture of a page). */
   const CanvasImage = ({ src, alt }) => src
     ? h("img", { src, alt, style: { display: "block", maxWidth: "100%", maxHeight: "100%", objectFit: "contain", margin: "auto" } })
@@ -1038,7 +1044,7 @@ function buzzUi(React, { nativeSelect = false } = {}) {
 
   return { VARIANTS, SectionTitle, Group, Row, Button, Input, Switch, SwitchRow, Pill, Popup, Native, TextField, Stack, Column, Actions, Note, ErrorLine, Spinner, Status, Value, Alert, Code,
     Header, IconButton, PanelHeader, Page, Subview, Surface, PanelBody, Fill, Toolbar, EmptyState, NavItem, Tabs, Disclosure, CountBadge, Dot, LinkChip, OneTimeCode, CodeColumn, Failure, Notice,
-    Frame, Avatar, Byline, Canvas, CanvasImage, QuietLine, Question, Permits, Article, Chip, ChipRow, DiffText, ChangeTable, MediaPair, DecisionBar, Skeleton, Checkbox, SelectRow, ListGroup, Split, MessageCard, MessageRow,
+    Frame, Avatar, Byline, Canvas, Layers, CanvasImage, QuietLine, Question, Permits, Article, Chip, ChipRow, DiffText, ChangeTable, MediaPair, DecisionBar, Skeleton, Checkbox, SelectRow, ListGroup, Split, MessageCard, MessageRow,
     Title, Heading, Paragraph, Caption, Strong, Lines, Line, Pre, ICON,
     AgentBrowse, AgentGrid, AgentCard, CardMark, AgentPortrait, AgentPanel, AgentProfile, NameInput, NameActions, Menu, AvatarChoices, HeaderTab, Picture, Glyph, COPIED, COPIED_FROM, AVATARS };
 }

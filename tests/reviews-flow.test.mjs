@@ -131,10 +131,10 @@ test("without tokens on this connection: one quiet line and Retry, never the web
   assert.doesNotMatch(JSON.stringify(view), /browser-view|app\.black4\.ai\/reviews|text-danger/);
 });
 
-test("the Goal filter: drawn only when a review serves a goal; what it shows is what next, previous and the counts step through", async (t) => {
+test("the Goal filter: drawn only when the server counts goals; a goal is asked of the server, and stepping and counts follow its answer", async (t) => {
   const plain = await app(t);
   plain.page(); await settle();
-  assert.equal(plain.find(plain.page(), (node) => node.props?.role === "combobox"), null, "today's queue: no goals, no filter, no empty dropdown");
+  assert.equal(plain.find(plain.page(), (node) => node.props?.role === "combobox"), null, "an older queue: no goals, no filter, no empty dropdown");
 
   const SPRING = { path: "goals/spring-orders.md", title: "More spring orders" };
   const a = await app(t, { reviews: { goals: { hero: [SPRING], price: [] } } });
@@ -145,18 +145,24 @@ test("the Goal filter: drawn only when a review serves a goal; what it shows is 
   assert.equal(picker.props["aria-label"], "Goal");
   const options = [];
   (function walk(node) { if (!node || typeof node !== "object") return; if (node.props?.role === "option") options.push(node); for (const child of node.children ?? []) walk(child); })(view);
-  assert.deepEqual(options.map((option) => a.label(option)), ["All goals", "More spring orders · 1", "No goal · 1"]);
+  assert.deepEqual(options.map((option) => a.label(option)), ["All goals", "More spring orders · 1", "No goal · 1"], "the server's counts");
   assert.match(a.label(view), /1 of 2/, "all goals: both decisions");
+  const queueReads = () => a.reviews.calls.filter((call) => call.name === "review_queue").map((call) => call.args);
   options.find((option) => option.props["data-value"] === SPRING.path).props.onClick();
-  await settle();
+  a.page(); await settle(); await settle();
+  assert.deepEqual(queueReads().at(-1), { goal: SPRING.path }, "the server filters: the queue is capped");
   view = a.page();
   assert.match(a.label(view), /1 of 1/, "the count is the filtered count");
   assert.match(a.label(view), /Change the hero\?/);
   assert.doesNotMatch(a.label(a.find(view, (node) => node.props?.role === "region")), /Change (the )?price/, "the list shows only that goal");
   const next = a.find(view, (node) => node.type === "button" && node.props["aria-label"] === "Next decision (J)");
   assert.ok(next.props.disabled || next.props["data-disabled"] !== undefined, "nothing after it within the goal: J has nowhere to go");
+  assert.equal(a.find(view, (node) => node.props?.role === "combobox").props["aria-label"], "Goal", "the filter stays while working");
+  const badge = a.expand({ type: a.registered.page.badge, props: {}, children: [] });
+  assert.match(JSON.stringify(badge), /2 decisions waiting/, "the dock badge still counts the whole queue");
   options.find((option) => option.props["data-value"] === "none").props.onClick();
-  await settle();
+  a.page(); await settle(); await settle();
+  assert.deepEqual(queueReads().at(-1), { goal: "none" });
   assert.match(a.label(a.page()), /Change the price\?/, "No goal: the other one, opened at once");
 });
 

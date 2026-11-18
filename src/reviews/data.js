@@ -107,22 +107,18 @@ function reviewGoalsOf(value) {
   }
   return out;
 }
-/** The Goal filter's choices for these entries, as the web desk counts them:
- * reviews (not items) per goal, a review with two goals under each, one path
- * once (under its first title), in path order; and how many serve none. */
-function reviewGoalChoices(entries) {
-  const goals = new Map();
-  const none = new Set();
-  for (const entry of entries ?? []) {
-    const review = `${entry.businessId}/${entry.assetId}`;
-    if (!entry.goals?.length) { none.add(review); continue; }
-    for (const goal of entry.goals) {
-      if (!goals.has(goal.path)) goals.set(goal.path, { path: goal.path, title: goal.title, reviews: new Set() });
-      goals.get(goal.path).reviews.add(review);
-    }
+/** The Goal filter's choices, as the server counts them for this queue
+ * (Platform Control's top-level `goals` and `noGoal`, which ignore the goal
+ * asked for): `{ goals: [{ path, title, count }], noGoal }`. The queue is
+ * capped, so the plugin never counts for itself. An older server sends none. */
+function reviewGoalChoices(queue) {
+  const goals = [];
+  for (const goal of Array.isArray(queue?.goals) ? queue.goals : []) {
+    const [known] = reviewGoalsOf([goal]);
+    const count = Number.isInteger(goal?.reviews) && goal.reviews > 0 ? goal.reviews : 0;
+    if (known && count && !goals.some((other) => other.path === known.path) && goals.length < 100) goals.push({ ...known, count });
   }
-  return { goals: [...goals.values()].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)).map((goal) => ({ path: goal.path, title: goal.title, count: goal.reviews.size })),
-    noGoal: none.size };
+  return { goals, noGoal: Number.isInteger(queue?.noGoal) && queue.noGoal > 0 ? queue.noGoal : 0 };
 }
 /** The goal in force: the one chosen, while the queue still has it; else all.
  * With no goal anywhere in these entries there is no filter at all. */
@@ -253,6 +249,9 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
   const pictures = new Map(); // `${id}/${which}` -> data URL, once read
   const listeners = new Set();
   let queue = null;
+  // The queue as the server answers it for one business and/or one goal:
+  // `${businessId}|${goal}` -> { queue, error, flight }. The whole queue stays `queue`.
+  const scoped = new Map();
   let queueFlight = null;
   let serverNeedsBusiness = false;
   let revision = 0;
@@ -280,7 +279,37 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
     for (const review of value.reviews ?? []) remember(review.assetId, review.businessId);
     for (const entry of [...(value.blocked ?? []), ...(value.stalled ?? [])]) remember(entry.assetId, entry.businessId);
     changed();
+    // The narrower answers follow the whole queue's poll.
+    for (const key of scoped.keys()) {
+      const [businessId, goal] = key.split("|");
+      readScoped({ businessId: businessId || null, goal: goal || REVIEW_ALL_GOALS }).catch(() => {});
+    }
   };
+  const scopeKey = ({ businessId, goal } = {}) => `${businessId ?? ""}|${goal && goal !== REVIEW_ALL_GOALS ? goal : ""}`;
+  /** Reads the queue for one business and/or one goal (the server filters
+   * and counts: the queue is capped). Neither: the whole queue. */
+  const readScoped = ({ businessId = null, goal = REVIEW_ALL_GOALS } = {}) => {
+    const key = scopeKey({ businessId, goal });
+    if (key === "|") return readQueue();
+    const known = scoped.get(key) ?? { queue: null, error: null, flight: null };
+    if (known.flight) return known.flight;
+    const at = epoch;
+    known.flight = (async () => {
+      try {
+        const data = reviewQueueOf(await call("review_queue", { ...(businessId ? { businessId } : {}), ...(goal && goal !== REVIEW_ALL_GOALS ? { goal } : {}) }));
+        if (data?.kind !== "black4_review_queue") throw new Error("Black 4 answered with something Reviews cannot show.");
+        if (at === epoch) { known.queue = data; known.error = null; }
+        return data;
+      } catch (error) { if (at === epoch) known.error = error; throw error; }
+      finally { known.flight = null; if (at === epoch) changed(); }
+    })();
+    if (scoped.size >= 12 && !scoped.has(key)) scoped.delete(scoped.keys().next().value);
+    scoped.set(key, known);
+    return known.flight;
+  };
+  /** The last answer for one business and/or goal, or null before it is read. */
+  const scopedQueue = (scope) => (scopeKey(scope) === "|" ? queue : scoped.get(scopeKey(scope))?.queue ?? null);
+  const scopedError = (scope) => scoped.get(scopeKey(scope))?.error ?? null;
   const readQueue = () => queueFlight ??= (async () => {
     try {
       const data = reviewQueueOf(await call("review_queue", {}));
@@ -420,12 +449,16 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
       cached.data = { ...cached.data, items: (cached.data.items ?? []).map((item) => item.key !== receipt.key ? item
         : { ...item, decidable: false, status: "decided", decision: { ...(item.decision ?? {}), ...decision } }) };
     }
-    if (queue?.reviews) {
-      queue = { ...queue, total: Math.max(0, (queue.total ?? 1) - 1), reviews: queue.reviews
+    const without = (value) => {
+      if (!value?.reviews?.some((review) => review.assetId === receipt.assetId && review.businessId === receipt.businessId
+        && (review.items ?? []).some((item) => item.key === receipt.key))) return value;
+      return { ...value, total: Math.max(0, (value.total ?? 1) - 1), reviews: value.reviews
         .map((review) => review.assetId !== receipt.assetId || review.businessId !== receipt.businessId ? review
           : { ...review, items: (review.items ?? []).filter((item) => item.key !== receipt.key) })
         .filter((review) => review.items.length) };
-    }
+    };
+    queue = without(queue);
+    for (const known of scoped.values()) known.queue = without(known.queue);
   };
   /** Reads the review again and settles a receipt from the item's own decision. */
   const settle = async (id, fallback) => {
@@ -588,7 +621,7 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
     get revision() { return revision; },
     get queue() { return queue; },
-    noteQueue, readQueue, open, cachedReview, peek, canDecide, image,
+    noteQueue, readQueue, readScoped, scopedQueue, scopedError, open, cachedReview, peek, canDecide, image,
     /** An image of the work already read (`after`, `before` or `capture`), or null. */
     picture: (businessId, assetId, key, which = "after") => pictures.get(`${reviewItemId(businessId, assetId, key)}/${which}`) ?? null,
     /** Which picture of the work there is to show: the platform's capture, else an image preview. */
@@ -613,7 +646,7 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
       for (const timer of timers.values()) clearTimer(timer);
       timers.clear();
       waiting.length = 0;
-      for (const map of [tokens, previews, captures, reviews, flights, businesses, receipts, images, pictures]) map.clear();
+      for (const map of [tokens, previews, captures, reviews, flights, businesses, receipts, images, pictures, scoped]) map.clear();
       queue = null;
       queueFlight = null;
       serverNeedsBusiness = false;

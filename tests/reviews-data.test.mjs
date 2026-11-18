@@ -284,45 +284,65 @@ test("the queue's captures come from _meta by assetId, onto the review they pict
 });
 
 // ---- the Goal filter ---------------------------------------------------------------
+// The queue is capped, so the server filters by goal and counts: the plugin draws
+// its menu from the answer's top-level goals and noGoal, never from counting rows.
 const SPRING = { path: "goals/spring-orders.md", title: "More spring orders" };
 const LOYAL = { path: "goals/repeat-buyers.md", title: "More repeat buyers" };
-/** Two fictional businesses: reviews serving one goal, two goals, or none. */
-const goalQueue = (goals = true) => ({ kind: "black4_review_queue", total: 6, listed: 6, truncated: false, blocked: [], stalled: [], reviews: [
-  { businessId: "business-crumb", businessName: "Crumb & Co", assetId: "rv_menu", title: "Menu", goals: goals ? [SPRING] : undefined,
-    items: [{ key: "a", version: 1, title: "A" }, { key: "b", version: 1, title: "B" }] },
-  { businessId: "business-crumb", businessName: "Crumb & Co", assetId: "rv_mail", title: "Mail", goals: goals ? [SPRING, LOYAL, { path: "", title: "dropped" }] : undefined,
-    items: [{ key: "c", version: 1, title: "C" }] },
-  { businessId: "business-crumb", businessName: "Crumb & Co", assetId: "rv_hours", title: "Hours", goals: [], items: [{ key: "d", version: 1, title: "D" }] },
-  { businessId: "business-surf", businessName: "Tide Surf", assetId: "rv_ads", title: "Ads", goals: goals ? [{ ...SPRING, title: "Spring, as Tide names it" }] : undefined,
-    items: [{ key: "e", version: 1, title: "E" }] },
-  { businessId: "business-surf", businessName: "Tide Surf", assetId: "rv_post", title: "Post", items: [{ key: "f", version: 1, title: "F" }] },
-] });
+const review = (assetId, goals, keys = ["a"]) => ({ businessId: "business-crumb", businessName: "Crumb & Co", assetId, title: assetId, goals,
+  items: keys.map((key) => ({ key, version: 1, title: `${assetId} ${key}` })) });
+/** A fictional server's review_queue: filtered by goal, counted over everything waiting (here more than it lists). */
+function goalServer(args = {}) {
+  const all = [review("rv_menu", [SPRING], ["a", "b"]), review("rv_mail", [SPRING, LOYAL]), review("rv_hours", [])];
+  const shown = !args.goal ? all : all.filter((entry) => args.goal === "none" ? !entry.goals.length : entry.goals.some((goal) => goal.path === args.goal));
+  return { kind: "black4_review_queue", total: shown.reduce((n, entry) => n + entry.items.length, 0) + 40, listed: 4, truncated: true, blocked: [], stalled: [],
+    ...(args.goal ? { goal: args.goal } : {}), reviews: shown,
+    goals: [{ ...LOYAL, reviews: 7 }, { ...SPRING, reviews: 31 }, { path: "goals/empty.md", title: "Nothing waits", reviews: 0 }, { path: "", title: "no path", reviews: 2 }], noGoal: 12 };
+}
 
-test("goal choices count reviews, not items, as the web desk does; a review with two goals counts under each; no goal is counted too", () => {
-  const choices = reviewGoalChoices(reviewShown(goalQueue()));
-  assert.deepEqual(choices, { goals: [
-    { path: "goals/repeat-buyers.md", title: "More repeat buyers", count: 1 },
-    { path: "goals/spring-orders.md", title: "More spring orders", count: 3 }, // rv_menu (two items) counts once; one path once, under its first title
-  ], noGoal: 2 });
-  assert.deepEqual(reviewGoalChoices(reviewShown(goalQueue(), { businessId: "business-surf" })).goals.map((goal) => [goal.title, goal.count]), [["Spring, as Tide names it", 1]]);
+test("goal choices are the server's counts for the whole queue, not a count of the rows it listed", () => {
+  assert.deepEqual(reviewGoalChoices(goalServer()), { goals: [
+    { path: LOYAL.path, title: LOYAL.title, count: 7 }, { path: SPRING.path, title: SPRING.title, count: 31 },
+  ], noGoal: 12 }, "a goal with nothing waiting, or without a path, is left out");
+  assert.deepEqual(reviewGoalChoices(goalServer({ goal: SPRING.path })).goals.map((goal) => goal.count), [7, 31], "they ignore the goal asked for");
 });
 
-test("the Goal filter narrows what is worked through, and with one business too", () => {
-  const ids = (entries) => entries.map((entry) => entry.key).join("");
-  assert.equal(ids(reviewShown(goalQueue())), "abcdef");
-  assert.equal(ids(reviewShown(goalQueue(), { goal: SPRING.path })), "abce");
-  assert.equal(ids(reviewShown(goalQueue(), { goal: LOYAL.path })), "c");
-  assert.equal(ids(reviewShown(goalQueue(), { goal: REVIEW_NO_GOAL })), "df");
-  assert.equal(ids(reviewShown(goalQueue(), { businessId: "business-crumb", goal: SPRING.path })), "abc");
-  assert.equal(ids(reviewShown(goalQueue(), { goal: REVIEW_ALL_GOALS })), "abcdef");
+test("an older server, or a queue where no review serves a goal: no filter at all, whatever was chosen", () => {
+  for (const queue of [{ kind: "black4_review_queue", reviews: [review("rv_menu", undefined)] }, { ...goalServer(), goals: [], noGoal: 3 }, null]) {
+    const choices = reviewGoalChoices(queue);
+    assert.deepEqual(choices.goals, [], "nothing to offer, so the menu is not drawn");
+    for (const chosen of [SPRING.path, REVIEW_NO_GOAL, undefined]) assert.equal(reviewGoalNow(choices, chosen), REVIEW_ALL_GOALS);
+  }
+  const choices = reviewGoalChoices(goalServer());
+  assert.equal(reviewGoalNow(choices, LOYAL.path), LOYAL.path);
+  assert.equal(reviewGoalNow(choices, REVIEW_NO_GOAL), REVIEW_NO_GOAL);
+  assert.equal(reviewGoalNow(choices, "goals/decided-away.md"), REVIEW_ALL_GOALS, "its last review was decided: back to all goals");
+  assert.equal(reviewGoalNow({ ...choices, noGoal: 0 }, REVIEW_NO_GOAL), REVIEW_ALL_GOALS);
 });
 
-test("no goal anywhere: no filter at all, whatever was chosen; a goal that left the queue falls back to all goals", () => {
-  const none = reviewGoalChoices(reviewShown(goalQueue(false)));
-  assert.deepEqual(none.goals, [], "nothing to offer, so the filter is not drawn");
-  for (const chosen of [SPRING.path, REVIEW_NO_GOAL, undefined]) assert.equal(reviewGoalNow(none, chosen), REVIEW_ALL_GOALS);
-  const crumb = reviewGoalChoices(reviewShown(goalQueue(), { businessId: "business-crumb" }));
-  assert.equal(reviewGoalNow(crumb, LOYAL.path), LOYAL.path);
-  assert.equal(reviewGoalNow(crumb, "goals/decided-away.md"), REVIEW_ALL_GOALS, "its last review was decided");
-  assert.equal(reviewGoalNow(reviewGoalChoices(reviewShown(goalQueue(), { goal: SPRING.path })), REVIEW_NO_GOAL), REVIEW_ALL_GOALS, "no review without a goal left");
+test("a goal is asked of the server; its answer is kept beside the whole queue, follows the poll, and loses decided items", async () => {
+  const { store, calls } = data({ review_queue: (args) => tool(goalServer(args)) });
+  await store.readQueue();
+  assert.equal(store.queue.total, 44, "the whole queue: what the badge counts");
+  await store.readScoped({ goal: SPRING.path });
+  assert.deepEqual(calls.filter((call) => call.name === "review_queue").map((call) => call.args), [{}, { goal: SPRING.path }]);
+  const spring = store.scopedQueue({ goal: SPRING.path });
+  assert.equal(spring.goal, SPRING.path);
+  assert.deepEqual(reviewShown(spring).map((entry) => entry.id), ["business-crumb/rv_menu/a", "business-crumb/rv_menu/b", "business-crumb/rv_mail/a"]);
+  assert.equal(store.queue.total, 44, "the whole queue is not narrowed");
+  await store.readScoped({ businessId: "business-crumb", goal: REVIEW_NO_GOAL });
+  assert.deepEqual(calls.at(-1).args, { businessId: "business-crumb", goal: "none" });
+  assert.equal(store.scopedQueue({ goal: LOYAL.path }), null, "not asked for: not read");
+  // The badge's poll brings the narrower answers along.
+  store.noteQueue(goalServer());
+  await settle();
+  assert.deepEqual(calls.slice(-2).map((call) => call.args), [{ goal: SPRING.path }, { businessId: "business-crumb", goal: "none" }]);
+  store.reset();
+  assert.equal(store.scopedQueue({ goal: SPRING.path }), null, "a new connection forgets them");
+});
+
+test("reviewShown narrows a loaded queue by business and by each review's own goals", () => {
+  const ids = (entries) => entries.map((entry) => `${entry.assetId}:${entry.key}`).join(" ");
+  assert.equal(ids(reviewShown(goalServer(), { goal: LOYAL.path })), "rv_mail:a");
+  assert.equal(ids(reviewShown(goalServer(), { goal: REVIEW_NO_GOAL })), "rv_hours:a");
+  assert.equal(ids(reviewShown(goalServer(), { businessId: "business-surf" })), "");
 });

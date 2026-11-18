@@ -65,11 +65,26 @@ function reviewsPart(ctx, bridge) {
   /** What a person works through with this business filter (null: every
    * business): the Goal filter's choices, the goal in force and the order of
    * what it shows. Next, previous, bulk approve and the counts all use it. */
-  const worked = (queue, businessId) => {
-    const scoped = reviewShown(queue, { businessId });
-    const choices = reviewGoalChoices(scoped);
+  // The server filters and counts (the queue is capped): one answer for the
+  // business, one for the goal. Until the goal's answer arrives, what is loaded
+  // is narrowed by each review's own goals; the counts are always the server's.
+  const worked = (businessId) => {
+    const base = businessId ? store.scopedQueue({ businessId }) : store.queue;
+    const choices = reviewGoalChoices(base);
     const goal = reviewGoalNow(choices, view.goals[businessId ?? ""]);
-    return { choices, goal, order: reviewShown(queue, { businessId, goal }) };
+    const exact = goal === REVIEW_ALL_GOALS ? base : store.scopedQueue({ businessId, goal });
+    const queue = exact ?? base ?? (businessId ? store.queue : null);
+    return { choices, goal, queue, exact: !!exact, order: reviewShown(queue, { businessId, goal }) };
+  };
+  /** Asks for the answers `worked` reads, while a surface shows them. */
+  const useWorked = (businessId, connected) => {
+    const work = worked(businessId);
+    React.useEffect(() => {
+      if (!connected) return;
+      if (businessId && !store.scopedQueue({ businessId })) store.readScoped({ businessId }).catch(() => {});
+      if (work.goal !== REVIEW_ALL_GOALS) store.readScoped({ businessId, goal: work.goal }).catch(() => {});
+    }, [businessId ?? "", work.goal, connected]);
+    return work;
   };
   const chooseGoal = (businessId, goal) => setView({ goals: { ...view.goals, [businessId ?? ""]: goal } });
   const useView = () => {
@@ -93,7 +108,7 @@ function reviewsPart(ctx, bridge) {
   /** Next, previous and the position for `entry`, in what the filters show. */
   function useStepping(entry, setEntry, businessId = null) {
     useStore();
-    const { order } = worked(store.queue, businessId);
+    const { order } = worked(businessId);
     const remembered = React.useRef(0);
     const step = reviewStep(order, entry, remembered.current);
     if (step.found) remembered.current = step.index;
@@ -129,7 +144,7 @@ function reviewsPart(ctx, bridge) {
     const [bulk, setBulk] = React.useState(null);
     const setEntry = (entry) => setView({ entry });
     // The first waiting item is open from the start: one less click per session.
-    const work = worked(queue, current.filter);
+    const work = useWorked(current.filter, link.status === "connected");
     const first = work.order[0];
     React.useEffect(() => {
       if (!view.entry && first && !view.filter) setView({ entry: { businessId: first.businessId, assetId: first.assetId, itemKey: first.key } });
@@ -142,7 +157,7 @@ function reviewsPart(ctx, bridge) {
     const onGoal = (goal) => {
       chooseGoal(current.filter, goal);
       setPicked(new Set());
-      const next = worked(store.queue, current.filter).order[0];
+      const next = worked(current.filter).order[0];
       setView({ entry: next ? { businessId: next.businessId, assetId: next.assetId, itemKey: next.key } : null });
     };
     // Picks that left the queue (decided) drop out of the selection.
@@ -180,7 +195,7 @@ function reviewsPart(ctx, bridge) {
     if (link.status !== "connected") list = h(NotConnected, { link });
     else if (error && !queue) list = h(ui.Failure, { message: plain(error.message, 300), retry, retryLabel: "Try again" });
     else if (!queue) list = h(ui.Skeleton, { layout: "list" });
-    else list = h(QueueList, { queue, selectedId: current.entry ? order[reviewStep(order, current.entry).index]?.id : null, onOpen: setEntry,
+    else list = h(QueueList, { queue: work.queue ?? queue, selectedId: current.entry ? order[reviewStep(order, current.entry).index]?.id : null, onOpen: setEntry,
       picked: live, onPick: pick, notes, filter: current.filter, onFilter: (filter) => setView({ filter }), goal: work.goal, goals: work.choices, onGoal });
     const detail = current.entry
       ? h(ReviewItem, { key: "item", entry: current.entry, step, onCommand, frame: true })
@@ -204,7 +219,7 @@ function reviewsPart(ctx, bridge) {
     useView();
     const step = useStepping(entry, setEntry, filter);
     const { link, queue, error, retry } = useQueue();
-    const work = worked(queue, filter);
+    const work = useWorked(filter, link.status === "connected");
     let body;
     if (entry) body = h(ReviewItem, { entry, step, onBack: () => setEntry(null), onCommand });
     else {
@@ -212,8 +227,9 @@ function reviewsPart(ctx, bridge) {
       if (link.status !== "connected") list = h(NotConnected, { link });
       else if (error && !queue) list = h(ui.Failure, { message: plain(error.message, 300), retry, retryLabel: "Try again" });
       else if (!queue) list = h(ui.Skeleton, { layout: "list" });
-      else list = h(QueueList, { queue, onOpen: setEntry, filter, onFilter: setFilter, goal: work.goal, goals: work.choices, onGoal: (goal) => chooseGoal(filter, goal) });
-      const waiting = work.goal === REVIEW_ALL_GOALS && !filter ? queue?.total : work.order.length;
+      else list = h(QueueList, { queue: work.queue ?? queue, onOpen: setEntry, filter, onFilter: setFilter, goal: work.goal, goals: work.choices, onGoal: (goal) => chooseGoal(filter, goal) });
+      // The whole queue's total, else the server's total for what is shown.
+      const waiting = work.exact ? work.queue?.total : work.order.length;
       body = h(ui.Subview, { header: h(ui.PanelHeader, { title: waiting ? `${waiting} waiting` : "Reviews",
         actions: [h(ui.IconButton, { key: "refresh", label: "Refresh", glyph: "refresh", large: true, onClick: () => bridge.queue.refresh() })] }) }, h(ui.PanelBody, null, list));
     }

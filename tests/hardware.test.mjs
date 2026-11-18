@@ -360,14 +360,16 @@ const buttonsIn = (tree) => all(tree, (node) => has(node, "buzz-button")).map((b
 function hardwareOn(reply) {
   const { React, settle, unmount } = testReact();
   const asked = [];
+  const pages = {};
   let type;
   const ctx = {
     react: React,
     host: { request: async ({ body }) => { const request = JSON.parse(body); asked.push(request); return { status: 200, body: JSON.stringify(await reply(request)) }; } },
     agents: { register: (registered) => { type = registered; } },
+    pages: { register: (page) => { pages[page.id] = page; } },
   };
   applyHardware(ctx, { sign: async () => ({ pass: "test-pass" }) });
-  return { type, React, settle, unmount, asked };
+  return { type, pages, React, settle, unmount, asked };
 }
 
 const CONTROLS = { agents: { min: 1, max: 8, default: 1 }, sessionPolicy: { values: ["channel", "thread"], default: "channel" },
@@ -1243,4 +1245,29 @@ test("door: a door that is overloaded or broken says so with its own words", asy
   const d = await door();
   d.box.handle = async () => ({ status: 503, headers: {}, body: JSON.stringify({ error: "too many requests in flight" }) });
   await assert.rejects(askMachine(d.ask, "commerce", { op: "list" }), /^Error: Could not reach the Commerce Mac: its door answered HTTP 503 \(too many requests in flight\)\.$/);
+});
+
+test("Black 4 agents: a dock page lists every agent on the machine, whoever made it, and opens its Settings", async (t) => {
+  const { pages, React, settle, unmount } = hardwareOn((request) => request.op === "list"
+    ? { ok: true, agents: [
+      { pubkey: "a".repeat(64), name: "Chris Opus", harness: "claude", createdBy: "chris@example.com", running: true, activated: true },
+      { pubkey: "b".repeat(64), name: "Queen Qwen", harness: "qwen", createdBy: "joey@example.com", running: false, activated: true }] }
+    : fleet(request));
+  t.after(unmount);
+  const page = pages["black4-agents"];
+  assert.ok(page, "the page is registered");
+  // Buzz lists a plugin page only when it is primary.
+  assert.deepEqual([page.title, page.primary, page.placement], ["Black 4 agents", true, "dock"]);
+  const tree = await settle(React.createElement(page.component));
+  const rows = rowsIn(tree);
+  assert.deepEqual(rows.map((row) => [row.title, row.description]), [
+    ["Chris Opus", "Claude Code · Made by chris@example.com"],
+    ["Queen Qwen", "Qwen Code · Made by joey@example.com"]]);
+  assert.match(textIn(tree), /Running/);
+  assert.match(textIn(tree), /Stopped/);
+  assert.ok(find(tree, (node) => node.props?.className === "panel"), "drawn as a Buzz dock page");
+  buttonsIn(tree).find((button) => button.label === "Open").click();
+  const opened = await settle(React.createElement(page.component));
+  assert.match(textIn(opened), /Chris Opus/);
+  assert.ok(buttonsIn(opened).some((button) => button.label === "Restart"), "the agent's Settings, with its Restart");
 });

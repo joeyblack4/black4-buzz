@@ -1,0 +1,86 @@
+# Releases one commit to everyone on `stable`: runs the Buzz canary on that
+# exact commit against the Buzz release that Update installs now, then
+# scripts/release/promote.mjs checks the rest (on main, reached preview, newer
+# than stable, CI green, built folders fresh, no new host access unless
+# acknowledged), tags release-YYYYMMDD-N, writes the notes and moves stable.
+#
+#   gh workflow run release -f commit=<sha>
+name: release
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: "Commit on main to release (it should have reached preview)"
+        required: true
+      ack_permissions:
+        description: "It asks for more host access: everyone will be asked to review permissions"
+        type: boolean
+        default: false
+      allow_unsoaked:
+        description: "Release even though it has not reached preview (urgent fixes only)"
+        type: boolean
+        default: false
+      dry_run:
+        description: "Check everything and print the notes, but move nothing"
+        type: boolean
+        default: false
+permissions:
+  contents: write
+  checks: read
+concurrency:
+  group: release
+  cancel-in-progress: false
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    outputs:
+      sha: ${{ steps.sha.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: sha
+        env:
+          COMMIT: ${{ inputs.commit }}
+        run: |
+          sha=$(git rev-parse --verify --quiet "${COMMIT}^{commit}") || { echo "::error::${COMMIT} is not a commit in this repository."; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+  canary:
+    needs: resolve
+    uses: ./.github/workflows/buzz-canary.yml
+    with:
+      which: release
+      plugin_ref: ${{ needs.resolve.outputs.sha }}
+
+  promote:
+    needs: [resolve, canary]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: release # add required reviewers here to make a second person approve
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ssh-key: ${{ secrets.RELEASE_DEPLOY_KEY }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.resolve.outputs.sha }}
+          ACK: ${{ inputs.ack_permissions }}
+          UNSOAKED: ${{ inputs.allow_unsoaked }}
+          DRY: ${{ inputs.dry_run }}
+        run: |
+          flags=(--canary-verified --notes-out notes.md)
+          [ "$ACK" = true ] && flags+=(--ack-permissions)
+          [ "$UNSOAKED" = true ] && flags+=(--allow-unsoaked)
+          if [ "$DRY" = true ]; then flags+=(--dry-run); else flags+=(--github-release); fi
+          node scripts/release/promote.mjs "$SHA" "${flags[@]}"
+      - if: always()
+        run: '[ -f notes.md ] && cat notes.md >> "$GITHUB_STEP_SUMMARY" || true'

@@ -1,0 +1,33 @@
+# Moves the `preview` branch to each commit on main whose CI passed, so a
+# person whose Buzz tracks preview gets every change within Buzz's hourly
+# check (or at once with Check again). Only forward; see
+# scripts/release/preview.mjs.
+name: preview
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [main]
+permissions:
+  contents: write
+concurrency:
+  group: preview
+  cancel-in-progress: false
+jobs:
+  move:
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # A deploy key may push commits that change .github/workflows, which
+          # the built-in token may not; without the secret the token is used.
+          ssh-key: ${{ secrets.RELEASE_DEPLOY_KEY }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - env:
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: node scripts/release/preview.mjs "$SHA"

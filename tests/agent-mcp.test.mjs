@@ -360,3 +360,11 @@ test("--call: refusals, an unlinked owner and an unreachable server are failures
   assert.equal((await callOnce(envFor(id, unlinked.url), "Bad Name")).kind, "setup");
   assert.equal((await callOnce(envFor(id, unlinked.url), "get_buzz_audience", "[1]")).kind, "setup");
 });
+
+test("--call: an unseated agent's refusal carries Platform Control's code", async (t) => {
+  const id = identity();
+  const fake = await startFakeMcp({ linked: new Set([id.owner]), audience: { keys: [] }, unseated: new Set([id.agent]) });
+  t.after(fake.close);
+  const answer = await callOnce(envFor(id, fake.url));
+  assert.deepEqual([answer.ok, answer.kind, answer.code], [false, "auth", "agent_unseated"]);
+});

@@ -1570,13 +1570,18 @@ def ask_black4(d, s, tool):
     if not isinstance(reply, dict): return "failed", "the Black 4 connector gave no answer"
     if reply.get("ok"): return "ok", reply.get("result")
     detail = str(reply.get("detail") or reply.get("kind") or "no detail")[:200]
+    # An agent whose business seat ended: Platform Control refuses it (401
+    # agent_unseated) rather than let it act as its owner. Not a passing failure.
+    if reply.get("code") == "agent_unseated": return "unseated", detail
     return ("missing" if reply.get("kind") == "missing" else "failed"), detail
 
 
 def ask_audience(d, s):
     """Asks Platform Control, signed as this agent, whom it may answer:
     ("ok", entries, asOf), ("missing", None, why) when the server has no such
-    tool yet, or ("failed", None, why)."""
+    tool yet, ("unseated", None, why) when its business seat ended, or
+    ("failed", None, why). Staff entries may come without an email; only the
+    public key counts."""
     status, value = ask_black4(d, s, AUDIENCE_TOOL)
     if status != "ok": return status, None, value
     parsed = audience_entries(value)
@@ -1611,6 +1616,10 @@ def refresh_audience(d, restart=True):
         if status == "ok":
             state = {"entries": entries, "source": source, "asOf": detail if source == "platform" else None,
                      "at": now, "tried": now}
+        elif status == "unseated":
+            # Its seat ended: no list any more, so it answers its owner only
+            # (and a customer-facing agent does not start again: its seat check fails).
+            state = {"tried": now, "error": "unseated: " + str(detail), "unseated": True}
         else:
             state = {**state, "tried": now, "error": detail}
         write_private(d / "audience.json", json.dumps(state))
@@ -1621,7 +1630,8 @@ def refresh_audience(d, restart=True):
         if isinstance(launched, dict) and launched.get("audience") != audience_launch(s, state)["fingerprint"]:
             # Idle: at once (a revoked key stops at once). Mid-turn: after it.
             if turns_in_flight(d) == 0:
-                log_line("supervisor", f"audience of {d.name[:8]} changed; restarted it: pid {start(d)}")
+                try: log_line("supervisor", f"audience of {d.name[:8]} changed; restarted it: pid {start(d)}")
+                except Exception as e: log_line("supervisor", f"audience of {d.name[:8]} changed; restart failed: {str(e)[:200]}")
             else:
                 log_line("supervisor", f"audience of {d.name[:8]} changed; restarting it after its turn")
                 defer_apply(d)

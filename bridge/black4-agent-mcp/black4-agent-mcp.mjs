@@ -139,14 +139,22 @@ function plain(text, max = 300) {
 
 /** The server's own words from an error reply, if it gave any. */
 async function serverMessage(res) {
+  return (await serverReply(res)).message;
+}
+
+/** The server's own words and its machine-readable code (e.g.
+ * "agent_unseated"), if it gave them. */
+async function serverReply(res) {
   let text = "";
   try { text = (await res.text()).slice(0, 4000); } catch { /* none */ }
   try {
     const body = JSON.parse(text);
     const pick = body?.error_description ?? body?.message ?? body?.error?.message ?? body?.error;
-    if (typeof pick === "string" && pick.trim()) return plain(pick);
+    const code = typeof body?.code === "string" && /^[a-z0-9_]{1,64}$/.test(body.code) ? body.code : undefined;
+    if (typeof pick === "string" && pick.trim()) return { message: plain(pick), code };
+    return { message: plain(text), code };
   } catch { /* not JSON */ }
-  return plain(text);
+  return { message: plain(text) };
 }
 
 /** A header-safe agent name: printable ASCII, spaces collapsed, at most 80
@@ -233,9 +241,9 @@ export function createConnector({ env = process.env, write, fetchFn = fetch, log
       const sid = res.headers.get("mcp-session-id");
       if (sid) sessionId = sid;
       if (res.status === 401 || res.status === 403) {
-        const detail = await serverMessage(res);
+        const { message: detail, code } = await serverReply(res);
         log(`Black 4 answered HTTP ${res.status}`);
-        return { kind: "auth", status: res.status, detail };
+        return { kind: "auth", status: res.status, detail, ...(code ? { code } : {}) };
       }
       if (res.status === 202 || res.status === 204) return { kind: "ok", messages: collected };
       if (!res.ok) return { kind: "http", status: res.status, detail: await serverMessage(res) };
@@ -343,7 +351,7 @@ export function createConnector({ env = process.env, write, fetchFn = fetch, log
     const step = async (name, method, params) => {
       const id = `${name}-${nonce}`;
       const result = await post({ jsonrpc: "2.0", id, method, params }, { passThrough: false });
-      if (result.kind !== "ok") return { fail: { ok: false, kind: result.kind, detail: sentenceFor(result) } };
+      if (result.kind !== "ok") return { fail: { ok: false, kind: result.kind, detail: sentenceFor(result), ...(result.code ? { code: result.code } : {}) } };
       const reply = result.messages.find((m) => m?.id === id);
       if (!reply) return { fail: { ok: false, kind: "error", detail: `Black 4 gave no answer to ${method}.` } };
       if (reply.error) return { fail: { ok: false, kind: "error", detail: plain(reply.error.message || `JSON-RPC error ${reply.error.code}`), code: reply.error.code } };

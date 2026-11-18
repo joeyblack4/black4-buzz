@@ -422,8 +422,9 @@ Black 4 hardware agent answers exactly one **Audience**:
 The machine asks Platform Control (`get_buzz_audience`, signed as the agent)
 whose Buzz keys that audience holds, when the agent starts and about every 10
 minutes, and buzz-acp answers only those keys (`BUZZ_ACP_RESPOND_TO=allowlist`).
-A changed list restarts the agent once its turn ends. A failed check keeps the
-last list. An agent that has never had a list answers only its owner. Until
+A changed list restarts the agent at once, or after its turn when it is busy. A
+failed check keeps the last list, except that an agent whose business seat ended
+(`agent_unseated`) drops it and answers only its owner. An agent that has never had a list answers only its owner. Until
 Platform Control has `get_buzz_audience`, the staff list in
 [`machine/staff.json`](machine/staff.json) stands in for it.
 

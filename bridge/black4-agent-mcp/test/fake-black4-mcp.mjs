@@ -97,7 +97,7 @@ const ALL_TOOLS = [
  * `audience`, when given, is what get_buzz_audience answers (a function of
  * the verified { agent, owner }, or a value); without it the fake has no
  * such tool, like a server from before it. */
-export async function startFakeMcp({ linked = new Set(), audience } = {}) {
+export async function startFakeMcp({ linked = new Set(), audience, unseated = new Set() } = {}) {
   const seen = new Set();
   const requests = [];
   const server = createServer(async (req, res) => {
@@ -110,6 +110,8 @@ export async function startFakeMcp({ linked = new Set(), audience } = {}) {
     requests.push({ verdict, url: full.href, headers: req.headers, body: body.toString() });
     const json = (status, value) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(value)); };
     if (verdict.error) return json(401, { error: verdict.error });
+    // An agent whose business seat ended, as Platform Control refuses it.
+    if (unseated.has(verdict.agent)) return json(401, { error: "invalid_token", code: "agent_unseated" });
     if (!linked.has(verdict.owner)) return json(401, { error: "owner_not_linked", message: "This Buzz owner is not linked to a Black 4 account" });
     const msg = JSON.parse(body.toString());
     if (msg.id === undefined) { res.writeHead(202); return res.end(); }

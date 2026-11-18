@@ -2847,6 +2847,28 @@ class Audience(Base):
         self.assertIn("5" * 64, env["BUZZ_ACP_RESPOND_TO_ALLOWLIST"])
         self.assertNotEqual(self.a.running(d), before, "restarted")
 
+    def test_staff_keys_without_emails_count_by_their_pubkey(self):
+        answer = platform_answer((CUSTOMER_A, "biz_a"))
+        data = json.loads(answer["result"]["content"][0]["text"])
+        for row in data["keys"]: row.pop("email")  # what a seat or customer caller gets
+        answer["result"]["content"][0]["text"] = json.dumps(data)
+        self.answer(answer)
+        d = self.make_agent()
+        self.assertEqual(self.started(d)["BUZZ_ACP_RESPOND_TO_ALLOWLIST"].split(","), sorted(STAFF))
+
+    def test_an_unseated_agent_drops_its_list_and_answers_its_owner_only(self):
+        self.a.STAFF_FILE.write_text(json.dumps({"staff": [{"name": "Pat", "pubkey": "9" * 64}]}))
+        self.answer(platform_answer())
+        d = self.make_agent()
+        self.assertEqual(self.started(d)["BUZZ_ACP_RESPOND_TO"], "allowlist")
+        self.answer({"ok": False, "kind": "auth", "code": "agent_unseated", "detail": "Black 4 refused this agent's request: invalid_token."})
+        (d / "work" / "env.json").unlink()
+        state = self.a.refresh_audience(d)
+        self.assertTrue(state["unseated"])
+        self.assertNotIn("entries", state, "not the last good list, and not the machine's staff list")
+        self.assertEqual(self.wait_env(d)["BUZZ_ACP_RESPOND_TO"], "owner-only", "restarted closed at once")
+        self.assertEqual(self.req(op="status", pubkey=d.name)["audience"]["gate"], "owner-only")
+
     def test_a_kept_platform_list_outranks_the_machine_staff_list(self):
         self.a.STAFF_FILE.write_text(json.dumps({"staff": [{"name": "Pat", "pubkey": "9" * 64}]}))
         self.answer(platform_answer())

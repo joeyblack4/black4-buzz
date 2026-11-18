@@ -2,7 +2,7 @@
 
 Status: current  
 Owner: Black 4 platform  
-Updated: 2026-11-17
+Updated: 2026-11-18
 
 Every screen a Black 4 plugin draws in Buzz should look like Buzz drew it.
 [`buzz-ui.js`](buzz-ui.js) makes that the easy path. It holds Buzz's own
@@ -69,12 +69,26 @@ is.
 | `OneTimeCode`, `CodeColumn` | Pairing's code | A code to confirm elsewhere, with its Copy button. |
 | `LinkChip` | `InlineChip` (link) | A link renderer's chip in a message. |
 | `Title`, `Heading`, `Paragraph`, `Caption`, `Strong`, `Lines`, `Line`, `Pre` | Buzz's type roles | Page title, section heading, body, muted small text, a row's emphasised line, stacked lines, a status or alert line, pre-formatted text. |
+| `AgentBrowse`, `AgentGrid`, `AgentCard`, `CardMark` | Agents page (`AgentsPage`, `AgentCard`, the Bestie mark) | A page of agents laid out as Buzz's Agents page: header tab, tabs, the card grid, a mark on a card. |
+| `AgentPanel`, `AgentProfile`, `NameInput`, `NameActions`, `AvatarChoices` | The agent panel (`PanelWorkspace`, `AgentDetails`, Change avatar's packs) | An open agent beside the grid: its hero, name editor and avatar choices. |
+| `AgentPortrait`, `Menu`, `HeaderTab`, `Picture`, `Glyph` | `AgentPortrait`, `Menu`, navigation `Tabs`, an icon | An agent's picture (pack avatars play); a "…" menu; a panel header's tab; a logo; a glyph. |
 
 A part takes only variants Buzz styles (`VARIANTS` in the kit). Anything else
 draws the default, never an unstyled control.
 
 Pass `{ nativeSelect: true }` to draw dropdowns as the same pill over the
 system's own menu, in case Buzz's popup ever misbehaves in a webview.
+
+### Buzz's own rules, copied
+
+Buzz draws its agent cards and profile with CSS-module classes, which it
+renames on every build, so a plugin cannot use them. For those parts the kit
+carries Buzz's own rules, word for word, under its own class names
+(`b4copy-<file>-<class>`), along with Buzz's avatar packs.
+[`copy.mjs`](copy.mjs) lists what is taken from which Buzz file and writes it
+into `buzz-ui.js` (`node kit/copy.mjs <block/buzz-app checkout>`, then
+`npm run kit`). Change that list, never the copied text. The canary checks
+every copied rule and avatar against Buzz each day.
 
 ## Using it in a plugin
 

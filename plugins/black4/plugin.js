@@ -1360,8 +1360,9 @@ export function apply(ctx) {
       if (state.status !== "connected") throw Object.assign(new Error("Black 4 is reconnecting. Try again once connected."), { code: "offline" });
       const attempt = generation;
       const result = await request("tools/call", { name, arguments: args }, { timeoutMs });
-      // A queue the person just read is the freshest count the badge can show.
-      if (name === "review_queue" && attempt === generation && state.status === "connected" && !result?.isError) {
+      // A queue the person just read is the freshest count the badge can show:
+      // the whole queue only, never one narrowed to a business or a goal.
+      if (name === "review_queue" && !args?.businessId && !args?.goal && attempt === generation && state.status === "connected" && !result?.isError) {
         try { noteQueue(reviewQueueOf(result)); } catch {}
       }
       return result;
@@ -3482,10 +3483,58 @@ function reviewListed(queue) {
         stake: item.stake, age: item.age, brief: item.brief, workType: item.workType, threadId: item.threadId ?? review.threadId ?? null,
         madeBy: item.madeBy ?? review.madeBy ?? null, requestedBy: item.requestedBy ?? review.requestedBy ?? null, job: item.job ?? review.job ?? null,
         producer: item.producer ?? review.producer ?? null, origin: item.origin ?? review.origin ?? null,
-        capture: item.capture && typeof item.capture === "object" ? item.capture : review.capture && typeof review.capture === "object" ? review.capture : null });
+        capture: item.capture && typeof item.capture === "object" ? item.capture : review.capture && typeof review.capture === "object" ? review.capture : null,
+        goals: reviewGoalsOf(item.goals ?? review.goals) });
     }
   }
   return out;
+}
+
+// ---- goals: work the reviews behind one goal first ----------------------------------
+/** The Goal filter's values beside a goal's path (paths start with goals/). */
+const REVIEW_ALL_GOALS = "all";
+const REVIEW_NO_GOAL = "none";
+/** The goals a review serves, as the queue lists them: `[{ path, title }]`. */
+function reviewGoalsOf(value) {
+  if (!Array.isArray(value)) return [];
+  const out = [];
+  for (const goal of value) {
+    const path = typeof goal?.path === "string" ? goal.path.trim().slice(0, 300) : "";
+    if (!path || path === REVIEW_ALL_GOALS || path === REVIEW_NO_GOAL || out.some((known) => known.path === path)) continue;
+    out.push({ path, title: plain(goal.title, 120) || path.replace(/^goals\//, "").replace(/\.md$/, "") });
+  }
+  return out;
+}
+/** The Goal filter's choices, as the server counts them for this queue
+ * (Platform Control's top-level `goals` and `noGoal`, which ignore the goal
+ * asked for): `{ goals: [{ path, title, count }], noGoal }`. The queue is
+ * capped, so the plugin never counts for itself. An older server sends none. */
+function reviewGoalChoices(queue) {
+  const goals = [];
+  for (const goal of Array.isArray(queue?.goals) ? queue.goals : []) {
+    const [known] = reviewGoalsOf([goal]);
+    const count = Number.isInteger(goal?.reviews) && goal.reviews > 0 ? goal.reviews : 0;
+    if (known && count && !goals.some((other) => other.path === known.path) && goals.length < 100) goals.push({ ...known, count });
+  }
+  return { goals, noGoal: Number.isInteger(queue?.noGoal) && queue.noGoal > 0 ? queue.noGoal : 0 };
+}
+/** The goal in force: the one chosen, while the queue still has it; else all.
+ * With no goal anywhere in these entries there is no filter at all. */
+function reviewGoalNow(choices, chosen) {
+  if (!choices.goals.length || !chosen || chosen === REVIEW_ALL_GOALS) return REVIEW_ALL_GOALS;
+  if (chosen === REVIEW_NO_GOAL) return choices.noGoal ? REVIEW_NO_GOAL : REVIEW_ALL_GOALS;
+  return choices.goals.some((goal) => goal.path === chosen) ? chosen : REVIEW_ALL_GOALS;
+}
+/** Whether an entry serves `goal` (a path, "none" or "all"). */
+function reviewServes(entry, goal) {
+  if (!goal || goal === REVIEW_ALL_GOALS) return true;
+  if (goal === REVIEW_NO_GOAL) return !entry.goals?.length;
+  return !!entry.goals?.some((candidate) => candidate.path === goal);
+}
+/** What a person works through, in queue order: one business (or all), one
+ * goal (or all). Next, previous, bulk approve and the counts use this. */
+function reviewShown(queue, { businessId = null, goal = REVIEW_ALL_GOALS } = {}) {
+  return reviewOrder(queue).filter((entry) => (!businessId || entry.businessId === businessId) && reviewServes(entry, goal));
 }
 
 /** The queue grouped by business, in the order businesses first appear. */
@@ -3598,6 +3647,9 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
   const pictures = new Map(); // `${id}/${which}` -> data URL, once read
   const listeners = new Set();
   let queue = null;
+  // The queue as the server answers it for one business and/or one goal:
+  // `${businessId}|${goal}` -> { queue, error, flight }. The whole queue stays `queue`.
+  const scoped = new Map();
   let queueFlight = null;
   let serverNeedsBusiness = false;
   let revision = 0;
@@ -3625,7 +3677,37 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
     for (const review of value.reviews ?? []) remember(review.assetId, review.businessId);
     for (const entry of [...(value.blocked ?? []), ...(value.stalled ?? [])]) remember(entry.assetId, entry.businessId);
     changed();
+    // The narrower answers follow the whole queue's poll.
+    for (const key of scoped.keys()) {
+      const [businessId, goal] = key.split("|");
+      readScoped({ businessId: businessId || null, goal: goal || REVIEW_ALL_GOALS }).catch(() => {});
+    }
   };
+  const scopeKey = ({ businessId, goal } = {}) => `${businessId ?? ""}|${goal && goal !== REVIEW_ALL_GOALS ? goal : ""}`;
+  /** Reads the queue for one business and/or one goal (the server filters
+   * and counts: the queue is capped). Neither: the whole queue. */
+  const readScoped = ({ businessId = null, goal = REVIEW_ALL_GOALS } = {}) => {
+    const key = scopeKey({ businessId, goal });
+    if (key === "|") return readQueue();
+    const known = scoped.get(key) ?? { queue: null, error: null, flight: null };
+    if (known.flight) return known.flight;
+    const at = epoch;
+    known.flight = (async () => {
+      try {
+        const data = reviewQueueOf(await call("review_queue", { ...(businessId ? { businessId } : {}), ...(goal && goal !== REVIEW_ALL_GOALS ? { goal } : {}) }));
+        if (data?.kind !== "black4_review_queue") throw new Error("Black 4 answered with something Reviews cannot show.");
+        if (at === epoch) { known.queue = data; known.error = null; }
+        return data;
+      } catch (error) { if (at === epoch) known.error = error; throw error; }
+      finally { known.flight = null; if (at === epoch) changed(); }
+    })();
+    if (scoped.size >= 12 && !scoped.has(key)) scoped.delete(scoped.keys().next().value);
+    scoped.set(key, known);
+    return known.flight;
+  };
+  /** The last answer for one business and/or goal, or null before it is read. */
+  const scopedQueue = (scope) => (scopeKey(scope) === "|" ? queue : scoped.get(scopeKey(scope))?.queue ?? null);
+  const scopedError = (scope) => scoped.get(scopeKey(scope))?.error ?? null;
   const readQueue = () => queueFlight ??= (async () => {
     try {
       const data = reviewQueueOf(await call("review_queue", {}));
@@ -3765,12 +3847,16 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
       cached.data = { ...cached.data, items: (cached.data.items ?? []).map((item) => item.key !== receipt.key ? item
         : { ...item, decidable: false, status: "decided", decision: { ...(item.decision ?? {}), ...decision } }) };
     }
-    if (queue?.reviews) {
-      queue = { ...queue, total: Math.max(0, (queue.total ?? 1) - 1), reviews: queue.reviews
+    const without = (value) => {
+      if (!value?.reviews?.some((review) => review.assetId === receipt.assetId && review.businessId === receipt.businessId
+        && (review.items ?? []).some((item) => item.key === receipt.key))) return value;
+      return { ...value, total: Math.max(0, (value.total ?? 1) - 1), reviews: value.reviews
         .map((review) => review.assetId !== receipt.assetId || review.businessId !== receipt.businessId ? review
           : { ...review, items: (review.items ?? []).filter((item) => item.key !== receipt.key) })
         .filter((review) => review.items.length) };
-    }
+    };
+    queue = without(queue);
+    for (const known of scoped.values()) known.queue = without(known.queue);
   };
   /** Reads the review again and settles a receipt from the item's own decision. */
   const settle = async (id, fallback) => {
@@ -3933,7 +4019,7 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
     get revision() { return revision; },
     get queue() { return queue; },
-    noteQueue, readQueue, open, cachedReview, peek, canDecide, image,
+    noteQueue, readQueue, readScoped, scopedQueue, scopedError, open, cachedReview, peek, canDecide, image,
     /** An image of the work already read (`after`, `before` or `capture`), or null. */
     picture: (businessId, assetId, key, which = "after") => pictures.get(`${reviewItemId(businessId, assetId, key)}/${which}`) ?? null,
     /** Which picture of the work there is to show: the platform's capture, else an image preview. */
@@ -3958,7 +4044,7 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
       for (const timer of timers.values()) clearTimer(timer);
       timers.clear();
       waiting.length = 0;
-      for (const map of [tokens, previews, captures, reviews, flights, businesses, receipts, images, pictures]) map.clear();
+      for (const map of [tokens, previews, captures, reviews, flights, businesses, receipts, images, pictures, scoped]) map.clear();
       queue = null;
       queueFlight = null;
       serverNeedsBusiness = false;
@@ -4156,6 +4242,9 @@ function reviewScreens(React, store, bridge) {
     const change = item.change && !item.change.erased ? item.change : null;
     const origin = reviewOrigin(review, item);
     const row = (title, text) => (text ? h(Row, { key: title, title, description: text }) : null);
+    // The goals it serves: the review's own, else as the queue lists them.
+    const own = reviewGoalsOf(item.goals ?? review.goals);
+    const goals = own.length ? own : reviewListed(store.queue).find((entry) => entry.assetId === review.assetId && entry.key === item.key)?.goals ?? [];
     return h(Disclosure, { title: "Details" },
       h(Stack, { gap: 4 },
         h(Group, null,
@@ -4173,6 +4262,7 @@ function reviewScreens(React, store, bridge) {
           row("Made by", item.madeBy ?? review.madeBy),
           row("Asked by", item.requestedBy),
           row("Job", origin.jobName || origin.jobId),
+          row("Goal", goals.map((goal) => goal.title).join(" · ")),
           row("Version", `${item.version}${review.title ? ` of ${review.title}` : ""}`)),
         change ? h("div", null, h(SectionTitle, { title: "Pinned request" }),
           h(Stack, { gap: 2 },
@@ -4339,15 +4429,23 @@ function reviewScreens(React, store, bridge) {
 
   /** The list: approved work that needs a push (quiet, at the top), then
    * every waiting item grouped by business. Selection is explicit. */
-  function QueueList({ queue, selectedId, onOpen, picked, onPick, filter, onFilter, notes }) {
+  function QueueList({ queue, selectedId, onOpen, picked, onPick, filter, onFilter, notes, goal = REVIEW_ALL_GOALS, goals, onGoal }) {
     useStore();
-    const groups = reviewGroups(queue).filter((group) => !filter || group.businessId === filter);
+    const groups = reviewGroups(queue).filter((group) => !filter || group.businessId === filter)
+      .map((group) => ({ ...group, items: group.items.filter((entry) => reviewServes(entry, goal)) })).filter((group) => group.items.length);
     const attention = [...(queue.stalled ?? []).map((entry) => ({ ...entry, why: `Not started · ${entry.waitingOn ? `waiting on ${entry.waitingOn}` : "nobody has picked it up"}` })),
       ...(queue.blocked ?? []).map((entry) => ({ ...entry, why: entry.note ? `Blocked · ${entry.note}` : "Blocked" }))]
-      .filter((entry) => !filter || entry.businessId === filter);
-    const filterName = filter ? (groups[0]?.businessName ?? attention[0]?.businessName ?? "this business") : "";
+      .filter((entry) => (!filter || entry.businessId === filter) && (goal === REVIEW_ALL_GOALS || reviewServes({ goals: reviewGoalsOf(entry.goals) }, goal)));
+    const filterName = filter ? (reviewGroups(queue).find((group) => group.businessId === filter)?.businessName ?? attention[0]?.businessName ?? "this business") : "";
+    // The Goal filter, only when some review here serves a goal.
+    const goalPicker = goals?.goals?.length && onGoal ? h(ui.Pill, { key: "goal", label: "Goal", value: goal, onChange: onGoal, title: "Work the decisions behind one goal first",
+      options: [{ id: REVIEW_ALL_GOALS, label: "All goals" },
+        ...goals.goals.map((option) => ({ id: option.path, label: `${option.title} · ${option.count}` })),
+        ...(goals.noGoal ? [{ id: REVIEW_NO_GOAL, label: `No goal · ${goals.noGoal}` }] : [])] }) : null;
+    const goalName = goal === REVIEW_NO_GOAL ? "no goal" : goals?.goals?.find((option) => option.path === goal)?.title;
     return h(Stack, { gap: 4 },
-      filter ? h(Actions, null, Caption(`Only ${filterName}`), h(Button, { size: "sm", variant: "link", onClick: () => onFilter(null) }, "Show all")) : null,
+      goalPicker || filter ? h(Actions, null, goalPicker,
+        filter ? Caption(`Only ${filterName}`) : null, filter ? h(Button, { key: "all", size: "sm", variant: "link", onClick: () => onFilter(null) }, "Show all") : null) : null,
       attention.length ? h(ListGroup, { label: "Approved, not finished", count: attention.length },
         ...attention.map((entry) => h(SelectRow, { key: `a${entry.decisionId}`, title: entry.title, subtitle: entry.why, meta: entry.age, quiet: true,
           selected: selectedId === reviewItemId(entry.businessId, entry.assetId, entry.key),
@@ -4367,7 +4465,7 @@ function reviewScreens(React, store, bridge) {
             onPick: onPick ? (value) => onPick(entry.id, value) : undefined,
             onOpen: () => onOpen({ businessId: entry.businessId, assetId: entry.assetId, itemKey: entry.key }) });
         }))),
-      !groups.length && !attention.length ? h(EmptyState, { glyph: "inbox", title: filter ? `Nothing waiting for ${filterName}` : "Nothing is waiting for you", frame: "none" }) : null,
+      !groups.length && !attention.length ? h(EmptyState, { glyph: "inbox", title: goalName ? `Nothing waiting for ${goalName}` : filter ? `Nothing waiting for ${filterName}` : "Nothing is waiting for you", frame: "none" }) : null,
       queue.truncated ? Note(`Showing ${queue.listed} of ${queue.total}. Decide some to see the rest.`) : null);
   }
 
@@ -4456,9 +4554,35 @@ function reviewsPart(ctx, bridge) {
   const own = (dispose) => { if (typeof dispose === "function") disposers.push(dispose); else if (dispose?.dispose) disposers.push(() => dispose.dispose()); };
 
   // ---- what the page shows: shared with the sidebar and notifications ----------
-  let view = { filter: null, entry: null };
+  // `goals`: the goal chosen per business ("" for all of them), for the session.
+  let view = { filter: null, entry: null, goals: {} };
   const viewListeners = new Set();
   const setView = (patch) => { view = { ...view, ...patch }; for (const listener of [...viewListeners]) listener(); };
+  /** What a person works through with this business filter (null: every
+   * business): the Goal filter's choices, the goal in force and the order of
+   * what it shows. Next, previous, bulk approve and the counts all use it. */
+  // The server filters and counts (the queue is capped): one answer for the
+  // business, one for the goal. Until the goal's answer arrives, what is loaded
+  // is narrowed by each review's own goals; the counts are always the server's.
+  const worked = (businessId) => {
+    const base = businessId ? store.scopedQueue({ businessId }) : store.queue;
+    const choices = reviewGoalChoices(base);
+    const goal = reviewGoalNow(choices, view.goals[businessId ?? ""]);
+    const exact = goal === REVIEW_ALL_GOALS ? base : store.scopedQueue({ businessId, goal });
+    const queue = exact ?? base ?? (businessId ? store.queue : null);
+    return { choices, goal, queue, exact: !!exact, order: reviewShown(queue, { businessId, goal }) };
+  };
+  /** Asks for the answers `worked` reads, while a surface shows them. */
+  const useWorked = (businessId, connected) => {
+    const work = worked(businessId);
+    React.useEffect(() => {
+      if (!connected) return;
+      if (businessId && !store.scopedQueue({ businessId })) store.readScoped({ businessId }).catch(() => {});
+      if (work.goal !== REVIEW_ALL_GOALS) store.readScoped({ businessId, goal: work.goal }).catch(() => {});
+    }, [businessId ?? "", work.goal, connected]);
+    return work;
+  };
+  const chooseGoal = (businessId, goal) => setView({ goals: { ...view.goals, [businessId ?? ""]: goal } });
   const useView = () => {
     const [, setTick] = React.useState(0);
     React.useEffect(() => { const listener = () => setTick((n) => n + 1); viewListeners.add(listener); return () => viewListeners.delete(listener); }, []);
@@ -4477,10 +4601,10 @@ function reviewsPart(ctx, bridge) {
     return !!active && (/^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName) || active.isContentEditable);
   };
 
-  /** Next, previous and the position in the queue for `entry`. */
-  function useStepping(entry, setEntry) {
+  /** Next, previous and the position for `entry`, in what the filters show. */
+  function useStepping(entry, setEntry, businessId = null) {
     useStore();
-    const order = reviewOrder(store.queue);
+    const { order } = worked(businessId);
     const remembered = React.useRef(0);
     const step = reviewStep(order, entry, remembered.current);
     if (step.found) remembered.current = step.index;
@@ -4516,14 +4640,22 @@ function reviewsPart(ctx, bridge) {
     const [bulk, setBulk] = React.useState(null);
     const setEntry = (entry) => setView({ entry });
     // The first waiting item is open from the start: one less click per session.
-    const first = reviewOrder(queue)[0];
+    const work = useWorked(current.filter, link.status === "connected");
+    const first = work.order[0];
     React.useEffect(() => {
       if (!view.entry && first && !view.filter) setView({ entry: { businessId: first.businessId, assetId: first.assetId, itemKey: first.key } });
     }, [first?.id]);
-    const step = useStepping(current.entry, setEntry);
+    const step = useStepping(current.entry, setEntry, current.filter);
     surface = { next: step.next, previous: step.previous };
     React.useEffect(() => () => { surface = null; surfaceFocused = false; }, []);
-    const order = reviewOrder(queue);
+    const order = work.order;
+    // A new goal: its first decision opens, and picks from the old one drop.
+    const onGoal = (goal) => {
+      chooseGoal(current.filter, goal);
+      setPicked(new Set());
+      const next = worked(current.filter).order[0];
+      setView({ entry: next ? { businessId: next.businessId, assetId: next.assetId, itemKey: next.key } : null });
+    };
     // Picks that left the queue (decided) drop out of the selection.
     const live = new Set([...picked].filter((id) => order.some((entry) => entry.id === id)));
     const pick = (id, value) => setPicked((now) => { const next = new Set(now); if (value) next.add(id); else next.delete(id); return next; });
@@ -4559,8 +4691,8 @@ function reviewsPart(ctx, bridge) {
     if (link.status !== "connected") list = h(NotConnected, { link });
     else if (error && !queue) list = h(ui.Failure, { message: plain(error.message, 300), retry, retryLabel: "Try again" });
     else if (!queue) list = h(ui.Skeleton, { layout: "list" });
-    else list = h(QueueList, { queue, selectedId: current.entry ? order[reviewStep(order, current.entry).index]?.id : null, onOpen: setEntry,
-      picked: live, onPick: pick, notes, filter: current.filter, onFilter: (filter) => setView({ filter }) });
+    else list = h(QueueList, { queue: work.queue ?? queue, selectedId: current.entry ? order[reviewStep(order, current.entry).index]?.id : null, onOpen: setEntry,
+      picked: live, onPick: pick, notes, filter: current.filter, onFilter: (filter) => setView({ filter }), goal: work.goal, goals: work.choices, onGoal });
     const detail = current.entry
       ? h(ReviewItem, { key: "item", entry: current.entry, step, onCommand, frame: true })
       : link.status === "connected" && queue ? h(ui.EmptyState, { glyph: "decisions", title: order.length ? "Choose a decision" : "Nothing to decide", frame: "none" }) : null;
@@ -4580,8 +4712,10 @@ function reviewsPart(ctx, bridge) {
       setEntry(next?.kind === "review" ? next : null);
       if (next?.kind === "queue") setFilter(next.businessId ?? null);
     }, [target]);
-    const step = useStepping(entry, setEntry);
+    useView();
+    const step = useStepping(entry, setEntry, filter);
     const { link, queue, error, retry } = useQueue();
+    const work = useWorked(filter, link.status === "connected");
     let body;
     if (entry) body = h(ReviewItem, { entry, step, onBack: () => setEntry(null), onCommand });
     else {
@@ -4589,8 +4723,10 @@ function reviewsPart(ctx, bridge) {
       if (link.status !== "connected") list = h(NotConnected, { link });
       else if (error && !queue) list = h(ui.Failure, { message: plain(error.message, 300), retry, retryLabel: "Try again" });
       else if (!queue) list = h(ui.Skeleton, { layout: "list" });
-      else list = h(QueueList, { queue, onOpen: setEntry, filter, onFilter: setFilter });
-      body = h(ui.Subview, { header: h(ui.PanelHeader, { title: queue?.total ? `${queue.total} waiting` : "Reviews",
+      else list = h(QueueList, { queue: work.queue ?? queue, onOpen: setEntry, filter, onFilter: setFilter, goal: work.goal, goals: work.choices, onGoal: (goal) => chooseGoal(filter, goal) });
+      // The whole queue's total, else the server's total for what is shown.
+      const waiting = work.exact ? work.queue?.total : work.order.length;
+      body = h(ui.Subview, { header: h(ui.PanelHeader, { title: waiting ? `${waiting} waiting` : "Reviews",
         actions: [h(ui.IconButton, { key: "refresh", label: "Refresh", glyph: "refresh", large: true, onClick: () => bridge.queue.refresh() })] }) }, h(ui.PanelBody, null, list));
     }
     surface = { next: step.next, previous: step.previous };
@@ -4806,7 +4942,7 @@ function reviewsSlot(ctx, bridge) {
   };
 }
 // ---- end reviews ----
-export { reviewByline, reviewQueueOf, reviewLocator, reviewLink, reviewOrder, reviewGroups, reviewState, reviewData, wordDiff, reviewsPart, reviewsSlot, REVIEW_UNDO_MS };
+export { reviewByline, reviewQueueOf, reviewGoalChoices, reviewGoalNow, reviewShown, REVIEW_ALL_GOALS, REVIEW_NO_GOAL, reviewLocator, reviewLink, reviewOrder, reviewGroups, reviewState, reviewData, wordDiff, reviewsPart, reviewsSlot, REVIEW_UNDO_MS };
 
 /** buzz-acp's own conversation levers, by the names the machine lists them
  * under (`controls` in its models reply: the bounds or values of each, and

@@ -395,6 +395,16 @@ MCP connection or the agent tools.
   **Approve N**. Each is still its own decision with its own token and receipt;
   a partial failure shows per item. Ask for changes and Reject stay one at a
   time.
+- **Goal filter.** When reviews in the queue serve goals (the goals of the job
+  that made each one), a Goal menu narrows the list to one goal, or to those
+  serving none: "All goals", each goal with its count of waiting reviews, and
+  "No goal". The queue is capped, so Black 4 filters and counts:
+  `review_queue` with `goal`, and its `goals` and `noGoal` counts. Next and
+  previous, the keys, bulk approve and the list's counts follow what it shows;
+  the dock badge keeps the whole queue's count. The choice is kept per
+  business for the session and falls back to All goals when that goal's last
+  review is decided. When Black 4 counts no goals (or is older), the menu is
+  not drawn.
 
 A link is a locator and grants nothing; the server checks every read. Only this
 plugin's Reviews code calls `decide_review_item`, only after a person's click

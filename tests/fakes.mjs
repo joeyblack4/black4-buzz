@@ -230,7 +230,9 @@ export async function until(ready, { timeoutMs = 2000, what = "the condition" } 
  * ("stale_review", "decision_exists", "decision_token_used", …). Use as
  * fakeMcp's `answer`, or call `handle(name, args)` directly. Fictional
  * businesses only. */
-export function fakeReviews({ decide = ["ok"], cardClient = true, needsBusiness = false } = {}) {
+/** `goals`: the goals each item serves, by key (opt in: an older queue has none). The queue then answers
+ * as Platform Control's does: `goal` filters it, and top-level goals and noGoal count every waiting review. */
+export function fakeReviews({ decide = ["ok"], cardClient = true, needsBusiness = false, goals = null } = {}) {
   const item = (key, extra = {}) => ({
     key, version: 1, title: `Change ${key}`, workType: "storefront_content", action: "Update the bakery's menu page.", status: "awaiting_decision", decidable: true, decision: null,
     brief: { why: "The menu changed.", expectedResult: "Fewer wrong orders.", before: "Rye", after: "Sourdough" },
@@ -247,14 +249,24 @@ export function fakeReviews({ decide = ["ok"], cardClient = true, needsBusiness 
   let serial = 0;
   const data = (value, meta) => ({ result: { structuredContent: { data: value }, content: [{ type: "text", text: JSON.stringify({ data: value }) }], ...(meta ? { _meta: { "ai.black4/review-card": meta } } : {}) } });
   const refusal = (code, message = `fake ${code}`) => ({ result: { isError: true, structuredContent: { error: { code, message } }, content: [{ type: "text", text: JSON.stringify({ error: { code, message } }) }] } });
-  self.queue = () => ({ kind: "black4_review_queue", audience: "staff", total: self.review.items.filter((entry) => entry.decidable).length, listed: 2, truncated: false,
-    reviews: [{ businessId: self.review.businessId, businessName: self.review.businessName, assetId: self.review.assetId, title: self.review.title, version: 1,
-      items: self.review.items.filter((entry) => entry.decidable).map((entry) => ({ key: entry.key, version: entry.version, title: entry.title, action: entry.action, workType: entry.workType, brief: "The menu changed.", age: "2h" })) }],
-    blocked: [], stalled: [] });
+  self.queue = (args = {}) => {
+    const of = (entry) => goals?.[entry.key] ?? [];
+    const serves = (entry) => !args.goal || (args.goal === "none" ? !of(entry).length : of(entry).some((goal) => goal.path === args.goal));
+    const decidable = self.review.items.filter((entry) => entry.decidable);
+    const waiting = decidable.filter((entry) => !goals || serves(entry));
+    const counts = new Map();
+    for (const entry of goals ? decidable : []) for (const goal of of(entry)) counts.set(goal.path, { ...goal, reviews: (counts.get(goal.path)?.reviews ?? 0) + 1 });
+    return { kind: "black4_review_queue", audience: "staff", total: waiting.length, listed: 2, truncated: false, ...(goals && args.goal ? { goal: args.goal } : {}),
+      reviews: waiting.length ? [{ businessId: self.review.businessId, businessName: self.review.businessName, assetId: self.review.assetId, title: self.review.title, version: 1,
+        items: waiting.map((entry) => ({ key: entry.key, version: entry.version, title: entry.title, action: entry.action, workType: entry.workType, brief: "The menu changed.", age: "2h",
+          ...(goals ? { goals: of(entry) } : {}) })) }] : [],
+      ...(goals ? { goals: [...counts.values()], noGoal: decidable.filter((entry) => !of(entry).length).length } : {}),
+      blocked: [], stalled: [] };
+  };
   self.handle = (name, args = {}) => {
     self.calls.push({ name, args });
     // The queue's pictures stay out of what a model reads: only in _meta, by assetId.
-    if (name === "review_queue") return data(self.queue(), { captures: { [self.review.assetId]: { desktop: { url: "https://content.example.test/v/grant-queue/_captures/menu-1440.jpg", expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString(), contentType: "image/jpeg" } } } });
+    if (name === "review_queue") return data(self.queue(args), { captures: { [self.review.assetId]: { desktop: { url: "https://content.example.test/v/grant-queue/_captures/menu-1440.jpg", expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString(), contentType: "image/jpeg" } } } });
     if (name === "open_review") {
       if (!args.businessId && needsBusiness) return { error: { code: -32602, message: "MCP error -32602: businessId is required" } };
       if (args.assetId !== self.review.assetId || (args.businessId && args.businessId !== self.review.businessId)) return refusal("review_not_found", "No review was found.");

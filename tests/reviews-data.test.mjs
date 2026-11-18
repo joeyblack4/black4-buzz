@@ -5,7 +5,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { freshPlugin, settle } from "./fakes.mjs";
 
-const { reviewData, reviewLocator, reviewLink, reviewOrder, reviewGroups, reviewState, wordDiff, REVIEW_UNDO_MS } = await freshPlugin();
+const { reviewData, reviewLocator, reviewLink, reviewOrder, reviewGroups, reviewState, wordDiff, REVIEW_UNDO_MS,
+  reviewGoalChoices, reviewGoalNow, reviewShown, REVIEW_ALL_GOALS, REVIEW_NO_GOAL } = await freshPlugin();
 
 const token = (n) => `b4rd_${String(n).padEnd(43, "x")}`;
 const tool = (data, meta) => ({ structuredContent: { data }, content: [{ type: "text", text: JSON.stringify({ data }) }], ...(meta ? { _meta: { "ai.black4/review-card": meta } } : {}) });
@@ -280,4 +281,68 @@ test("the queue's captures come from _meta by assetId, onto the review they pict
   await store.readQueue();
   const entry = reviewOrder(store.queue).find((candidate) => candidate.assetId === "rv_bakery");
   assert.deepEqual(entry.capture, { desktop: link });
+});
+
+// ---- the Goal filter ---------------------------------------------------------------
+// The queue is capped, so the server filters by goal and counts: the plugin draws
+// its menu from the answer's top-level goals and noGoal, never from counting rows.
+const SPRING = { path: "goals/spring-orders.md", title: "More spring orders" };
+const LOYAL = { path: "goals/repeat-buyers.md", title: "More repeat buyers" };
+const review = (assetId, goals, keys = ["a"]) => ({ businessId: "business-crumb", businessName: "Crumb & Co", assetId, title: assetId, goals,
+  items: keys.map((key) => ({ key, version: 1, title: `${assetId} ${key}` })) });
+/** A fictional server's review_queue: filtered by goal, counted over everything waiting (here more than it lists). */
+function goalServer(args = {}) {
+  const all = [review("rv_menu", [SPRING], ["a", "b"]), review("rv_mail", [SPRING, LOYAL]), review("rv_hours", [])];
+  const shown = !args.goal ? all : all.filter((entry) => args.goal === "none" ? !entry.goals.length : entry.goals.some((goal) => goal.path === args.goal));
+  return { kind: "black4_review_queue", total: shown.reduce((n, entry) => n + entry.items.length, 0) + 40, listed: 4, truncated: true, blocked: [], stalled: [],
+    ...(args.goal ? { goal: args.goal } : {}), reviews: shown,
+    goals: [{ ...LOYAL, reviews: 7 }, { ...SPRING, reviews: 31 }, { path: "goals/empty.md", title: "Nothing waits", reviews: 0 }, { path: "", title: "no path", reviews: 2 }], noGoal: 12 };
+}
+
+test("goal choices are the server's counts for the whole queue, not a count of the rows it listed", () => {
+  assert.deepEqual(reviewGoalChoices(goalServer()), { goals: [
+    { path: LOYAL.path, title: LOYAL.title, count: 7 }, { path: SPRING.path, title: SPRING.title, count: 31 },
+  ], noGoal: 12 }, "a goal with nothing waiting, or without a path, is left out");
+  assert.deepEqual(reviewGoalChoices(goalServer({ goal: SPRING.path })).goals.map((goal) => goal.count), [7, 31], "they ignore the goal asked for");
+});
+
+test("an older server, or a queue where no review serves a goal: no filter at all, whatever was chosen", () => {
+  for (const queue of [{ kind: "black4_review_queue", reviews: [review("rv_menu", undefined)] }, { ...goalServer(), goals: [], noGoal: 3 }, null]) {
+    const choices = reviewGoalChoices(queue);
+    assert.deepEqual(choices.goals, [], "nothing to offer, so the menu is not drawn");
+    for (const chosen of [SPRING.path, REVIEW_NO_GOAL, undefined]) assert.equal(reviewGoalNow(choices, chosen), REVIEW_ALL_GOALS);
+  }
+  const choices = reviewGoalChoices(goalServer());
+  assert.equal(reviewGoalNow(choices, LOYAL.path), LOYAL.path);
+  assert.equal(reviewGoalNow(choices, REVIEW_NO_GOAL), REVIEW_NO_GOAL);
+  assert.equal(reviewGoalNow(choices, "goals/decided-away.md"), REVIEW_ALL_GOALS, "its last review was decided: back to all goals");
+  assert.equal(reviewGoalNow({ ...choices, noGoal: 0 }, REVIEW_NO_GOAL), REVIEW_ALL_GOALS);
+});
+
+test("a goal is asked of the server; its answer is kept beside the whole queue, follows the poll, and loses decided items", async () => {
+  const { store, calls } = data({ review_queue: (args) => tool(goalServer(args)) });
+  await store.readQueue();
+  assert.equal(store.queue.total, 44, "the whole queue: what the badge counts");
+  await store.readScoped({ goal: SPRING.path });
+  assert.deepEqual(calls.filter((call) => call.name === "review_queue").map((call) => call.args), [{}, { goal: SPRING.path }]);
+  const spring = store.scopedQueue({ goal: SPRING.path });
+  assert.equal(spring.goal, SPRING.path);
+  assert.deepEqual(reviewShown(spring).map((entry) => entry.id), ["business-crumb/rv_menu/a", "business-crumb/rv_menu/b", "business-crumb/rv_mail/a"]);
+  assert.equal(store.queue.total, 44, "the whole queue is not narrowed");
+  await store.readScoped({ businessId: "business-crumb", goal: REVIEW_NO_GOAL });
+  assert.deepEqual(calls.at(-1).args, { businessId: "business-crumb", goal: "none" });
+  assert.equal(store.scopedQueue({ goal: LOYAL.path }), null, "not asked for: not read");
+  // The badge's poll brings the narrower answers along.
+  store.noteQueue(goalServer());
+  await settle();
+  assert.deepEqual(calls.slice(-2).map((call) => call.args), [{ goal: SPRING.path }, { businessId: "business-crumb", goal: "none" }]);
+  store.reset();
+  assert.equal(store.scopedQueue({ goal: SPRING.path }), null, "a new connection forgets them");
+});
+
+test("reviewShown narrows a loaded queue by business and by each review's own goals", () => {
+  const ids = (entries) => entries.map((entry) => `${entry.assetId}:${entry.key}`).join(" ");
+  assert.equal(ids(reviewShown(goalServer(), { goal: LOYAL.path })), "rv_mail:a");
+  assert.equal(ids(reviewShown(goalServer(), { goal: REVIEW_NO_GOAL })), "rv_hours:a");
+  assert.equal(ids(reviewShown(goalServer(), { businessId: "business-surf" })), "");
 });

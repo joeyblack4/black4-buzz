@@ -93,8 +93,11 @@ const ALL_TOOLS = [
   { name: "list_reviews", core: false },
 ].map(({ name, core }) => ({ name, core, description: name, inputSchema: { type: "object" } }));
 
-/** Start the fake. `linked` is the set of owner pubkeys Black 4 knows. */
-export async function startFakeMcp({ linked = new Set() } = {}) {
+/** Start the fake. `linked` is the set of owner pubkeys Black 4 knows.
+ * `audience`, when given, is what get_buzz_audience answers (a function of
+ * the verified { agent, owner }, or a value); without it the fake has no
+ * such tool, like a server from before it. */
+export async function startFakeMcp({ linked = new Set(), audience } = {}) {
   const seen = new Set();
   const requests = [];
   const server = createServer(async (req, res) => {
@@ -116,13 +119,18 @@ export async function startFakeMcp({ linked = new Set() } = {}) {
       case "initialize":
         return reply({ protocolVersion: msg.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "fake-black4", version: "0" } });
       case "tools/list":
-        return reply({ tools: ALL_TOOLS.filter((t) => !core || t.core).map(({ core: _, ...t }) => t) });
+        return reply({ tools: [...ALL_TOOLS, ...(audience ? [{ name: "get_buzz_audience", core: false, description: "audience", inputSchema: { type: "object" } }] : [])]
+          .filter((t) => !core || t.core).map(({ core: _, ...t }) => t) });
       case "tools/call": {
         const { name, arguments: args = {} } = msg.params;
         if (name === "whoami") return reply({ content: [{ type: "text", text: JSON.stringify(verdict) }] });
         if (name === "echo") return reply({ content: [{ type: "text", text: JSON.stringify(args) }] });
         if (name === "slow") { setTimeout(() => reply({ content: [{ type: "text", text: "done" }] }), args.ms ?? 100); return; }
         if (name === "boom") return json(500, { error: "kaboom" });
+        if (name === "get_buzz_audience" && audience) {
+          const value = typeof audience === "function" ? audience(verdict) : audience;
+          return reply(value?.isError ? value : { content: [{ type: "text", text: JSON.stringify(value) }] });
+        }
         if (name === "stream") {
           res.writeHead(200, { "content-type": "text/event-stream" });
           res.write(`event: message\ndata: ${JSON.stringify({ jsonrpc: "2.0", method: "notifications/progress", params: { progressToken: 1, progress: 1 } })}\n\n`);
@@ -130,7 +138,8 @@ export async function startFakeMcp({ linked = new Set() } = {}) {
           setTimeout(() => res.end(`data: ${JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text: "streamed" }] } })}\n\n`), 20);
           return;
         }
-        return json(200, { jsonrpc: "2.0", id: msg.id, error: { code: -32602, message: "unknown tool" } });
+        // What Platform Control answers for a tool it does not have (or does not offer this caller).
+        return json(200, { jsonrpc: "2.0", id: msg.id, error: { code: -32602, message: `Tool ${name} not found` } });
       }
       default:
         return json(200, { jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "method not found" } });

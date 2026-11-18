@@ -349,6 +349,13 @@ class Base(unittest.TestCase):
     def sign_in(self):
         self.a.save_claude_token(FAKE_TOKEN, None)
 
+    def wait_env(self, d):
+        for _ in range(30):
+            if (d / "work" / "env.json").exists(): break
+            time.sleep(0.1)
+        time.sleep(0.1)
+        return json.loads((d / "work" / "env.json").read_text())
+
     def wait_running(self, d, seconds=15):
         """A sign-in's helper restarts the agents after login.finish has replied."""
         for _ in range(int(seconds * 10)):
@@ -1957,15 +1964,17 @@ class CompactAt(DeviceBase):
 
     def test_whom_it_answers_is_a_setting_too_applied_at_its_restart(self):
         agent = self.make_agent("claude")
-        self.assertEqual(self.req(op="settings.set", pubkey=agent.name, respondTo="everyone")["error"], "respondTo is anyone or owner-only")
+        self.assertEqual(self.req(op="settings.set", pubkey=agent.name, respondTo="everyone")["error"], "respondTo is staff, business, owner-only or anyone")
         self.assertEqual(self.req(op="settings.set", pubkey=agent.name, allow=["nope"])["error"], "allow is a list of public keys (64 hex characters each)")
         self.assertEqual(self.req(op="settings.set", pubkey=agent.name, allow="f" * 64)["error"], "allow is a list of public keys (64 hex characters each)")
+        # anyone is an explicit choice here, and its gate is buzz-acp's anyone; allow is kept but never used.
         done = self.req(op="settings.set", pubkey=agent.name, respondTo="anyone", allow=["f" * 64, "e" * 64, "f" * 64])
         self.assertEqual((done["respondTo"], done["allow"]), ("anyone", ["f" * 64, "e" * 64]))
         env = json.loads((agent / "work" / "env.json").read_text())
-        self.assertEqual((env["BUZZ_ACP_RESPOND_TO"], env["BUZZ_ACP_RESPOND_TO_ALLOWLIST"]), ("anyone", "f" * 64 + "," + "e" * 64), "applied at the restart")
+        self.assertEqual(env["BUZZ_ACP_RESPOND_TO"], "anyone", "applied at the restart")
+        self.assertNotIn("BUZZ_ACP_RESPOND_TO_ALLOWLIST", env, "no key outside an audience list")
         status = self.req(op="status", pubkey=agent.name)
-        self.assertEqual((status["respondTo"], status["allow"]), ("anyone", ["f" * 64, "e" * 64]))
+        self.assertEqual((status["respondTo"], status["audience"]["gate"]), ("anyone", "anyone"))
         self.req(op="settings.set", pubkey=agent.name, respondTo="owner-only", allow=[])
         env = json.loads((agent / "work" / "env.json").read_text())
         self.assertEqual(env["BUZZ_ACP_RESPOND_TO"], "owner-only")
@@ -2684,3 +2693,303 @@ class ModelLevers(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------- whom an agent answers
+
+STAFF = ["1" * 64, "2" * 64]
+CUSTOMER_A, CUSTOMER_B = "a1" * 32, "b2" * 32
+FAKE_CONNECTOR = f"""#!{PY}
+# What `mcp/black4 --call get_buzz_audience` prints: audience-reply.json in the
+# test home, or an unreachable Black 4. Each call is noted with its tool and owner.
+import json, os, sys
+home = os.environ["HOME"]
+with open(os.path.join(home, "audience-calls.txt"), "a") as f:
+    f.write(" ".join(sys.argv[1:]) + " " + json.loads(os.environ["BUZZ_AUTH_TAG"])[1][:8] + " " + str(bool(os.environ.get("BUZZ_PRIVATE_KEY"))) + "\\n")
+path = os.path.join(home, ("whoami" if sys.argv[2] == "whoami" else "audience") + "-reply.json")
+print(open(path).read().strip() if os.path.exists(path) else json.dumps({{"ok": False, "kind": "unreachable", "detail": "offline"}}))
+"""
+
+
+def platform_answer(*customers):
+    keys = [{"pubkey": k, "email": f"staff{i}@example.com", "kind": "staff"} for i, k in enumerate(STAFF)]
+    keys += [{"pubkey": k, "email": "someone@example.com", "kind": "customer", "businessId": b} for k, b in customers]
+    return {"ok": True, "result": {"content": [{"type": "text", "text": json.dumps({"keys": keys, "asOf": "2026-11-17T20:00:00Z"})}]}}
+
+
+class Audience(Base):
+    def setUp(self):
+        super().setUp()
+        self.sign_in()
+        self.a.BLACK4_MCP.parent.mkdir(parents=True)
+        write_exe(self.a.BLACK4_MCP, FAKE_CONNECTOR)
+
+    def answer(self, value):
+        (self.home / "audience-reply.json").write_text(json.dumps(value))
+
+    def calls(self):
+        p = self.home / "audience-calls.txt"
+        return p.read_text().splitlines() if p.exists() else []
+
+    def started(self, d):
+        (d / "work" / "env.json").unlink(missing_ok=True)
+        self.assertTrue(self.req(op="start", pubkey=d.name)["ok"])
+        return self.wait_env(d)
+
+    def test_new_agents_answer_staff_and_an_old_default_of_anyone_is_staff_too(self):
+        plain = self.make_agent(activate=False)
+        self.assertEqual(self.a.read_settings(plain)["respondTo"], "staff")
+        old = self.req(op="provision", name="Old form", community="wss://relay.example.com", config={"respondTo": "anyone"})
+        self.assertEqual(self.a.read_settings(self.a.AGENTS / old["pubkey"])["respondTo"], "staff", "an older plugin's default")
+        self.assertEqual(self.req(op="provision", name="B", community="wss://relay.example.com", config={"respondTo": "business"})["error"],
+                         "an agent that answers a business needs that business's id (businessId)")
+        self.assertIn("customer-facing", self.req(op="provision", name="B", community="wss://relay.example.com",
+                                                  config={"respondTo": "business", "businessId": "biz_a"})["error"], "a full-access agent never answers a business")
+        staff_agent = self.make_agent()
+        self.assertIn("customer-facing", self.req(op="settings.set", pubkey=staff_agent.name, respondTo="business", businessId="biz_a")["error"])
+        self.assertEqual(self.a.respond_to({}), "owner-only", "an agent saved before there was a choice")
+
+    def test_staff_agent_runs_the_allow_list_platform_control_gives_it(self):
+        self.answer(platform_answer((CUSTOMER_A, "biz_a")))
+        d = self.make_agent()
+        env = self.started(d)
+        self.assertEqual(env["BUZZ_ACP_RESPOND_TO"], "allowlist")
+        self.assertEqual(env["BUZZ_ACP_RESPOND_TO_ALLOWLIST"].split(","), sorted(STAFF), "staff only: no customer")
+        self.assertEqual(self.calls(), ["--call get_buzz_audience aaaaaaaa True"], "asked once, signed as the agent")
+        state = json.loads((d / "audience.json").read_text())
+        self.assertNotIn("someone@example.com", json.dumps(state), "no emails kept")
+        self.assertEqual(stat.S_IMODE((d / "audience.json").stat().st_mode), 0o600)
+        row = {r["pubkey"]: r for r in self.req(op="list")["agents"]}[d.name]
+        self.assertEqual({k: row["audience"][k] for k in ("respondTo", "gate", "keys", "source", "asOf")},
+                         {"respondTo": "staff", "gate": "allowlist", "keys": 2, "source": "platform", "asOf": "2026-11-17T20:00:00Z"})
+        self.started(d)
+        self.assertEqual(len(self.calls()), 1, "a start right after an answer does not ask again")
+
+    def test_business_agent_answers_staff_and_its_own_business_only(self):
+        self.answer(platform_answer((CUSTOMER_A, "biz_a"), (CUSTOMER_B, "biz_b")))
+        self.a.RUNNER_FILE.write_text(json.dumps({"profile": "platform"}))
+        made = self.req(op="provision", name="AM", community="wss://relay.example.com",
+                        config={"access": "platform", "respondTo": "business", "businessId": "biz_b", "pays": "subscription"})
+        d = self.a.AGENTS / made["pubkey"]
+        s = self.a.read_settings(d); s["auth"] = ["auth", "a" * 64, "", "b" * 128]; self.a.write_settings(d, s)
+        (self.home / "whoami-reply.json").write_text(json.dumps(whoami_answer("customer", ["biz_a"])))  # seated there
+        self.assertTrue(self.req(op="settings.set", pubkey=d.name, respondTo="business", businessId="biz_a")["ok"])
+        env = self.wait_env(d)
+        self.assertEqual(env["BUZZ_ACP_RESPOND_TO_ALLOWLIST"].split(","), sorted(STAFF + [CUSTOMER_A]), "not the other business's people")
+        self.assertEqual(self.req(op="status", pubkey=d.name)["audience"]["businessId"], "biz_a")
+        self.assertEqual(self.req(op="settings.set", pubkey=d.name, respondTo="business", businessId="bad id")["error"],
+                         "an agent that answers a business needs that business's id (businessId)")
+
+    def test_until_platform_control_has_the_tool_the_machine_staff_list_stands_in(self):
+        self.answer({"ok": False, "kind": "missing", "detail": "Black 4 has no get_buzz_audience tool for this agent."})
+        self.a.STAFF_FILE.write_text(json.dumps({"staff": [{"name": "Pat", "pubkey": STAFF[0]}, {"name": "bad", "pubkey": "nope"}]}))
+        d = self.make_agent()
+        env = self.started(d)
+        self.assertEqual((env["BUZZ_ACP_RESPOND_TO"], env["BUZZ_ACP_RESPOND_TO_ALLOWLIST"]), ("allowlist", STAFF[0]))
+        self.assertEqual(self.req(op="status", pubkey=d.name)["audience"]["source"], "machine")
+
+    def test_no_list_ever_starts_owner_only_and_a_failed_refresh_keeps_the_last_good_one(self):
+        d = self.make_agent()
+        env = self.started(d)  # Black 4 unreachable, nothing kept: closed
+        self.assertEqual(env["BUZZ_ACP_RESPOND_TO"], "owner-only")
+        self.assertNotIn("BUZZ_ACP_RESPOND_TO_ALLOWLIST", env)
+        self.assertEqual(self.req(op="status", pubkey=d.name)["audience"]["lastError"], "offline")
+        self.answer({"ok": False, "kind": "missing"})  # and no staff.json on this machine: still closed
+        self.a.refresh_audience(d, restart=False)
+        self.assertEqual(self.a.audience_launch(self.a.read_settings(d), self.a.audience_state(d))["respondTo"], "owner-only")
+        self.answer(platform_answer())
+        self.a.refresh_audience(d, restart=False)
+        self.answer({"ok": False, "kind": "refused", "detail": "not linked"})
+        state = self.a.refresh_audience(d, restart=False)
+        self.assertEqual(self.a.audience_keys(self.a.read_settings(d), state["entries"]), sorted(STAFF), "the last good list stands")
+        self.assertEqual(state["error"], "not linked")
+        (self.home / "audience-reply.json").write_text("not json")
+        self.assertEqual(self.a.ask_audience(d, self.a.read_settings(d))[0], "failed")
+
+    def test_a_changed_list_restarts_a_running_agent_after_its_turn_and_the_same_list_does_not(self):
+        self.answer(platform_answer())
+        d = self.make_agent()
+        self.started(d)
+        applied = []
+        self.a.defer_apply = lambda agent: applied.append(agent.name)
+        self.a.refresh_audience(d)
+        self.assertEqual(applied, [], "same keys: nothing to do")
+        self.answer(platform_answer())
+        STAFF.append("3" * 64)
+        self.addCleanup(STAFF.pop)
+        self.answer(platform_answer())
+        (self.home / "turn.txt").write_text("")  # mid-turn: after it
+        self.assertTrue(self.req(op="start", pubkey=d.name)["ok"])
+        for _ in range(50):
+            if self.a.turns_in_flight(d): break
+            time.sleep(0.1)
+        self.assertEqual(self.a.turns_in_flight(d), 1)
+        STAFF.append("4" * 64)
+        self.addCleanup(STAFF.pop)
+        self.answer(platform_answer())
+        self.a.refresh_audience(d)
+        self.assertEqual(applied, [d.name])
+        (self.home / "turn.txt").unlink()
+        (self.home / "finish.txt").write_text("")
+
+    def test_an_idle_agent_restarts_on_a_changed_list_at_once(self):
+        self.answer(platform_answer())
+        d = self.make_agent()
+        self.started(d)
+        before = self.a.running(d)
+        self.a.defer_apply = lambda agent: self.fail("an idle agent does not wait for a turn")
+        STAFF.append("5" * 64)
+        self.addCleanup(STAFF.pop)
+        self.answer(platform_answer())
+        (d / "work" / "env.json").unlink()
+        self.a.refresh_audience(d)
+        env = self.wait_env(d)
+        self.assertIn("5" * 64, env["BUZZ_ACP_RESPOND_TO_ALLOWLIST"])
+        self.assertNotEqual(self.a.running(d), before, "restarted")
+
+    def test_a_kept_platform_list_outranks_the_machine_staff_list(self):
+        self.a.STAFF_FILE.write_text(json.dumps({"staff": [{"name": "Pat", "pubkey": "9" * 64}]}))
+        self.answer(platform_answer())
+        d = self.make_agent()
+        self.started(d)
+        self.answer({"ok": False, "kind": "missing", "detail": "Tool get_buzz_audience not found"})
+        state = self.a.refresh_audience(d, restart=False)
+        self.assertEqual((state["source"], self.a.audience_keys(self.a.read_settings(d), state["entries"])), ("platform", sorted(STAFF)))
+
+    def test_the_supervisor_asks_again_about_every_ten_minutes_out_of_band(self):
+        self.answer(platform_answer())
+        d = self.make_agent()
+        self.started(d)
+        spawned = []
+        self.a.spawn_audience = lambda agent: spawned.append(agent.name)
+        now = time.time()
+        self.a.supervise_pass(now)
+        self.assertEqual(spawned, [], "just asked")
+        self.a.supervise_pass(now + self.a.AUDIENCE_EVERY + 1)
+        self.a.supervise_pass(now + self.a.AUDIENCE_EVERY + 2)
+        self.assertEqual(spawned, [d.name], "once, not every pass")
+        (d / "audience.json").unlink()
+        self.assertTrue(self.a.audience_due(d, now), "none yet: asked every minute")
+
+    def test_an_agent_cannot_change_whom_agents_answer(self):
+        d = self.make_agent()
+        self.a.CALLER = None
+        self.a.inside_any_agent = lambda: True
+        for change in ({"respondTo": "anyone"}, {"businessId": "biz_a"}, {"allow": ["f" * 64]}):
+            self.assertEqual(self.req(op="settings.set", pubkey=d.name, **change)["error"],
+                             "An agent cannot change whom an agent answers. A person changes it in the agent's Settings in Buzz.")
+        self.assertTrue(self.req(op="settings.set", pubkey=d.name, model="")["ok"], "its other settings stay its own to change")
+
+    def test_list_command_prints_each_agents_audience(self):
+        self.answer(platform_answer())
+        d = self.make_agent()
+        self.started(d)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out): self.a.print_list()
+        self.assertIn(f"{d.name[:8]}  Test agent: staff (allow-list of 2 from platform); Claude Code, running", out.getvalue())
+
+
+# ---------------------------------------------------------------- the customer-facing profile
+
+def whoami_answer(kind, businesses):
+    return {"ok": True, "result": {"content": [{"type": "text", "text": json.dumps({"data": {"kind": kind, "email": "agent@example.com", "businesses": businesses}})}]}}
+
+
+class Platform(Base):
+    def setUp(self):
+        super().setUp()
+        self.sign_in()
+        self.a.BLACK4_MCP.parent.mkdir(parents=True)
+        write_exe(self.a.BLACK4_MCP, FAKE_CONNECTOR)
+        (self.home / "audience-reply.json").write_text(json.dumps(platform_answer((CUSTOMER_A, "biz_a"))))
+        self.seat("customer", ["biz_a"])
+
+    def seat(self, kind, businesses):
+        (self.home / "whoami-reply.json").write_text(json.dumps(whoami_answer(kind, businesses)))
+
+    def test_a_platform_agent_starts_only_when_black4_says_it_is_seated_in_its_business(self):
+        self.a.RUNNER_FILE.write_text(json.dumps({"profile": "platform"}))
+        d = self.platform_agent()
+        for kind, businesses in (("staff", "all"), ("customer", ["biz_a", "biz_b"]), ("customer", ["biz_b"])):
+            self.seat(kind, businesses)
+            r = self.req(op="start", pubkey=d.name)
+            self.assertIn("not seated in biz_a", r["error"], (kind, businesses))
+            self.assertFalse(self.a.running(d))
+        (self.home / "whoami-reply.json").unlink()
+        self.assertIn("could not confirm this agent's seat (offline)", self.req(op="start", pubkey=d.name)["error"], "unreachable: closed")
+        self.seat("customer", ["biz_a"])
+        self.assertTrue(self.req(op="start", pubkey=d.name)["ok"])
+
+    def platform_agent(self):
+        r = self.req(op="provision", name="Account manager", community="wss://relay.example.com",
+                     config={"access": "platform", "respondTo": "business", "businessId": "biz_a", "pays": "subscription"})
+        self.assertTrue(r.get("ok"), r)
+        d = self.a.AGENTS / r["pubkey"]
+        s = self.a.read_settings(d)
+        s["auth"] = ["auth", "a" * 64, "", "b" * 128]
+        self.a.write_settings(d, s)
+        return d
+
+    def test_only_the_customer_facing_runner_makes_platform_agents_and_only_those(self):
+        config = {"access": "platform", "respondTo": "business", "businessId": "biz_a"}
+        self.assertIn("no customer-facing runner", self.req(op="provision", name="X", community="wss://r.example.com", config=config)["error"])
+        self.a.RUNNER_FILE.write_text(json.dumps({"profile": "platform"}))
+        self.assertIn("customer-facing agents only", self.req(op="provision", name="X", community="wss://r.example.com", config={})["error"])
+        self.assertIn("runs Claude Code", self.req(op="provision", name="X", community="wss://r.example.com", config={**config, "harness": "qwen"})["error"])
+        self.assertIn("answers one business", self.req(op="provision", name="X", community="wss://r.example.com", config={**config, "respondTo": "staff"})["error"])
+        self.assertIn("full or platform", self.req(op="provision", name="X", community="wss://r.example.com", config={**config, "access": "root"})["error"])
+
+    def test_a_platform_agent_has_the_black4_mcp_and_webfetch_and_nothing_else(self):
+        self.a.RUNNER_FILE.write_text(json.dumps({"profile": "platform"}))
+        d = self.platform_agent()
+        self.assertTrue(self.req(op="start", pubkey=d.name)["ok"])
+        env = self.wait_env(d)
+        self.assertEqual(env["BUZZ_ACP_PERMISSION_MODE"], "default", "never bypassPermissions")
+        self.assertEqual(env["CLAUDE_CONFIG_DIR"], str(d / "claude"), "its own Claude home, not its creator's")
+        self.assertEqual(env["BUZZ_ACP_RESPOND_TO_ALLOWLIST"].split(","), sorted(STAFF + [CUSTOMER_A]))
+        self.assertEqual(env["BUZZ_ACP_MCP_COMMAND"], str(self.a.BLACK4_MCP))
+        settings = json.loads((d / "claude" / "settings.json").read_text())
+        self.assertEqual(settings["permissions"]["allow"], ["mcp__black4", "WebFetch", "ToolSearch"])
+        self.assertEqual(settings["permissions"]["defaultMode"], "default")
+        self.assertEqual(settings["permissions"]["disableBypassPermissionsMode"], "disable")
+        for tool in ("Bash", "Read", "Write", "Edit", "Glob", "Grep", "Task", "Agent", "Workflow", "WebSearch"): self.assertIn(tool, settings["permissions"]["deny"])
+        gate = settings["hooks"]["PreToolUse"][0]
+        self.assertEqual(gate["matcher"], "*")
+        self.assertTrue(gate["hooks"][0]["command"].endswith(" tool-gate"))
+        self.assertEqual(self.req(op="settings.set", pubkey=d.name, respondTo="staff")["error"], "A customer-facing agent answers one business.")
+        self.assertIn("subscription", self.req(op="settings.set", pubkey=d.name, pays="key")["error"])
+        self.assertEqual(self.req(op="status", pubkey=d.name)["access"], "platform")
+
+    def test_the_tool_gate_lets_through_only_the_black4_tools_and_webfetch(self):
+        def gate(payload):
+            return subprocess.run([PY, str(AGENTCTL), "tool-gate"], input=payload, capture_output=True, text=True)
+        for allowed in ("mcp__black4__whoami", "WebFetch", "ToolSearch"):
+            self.assertEqual(gate(json.dumps({"tool_name": allowed})).returncode, 0, allowed)
+        for refused in ("Bash", "Read", "mcp__black4__", "mcp__acp__Read", "mcp__other__x", "Task"):
+            done = gate(json.dumps({"tool_name": refused, "tool_input": {"command": "cat key"}}))
+            self.assertEqual(done.returncode, 2, refused)
+            self.assertIn("not available to this agent", done.stderr)
+        self.assertEqual(gate("not json").returncode, 2, "what it cannot read, it refuses")
+        self.assertEqual(gate("").returncode, 2)
+
+    def test_the_main_runner_forwards_platform_agents_with_their_creators_signin(self):
+        other = tempfile.TemporaryDirectory()
+        self.addCleanup(other.cleanup)
+        home2 = Path(other.name)
+        (home2 / "workforce").mkdir()
+        (home2 / "workforce" / "runner.json").write_text(json.dumps({"profile": "platform"}))
+        self.a.RUNNER_FILE.write_text(json.dumps({"platform": {"user": None, "agentctl": str(AGENTCTL), "home": str(home2)}}))
+        made = self.req(op="provision", name="Account manager", community="wss://relay.example.com",
+                        config={"access": "platform", "respondTo": "business", "businessId": "biz_a", "pays": "subscription"})
+        self.assertTrue(made.get("ok"), made)
+        self.assertFalse((self.a.AGENTS / made["pubkey"]).exists(), "not on the main runner")
+        there = home2 / "workforce" / "agents" / made["pubkey"]
+        self.assertEqual(json.loads((there / "agent.json").read_text())["createdBy"], OWNER)
+        self.assertEqual((home2 / "workforce" / "accounts" / OWNER / "secrets" / "claude").read_text().strip(), FAKE_TOKEN,
+                         "the creator's sign-in went with it")
+        rows = {r["pubkey"]: r for r in self.req(op="list")["agents"]}
+        self.assertEqual(rows[made["pubkey"]]["runner"], "platform")
+        self.assertEqual(self.req(op="status", pubkey=made["pubkey"])["access"], "platform", "a request about it goes there")
+        self.req(op="logout", harness="claude")
+        self.assertFalse((home2 / "workforce" / "accounts" / OWNER / "secrets" / "claude").exists(), "a sign-out there too")
+        self.assertIn("unknown op", self.req(op="signin.sync")["error"], "only the customer-facing runner takes one")

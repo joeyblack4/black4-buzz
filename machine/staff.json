@@ -1,0 +1,9 @@
+{
+  "$comment": "Black 4 staff's Buzz keys (people, not agents): whom a staff agent answers while Platform Control has no get_buzz_audience (machine/agentctl, 'whom an agent answers'). Once Platform Control answers, its list is used instead. Public keys only. Checked with `buzz users get --pubkey` on 2026-11-17.",
+  "staff": [
+    { "name": "Joey", "pubkey": "8f61c527478c72a180a4cf368cadc10af0686ccb568ee18d33f46c2fea9ffa8f" },
+    { "name": "Chris", "pubkey": "9febe8c92a6ca0351d617bf1871e0c1f156b09d6f7bf174401e4ce7c8ea11097" },
+    { "name": "Rocha", "pubkey": "e4126ebc518a3df25e29cd1fc095d931574f44814b27ff0485438a055776ab6d" },
+    { "name": "Annabelle", "pubkey": "d0f6286ce4a1447f9fd923c6a63a1a84393e9cad0915f58d52e12ce736517905" }
+  ]
+}

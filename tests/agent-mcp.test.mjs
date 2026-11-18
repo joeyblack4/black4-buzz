@@ -309,3 +309,54 @@ test("never writes the key, the attestation signature or the header", async (t) 
   assert.ok(!out.includes("Nostr "));
   assert.match(c.stderr(), /forwarding to \S*\/mcp for owner/);
 });
+
+// ---------------------------------------------------------------- one call (agentctl)
+
+/** `black4-agent-mcp --call <tool>` with `env`: its one JSON line. */
+function callOnce(env, tool = "get_buzz_audience", stdin = "") {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [CONNECTOR, "--call", tool], { env: { PATH: process.env.PATH, ...env }, stdio: ["pipe", "pipe", "pipe"] });
+    let out = "";
+    child.stdout.on("data", (d) => { out += d; });
+    child.on("error", reject);
+    child.on("close", () => { try { resolve(JSON.parse(out.trim().split("\n").pop())); } catch (error) { reject(new Error(`not one JSON line: ${out}`)); } });
+    child.stdin.end(stdin);
+  });
+}
+
+test("--call: asks the tool signed as the agent and prints its result", async (t) => {
+  const id = identity();
+  const audience = ({ agent, owner }) => ({ keys: [{ pubkey: "f".repeat(64), email: "pat@example.com", kind: "staff" }], asOf: "2026-11-17T00:00:00Z", agent, owner });
+  const fake = await startFakeMcp({ linked: new Set([id.owner]), audience });
+  t.after(fake.close);
+  const answer = await callOnce(envFor(id, fake.url));
+  assert.equal(answer.ok, true);
+  const data = JSON.parse(answer.result.content[0].text);
+  assert.deepEqual([data.agent, data.owner, data.keys[0].kind], [id.agent, id.owner, "staff"], "signed as the agent, attesting its owner");
+  assert.ok(fake.requests.every((r) => !r.verdict.error), "every request verified");
+  assert.deepEqual(fake.requests.map((r) => JSON.parse(r.body).method), ["initialize", "notifications/initialized", "tools/list", "tools/call"]);
+});
+
+test("--call: a server without the tool answers missing, through call_tool too", async (t) => {
+  const id = identity();
+  const fake = await startFakeMcp({ linked: new Set([id.owner]) }); // lists call_tool, has no get_buzz_audience
+  t.after(fake.close);
+  assert.deepEqual(await callOnce(envFor(id, fake.url)), { ok: false, kind: "missing", detail: "Black 4 has no get_buzz_audience tool for this agent." });
+  // The same agent again within the same second: fresh ids, so no replay.
+  const trimmed = await callOnce(envFor(id, fake.url, { BLACK4_MCP_TOOLS: "core" }));
+  assert.equal(trimmed.kind, "missing");
+});
+
+test("--call: refusals, an unlinked owner and an unreachable server are failures, not missing", async (t) => {
+  const id = identity();
+  const refusing = await startFakeMcp({ linked: new Set([id.owner]), audience: { isError: true, content: [{ type: "text", text: "not seated" }] } });
+  t.after(refusing.close);
+  assert.deepEqual(await callOnce(envFor(id, refusing.url)), { ok: false, kind: "refused", detail: "not seated" });
+  const unlinked = await startFakeMcp({ audience: { keys: [] } });
+  t.after(unlinked.close);
+  assert.equal((await callOnce(envFor(id, unlinked.url))).kind, "auth");
+  assert.equal((await callOnce(envFor(id, "http://127.0.0.1:9/mcp", { BLACK4_MCP_TIMEOUT_MS: "2000" }))).kind, "unreachable");
+  assert.equal((await callOnce({ BLACK4_MCP_URL: unlinked.url })).kind, "setup");
+  assert.equal((await callOnce(envFor(id, unlinked.url), "Bad Name")).kind, "setup");
+  assert.equal((await callOnce(envFor(id, unlinked.url), "get_buzz_audience", "[1]")).kind, "setup");
+});

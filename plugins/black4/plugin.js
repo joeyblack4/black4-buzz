@@ -1039,6 +1039,8 @@ export function apply(ctx) {
       signIn: { use: () => useBridgeState().status, Prompt: SignInPrompt },
       approval: { use: () => { const current = useBridgeState(); return { needed: !!current.renewal, epoch: current.approvals }; }, Prompt: ApprovalPrompt },
     },
+    // The businesses an agent can answer (its Audience), as the signed-in person sees them.
+    businesses: () => callBlack4("list_businesses", {}),
     // One 60-second pass per door request, minted as the signed-in person.
     // ownerKey: this Buzz identity's key, which becomes the pass's owner, so an
     // activate matches the attestation this Buzz signs.
@@ -1837,10 +1839,43 @@ export const HARNESSES = [
   { id: "qwen", label: "Qwen Code" },
   { id: "goose", label: "Goose" },
 ];
-const ANSWERS = [
-  { id: "anyone", label: "Everyone in the community" },
-  { id: "owner-only", label: "Only me" },
-];
+/** Whom an agent answers (its Audience), as one choice: "staff", the
+ * Black 4 staff (every new agent's); "business:<businessId>", staff and that
+ * customer business's people (an account manager); and in Settings only,
+ * "owner-only" and "anyone". The machine asks Platform Control for each
+ * audience's keys (machine/agentctl, "whom an agent answers"). */
+export const audienceValue = (respondTo, businessId) =>
+  (respondTo === "business" && businessId ? `business:${businessId}` : typeof respondTo === "string" ? respondTo : "");
+
+/** What the machine takes for an Audience choice: { respondTo, businessId,
+ * access }. An agent that answers a business is customer-facing: access
+ * "platform", with only the Black 4 tools; every other agent is full access. */
+export function audienceSettings(value) {
+  const text = String(value ?? "");
+  return text.startsWith("business:")
+    ? { respondTo: "business", businessId: text.slice("business:".length), access: "platform" }
+    : { respondTo: text || "staff", businessId: "", access: "full" };
+}
+
+/** The businesses in a `list_businesses` answer, as { id, name }. */
+export function businessesOf(answer) {
+  const rows = answer?.data?.businesses ?? answer?.businesses;
+  return Array.isArray(rows)
+    ? rows.filter((row) => typeof row?.businessId === "string" && row.status !== "retired")
+      .map((row) => ({ id: row.businessId, name: typeof row.name === "string" && row.name.trim() ? row.name.trim() : row.businessId }))
+    : [];
+}
+
+/** The Audience pill's options: Staff, then one per business; Settings adds
+ * Only me and Everyone. A current choice the list lacks still shows. */
+export function audienceOptions(businesses, { settings = false, current } = {}) {
+  const options = [{ id: "staff", label: "Staff" }, ...(businesses ?? []).map((row) => ({ id: `business:${row.id}`, label: row.name }))];
+  if (settings) options.push({ id: "owner-only", label: "Only me" }, { id: "anyone", label: "Everyone", detail: "Only for an agent that holds no business data" });
+  if (current && !options.some((option) => option.id === current)) {
+    options.push({ id: current, label: current.startsWith("business:") ? current.slice("business:".length) : current });
+  }
+  return options;
+}
 
 /** How an agent pays: "subscription" (the harness's subscription sign-in on
  * the machine) or "key" (an API key kept there). "" lets the machine settle it
@@ -1853,7 +1888,7 @@ export const PAYS = [
 const SIGN_IN_SITE = { qwen: "chat.qwen.ai" };
 
 export const hardwareDefaults = () => ({
-  machine: DEFAULT_MACHINE, harness: "claude", pays: "", model: "", effort: "", respondTo: "anyone", instructions: "", heartbeatPrompt: "",
+  machine: DEFAULT_MACHINE, harness: "claude", pays: "", model: "", effort: "", respondTo: "staff", businessId: "", access: "full", instructions: "", heartbeatPrompt: "",
 });
 
 /** The machine an id or a config names. Unknown or missing (an agent made
@@ -2293,7 +2328,7 @@ export function agentDirectory(ask) {
       askMachine(ask, machine, { op: "list" }, { timeoutMs: STATUS_TIMEOUT_MS })
         .then((reply) => {
           for (const row of reply.agents ?? []) {
-            if (row?.pubkey) known.set(row.pubkey, { machine: machine.id, harness: row.harness, respondTo: row.respondTo });
+            if (row?.pubkey) known.set(row.pubkey, { machine: machine.id, harness: row.harness, respondTo: audienceValue(row.respondTo, row.audience?.businessId) });
           }
         })
         .catch(() => {})))
@@ -2340,7 +2375,7 @@ export function hardwareProvider(ask, requestId = () => crypto.randomUUID(), dir
         op: "provision", name, community, requestId: pending.get(name),
         ...(picture ? { picture } : {}), config: settled,
       }, { signal });
-      directory.remember(reply.pubkey, { machine: settled.machine, harness: settled.harness, respondTo: settled.respondTo });
+      directory.remember(reply.pubkey, { machine: settled.machine, harness: settled.harness, respondTo: audienceValue(settled.respondTo, settled.businessId) });
       // Conversation levers chosen in the form: provision does not take them,
       // so they follow as settings.set, which only writes before activation.
       const controls = Object.fromEntries(Object.entries(settled.controls && typeof settled.controls === "object" ? settled.controls : {})
@@ -3299,13 +3334,21 @@ export const controlValue = (row, schema, id) => (id === "" ? null : Array.isArr
  * `sign` mints a door pass (the MCP's `sign_hardware_request`);
  * `access` is the Agent access link (`use()` reads it in a component, `link()`
  * asks for it), so the form can offer the one step it needs. */
-export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
+export function applyHardware(ctx, { report = () => {}, access, sign, businesses } = {}) {
   const React = ctx.react;
   const h = React.createElement;
   const ask = sign && typeof ctx.host?.request === "function"
     ? doorTransport({ request: (input) => ctx.host.request(input), sign })
     : undefined;
   const statuses = statusReader(ask);
+  // The businesses an agent can answer, read once per Buzz session from Black 4.
+  let businessList = null;
+  let businessRead = null;
+  const readBusinesses = () => {
+    if (businessList || typeof businesses !== "function") return Promise.resolve(businessList ?? []);
+    businessRead ??= businesses().then((rows) => (businessList = businessesOf(rows)), () => []).finally(() => { businessRead = null; });
+    return businessRead;
+  };
   const modelLists = modelsReader(ask);
   const directory = agentDirectory(ask);
   const remote = hardwareProvider(ask, undefined, directory);
@@ -3362,6 +3405,16 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
     return status;
   };
   const useStatus = (machineId) => useReader(statuses, machineId);
+  const useBusinesses = () => {
+    const { reachable } = useBlack4();
+    const [rows, setRows] = React.useState(() => businessList ?? []);
+    React.useEffect(() => {
+      let live = true;
+      if (reachable) void readBusinesses().then((next) => { if (live) setRows(next); });
+      return () => { live = false; };
+    }, [reachable]);
+    return rows;
+  };
   const useModels = (machineId) => useReader(modelLists, machineId);
   /** The conversation levers the machine lists (its models reply), or null on an older machine. */
   const controlSchema = (models) => (models?.kind === "ok" && models.controls && typeof models.controls === "object" ? models.controls : null);
@@ -3492,6 +3545,7 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
     const models = useModels(machine.id);
     const options = harnessOptions(status);
     const offered = options.length ? options : HARNESSES;
+    const businessRows = useBusinesses();
     const pays = value.pays || defaultPays(status, value.harness);
     const state = ask ? signInState(status, value.harness, pays) : { kind: "unreachable" };
 
@@ -3512,6 +3566,7 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
     if (needsApproval && ApprovalPrompt) return h(Stack, null, h(Group, null, harnessControl), h(ApprovalPrompt, null));
 
     const noHarness = status?.kind === "ok" && !options.length;
+    const audience = audienceValue(value.respondTo === "anyone" ? "staff" : value.respondTo, value.businessId) || "staff";
     const schema = controlSchema(models);
     const controls = value.controls && typeof value.controls === "object" ? value.controls : {};
     const minutes = Number(value.heartbeat) > 0 ? Number(value.heartbeat) : 0;
@@ -3526,7 +3581,8 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
         takesKey(status, value.harness) && h(Row, { title: "Pays with", trailing: h(Pill, { label: "Pays with", value: pays, options: PAYS, disabled,
           onChange: (next) => onChange({ ...value, pays: next, model: "", effort: "" }) }) }),
         h(ModelRows, { models, harness: value.harness, value: { ...value, pays }, disabled, onPick: (pick) => onChange({ ...value, ...pick }) }),
-        h(Row, { title: "Answers", trailing: h(Pill, { label: "Answers", value: value.respondTo, options: ANSWERS, disabled, onChange: (respondTo) => onChange({ ...value, respondTo }) }) }),
+        h(Row, { title: "Audience", description: value.access === "platform" ? "Customer-facing: only the Black 4 tools." : "Who it answers in the community.", trailing: h(Pill, { label: "Audience", value: audience,
+          options: audienceOptions(businessRows, { current: audience }), disabled, onChange: (next) => onChange({ ...value, ...audienceSettings(next) }) }) }),
         ask && h(SignInRows, { machineId: machine.id, harness: value.harness, status, disabled, pays })),
       !ask && (SignInPrompt ? h(SignInPrompt, null) : ErrorLine("Sign in to Black 4 in Settings → Black 4 to reach Black 4 hardware.")),
       // The heartbeat is set with the agent (activate takes it, and what it does): empty is Black 4's standard.
@@ -3589,9 +3645,11 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
         if (signal.aborted) return;
         if (status.status === "fulfilled") {
           const reply = status.value;
-          directory.remember(pubkey, { machine: machine.id, harness: reply.harness, respondTo: reply.respondTo });
+          const audience = audienceValue(reply.respondTo, reply.audience?.businessId);
+          directory.remember(pubkey, { machine: machine.id, harness: reply.harness, respondTo: audience });
           const pays = reply.pays === "key" ? "key" : "subscription";
-          setRun({ loading: false, running: !!reply.running, activated: !!reply.activated, harness: reply.harness, respondTo: reply.respondTo, pays,
+          setRun({ loading: false, running: !!reply.running, activated: !!reply.activated, harness: reply.harness, respondTo: audience, pays,
+            access: reply.access === "platform" ? "platform" : "full",
             createdBy: typeof reply.createdBy === "string" ? reply.createdBy : null, yours: reply.yours !== false,
             controls: reply.controls && typeof reply.controls === "object" ? reply.controls : null,
             ...("model" in reply ? { model: { pays, model: reply.modelChosen ? reply.model : "", effort: reply.effortChosen ? reply.effort : "",
@@ -3619,6 +3677,7 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
     const harness = run.harness ?? seen?.harness;
     const respondTo = run.respondTo ?? seen?.respondTo;
     const status = useStatus(machine.id);
+    const businessRows = useBusinesses();
     const models = useModels(machine.id);
 
     // A pick goes to the machine at once (Buzz's selects apply on change);
@@ -3720,8 +3779,13 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
             run.loading ? Status("Checking…") : Value(run.running ? "Running" : run.activated === false ? "Not set up" : "Stopped"),
             h(Button, { size: "sm", shape, loading: restarting, disabled: run.loading, onClick: () => void restart() }, "Restart")) }),
           // Whom it answers: a change restarts it (the machine applies it at the start).
-          h(Row, { title: "Answers", trailing: respondTo
-            ? h(Pill, { label: "Answers", shape, value: respondTo, options: ANSWERS, disabled: busy, onChange: (next) => void pick({ controls: { respondTo: next } }, "machine") })
+          // A customer-facing agent answers one business, so it is offered businesses only.
+          h(Row, { title: "Audience", description: "Who it answers in the community.", trailing: respondTo
+            ? h(Pill, { label: "Audience", shape, value: respondTo, disabled: busy,
+              // A full-access agent never answers a business; a customer-facing one answers only one.
+              options: run.access === "platform" ? audienceOptions(businessRows, { current: respondTo }).filter((option) => option.id.startsWith("business:"))
+                : audienceOptions([], { settings: true, current: respondTo }),
+              onChange: (next) => { const { respondTo: mode, businessId } = audienceSettings(next); void pick({ controls: mode === "business" ? { respondTo: mode, businessId } : { respondTo: mode } }, "machine"); } })
             : Value(run.loading ? "…" : "Unknown") })),
         picked("machine")),
       runtime && h(Stack, null,
@@ -3830,7 +3894,7 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
         askMachine(ask, machine, { op: "list" }, { timeoutMs: STATUS_TIMEOUT_MS })
           .then((reply) => {
             const agents = (reply.agents ?? []).filter((row) => row?.pubkey);
-            for (const row of agents) directory.remember(row.pubkey, { machine: machine.id, harness: row.harness, respondTo: row.respondTo });
+            for (const row of agents) directory.remember(row.pubkey, { machine: machine.id, harness: row.harness, respondTo: audienceValue(row.respondTo, row.audience?.businessId) });
             return { machine, agents };
           }, (error) => ({ machine, agents: [], error: String(error?.message ?? error) }))))
         .then((machines) => { if (live) setRows({ loading: false, machines }); });
@@ -3903,7 +3967,7 @@ export function applyHardware(ctx, { report = () => {}, access, sign } = {}) {
  * made it, so the type lives in its own child scope (`ctx.plugin`), disposed to
  * withdraw it. Whatever the registration throws goes to `report`, never up to
  * the plugin: the MCP tools, Reviews and Agent access do not depend on it. */
-export function hardwareSlot(ctx, { report, access, sign, register = applyHardware }) {
+export function hardwareSlot(ctx, { report, access, sign, businesses, register = applyHardware }) {
   let scope = null;
   let failed = false;
   const fail = (error) => { failed = true; report(error); };
@@ -3915,14 +3979,14 @@ export function hardwareSlot(ctx, { report, access, sign, register = applyHardwa
         if (typeof ctx.plugin !== "function") {
           // An older host: the type stays until the plugin stops.
           scope = { dispose() {} };
-          register(ctx, { report, access, sign });
+          register(ctx, { report, access, sign, businesses });
           return;
         }
         scope = ctx.plugin({
           name: "black4-hardware",
           inject: ["react", "host", "agents", "pages"],
           apply: (child) => {
-            try { register(child, { report, access, sign }); } catch (error) { fail(error); }
+            try { register(child, { report, access, sign, businesses }); } catch (error) { fail(error); }
           },
         });
       } catch (error) {

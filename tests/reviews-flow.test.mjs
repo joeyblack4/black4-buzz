@@ -222,3 +222,36 @@ test("the open review shows its whole question, stake and action; the bar keeps 
   assert.doesNotMatch(a.label(plainBar), /Crumb/);
   assert.ok(a.label(plainBar).includes("Accept these notes."));
 });
+
+test("an open decision says what approving writes to and which of the review's decisions it is", async (t) => {
+  const a = await app(t);
+  const [hero, price] = a.reviews.review.items;
+  Object.assign(hero, { change: { method: "PUT", endpoint: "/admin/api/2025-01/pages/7.json", connector: "shopify", connection: "crumb-shop", lines: [], more: 0 } });
+  Object.assign(price, { workType: "document_feedback" });
+  let view = await a.shown();
+  assert.match(a.label(view), /Updates Shopify/, "the system, from the pinned request");
+  assert.match(a.label(view), /Decision 1 of 2 in Winter menu/, "one review, two decisions: this is the first");
+  view = await a.shown("https://app.black4.ai/r/rv_bakery?v=1&item=price");
+  assert.match(a.label(view), /Writes nothing/, "feedback on a document writes nothing");
+  assert.match(a.label(view), /Decision 2 of 2 in Winter menu/);
+});
+
+test("the Customer menu: every business the server counts, with its count; choosing one asks the server and opens its first decision", async (t) => {
+  const businesses = [
+    { businessId: "business-crumb", businessName: "Crumb & Co", decisions: 47 },
+    { businessId: "business-dune", businessName: "Dune Kites", decisions: 9 },
+  ];
+  const a = await app(t, { reviews: { businesses } });
+  a.page(); await settle(); await settle();
+  const view = a.page();
+  const picker = a.find(view, (node) => node.props?.role === "combobox" && node.props["aria-label"] === "Customer");
+  assert.ok(picker, "the Customer menu, beside Goal");
+  const options = [];
+  (function walk(node) { if (!node || typeof node !== "object") return; if (node.props?.role === "option") options.push(node); for (const child of node.children ?? []) walk(child); })(view);
+  assert.deepEqual(options.map((option) => a.label(option)).filter((words) => /customers|Crumb|Dune/.test(words)), ["All customers · 2", "Crumb & Co · 47", "Dune Kites · 9"],
+    "the server's counts, including a business the capped list doesn't hold");
+  options.find((option) => option.props["data-value"] === "business-crumb").props.onClick();
+  a.page(); await settle(); await settle();
+  assert.deepEqual(a.reviews.calls.filter((call) => call.name === "review_queue").map((call) => call.args).at(-1), { businessId: "business-crumb" }, "the server filters by business");
+  assert.match(a.label(a.page()), /Change the hero\?/, "its first decision opens");
+});

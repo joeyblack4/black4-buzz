@@ -596,9 +596,12 @@ function buzzUi(React, { nativeSelect = false } = {}) {
         ? h("span", null, h(Button, { variant: "link", size: "text", onClick: onOrigin }, h(Fragment, null, originGlyph && ICON[originGlyph] ? icon(ICON[originGlyph], 12, { style: { marginInlineEnd: "var(--space-1)", verticalAlign: "-1px" } }) : null, origin)))
         : h("span", { className: "flex items-center gap-1 text-caption text-subtle" }, originGlyph && ICON[originGlyph] ? icon(ICON[originGlyph], 12) : null, origin)) : null);
   /** The work, big: a frame that takes the panel's height (Diffs' card,
-   * `.preview`), its toggle (Now / After) floating at the top. */
-  const Canvas = ({ label, toolbar, children }) =>
-    h("figure", { "aria-label": label, style: { ...card, margin: 0, position: "relative", display: "flex", flexDirection: "column", flex: "1 1 auto", minHeight: "min(34rem, 64vh)" } },
+   * `.preview`), its toggle (Now / After) floating at the top. `fit`: it holds
+   * an embedded browser, which Buzz draws over the window, not inside the
+   * scrolling body: it takes only the room the body has, so it never runs
+   * under the decision bar below. */
+  const Canvas = ({ label, toolbar, fit = false, children }) =>
+    h("figure", { "aria-label": label, style: { ...card, margin: 0, position: "relative", display: "flex", flexDirection: "column", flex: "1 1 auto", minHeight: fit ? "min(14rem, 32vh)" : "min(34rem, 64vh)" } },
       toolbar ? h("div", { style: { ...cardHeader, justifyContent: "space-between" } }, ...each(toolbar)) : null,
       h("div", { style: { flex: 1, minHeight: 0, display: "flex", alignItems: "stretch", justifyContent: "center", overflow: "auto", background: "var(--surface-inset)" } }, ...each(children)));
   /** Layers in the canvas, each filling it, the last on top (a live page over its capture). */

@@ -2953,9 +2953,12 @@ function buzzUi(React, { nativeSelect = false } = {}) {
         ? h("span", null, h(Button, { variant: "link", size: "text", onClick: onOrigin }, h(Fragment, null, originGlyph && ICON[originGlyph] ? icon(ICON[originGlyph], 12, { style: { marginInlineEnd: "var(--space-1)", verticalAlign: "-1px" } }) : null, origin)))
         : h("span", { className: "flex items-center gap-1 text-caption text-subtle" }, originGlyph && ICON[originGlyph] ? icon(ICON[originGlyph], 12) : null, origin)) : null);
   /** The work, big: a frame that takes the panel's height (Diffs' card,
-   * `.preview`), its toggle (Now / After) floating at the top. */
-  const Canvas = ({ label, toolbar, children }) =>
-    h("figure", { "aria-label": label, style: { ...card, margin: 0, position: "relative", display: "flex", flexDirection: "column", flex: "1 1 auto", minHeight: "min(34rem, 64vh)" } },
+   * `.preview`), its toggle (Now / After) floating at the top. `fit`: it holds
+   * an embedded browser, which Buzz draws over the window, not inside the
+   * scrolling body: it takes only the room the body has, so it never runs
+   * under the decision bar below. */
+  const Canvas = ({ label, toolbar, fit = false, children }) =>
+    h("figure", { "aria-label": label, style: { ...card, margin: 0, position: "relative", display: "flex", flexDirection: "column", flex: "1 1 auto", minHeight: fit ? "min(14rem, 32vh)" : "min(34rem, 64vh)" } },
       toolbar ? h("div", { style: { ...cardHeader, justifyContent: "space-between" } }, ...each(toolbar)) : null,
       h("div", { style: { flex: 1, minHeight: 0, display: "flex", alignItems: "stretch", justifyContent: "center", overflow: "auto", background: "var(--surface-inset)" } }, ...each(children)));
   /** Layers in the canvas, each filling it, the last on top (a live page over its capture). */
@@ -3570,6 +3573,88 @@ function reviewGroups(queue) {
   return [...groups.values()];
 }
 
+/** Every business with decisions waiting, with how many: `[{ businessId,
+ * businessName, count }]`. The queue lists at most 50 items, so counting what
+ * it lists shows too few and drops businesses: the server's own `businesses`
+ * counts come first. An older server sends none; then what is listed is
+ * counted, which is all there is. */
+function reviewBusinessCounts(queue) {
+  if (Array.isArray(queue?.businesses)) {
+    const out = [];
+    for (const business of queue.businesses) {
+      const businessId = typeof business?.businessId === "string" ? business.businessId : "";
+      const count = Number.isInteger(business?.decisions) && business.decisions > 0 ? business.decisions : 0;
+      if (!businessId || !count || out.some((known) => known.businessId === businessId) || out.length >= 200) continue;
+      out.push({ businessId, businessName: plain(business.businessName, 120) || businessId, count });
+    }
+    return out;
+  }
+  return reviewGroups(queue).map((group) => ({ businessId: group.businessId, businessName: group.businessName, count: group.items.length }));
+}
+
+/** A title that names no decision ("Review this document"): the review's own
+ * title says more. */
+const REVIEW_GENERIC_TITLE = /^(?:please\s+)?review\s+(?:this|the)\s+(?:document|report|draft|page|file|work|change)s?\.?$/i;
+/** What a decision is called: its question, else its title; a generic one
+ * gives way to the review's title. */
+function reviewHeadline({ question, title, reviewTitle } = {}) {
+  const own = String(question || title || "").trim();
+  return own && REVIEW_GENERIC_TITLE.test(own) && reviewTitle ? String(reviewTitle) : own || String(reviewTitle || "");
+}
+
+/** The system approving writes to, named only from the pinned request (never
+ * from the action sentence), as Platform Control's review screen names it:
+ * `{ name, state: "known" | "erased" | "report" }`, or null when nothing is
+ * pinned. `report`: a document's feedback, which writes nothing. */
+const REVIEW_PROVIDER_NAMES = Object.freeze({
+  "google-tag-manager": "Google Tag Manager", "google-ads": "Google Ads", "google-analytics": "Google Analytics", "search-console": "Google Search Console",
+  "google-workspace": "Google Workspace", "google-marketing": "Google Marketing", "google-calendar": "Google Calendar", "google-drive": "Google Drive",
+  "google-docs": "Google Docs", "google-sheets": "Google Sheets", "google-slides": "Google Slides", "microsoft-graph": "Microsoft 365",
+  "zoho-crm": "Zoho CRM", "zoho-campaigns": "Zoho Campaigns",
+  acumatica: "Acumatica", ahrefs: "Ahrefs", airtable: "Airtable", asana: "Asana", canva: "Canva", framer: "Framer",
+  github: "GitHub", gitlab: "GitLab", google: "Google", granola: "Granola", hubspot: "HubSpot", klaviyo: "Klaviyo", linear: "Linear",
+  meta: "Meta", microsoft: "Microsoft", notion: "Notion", prismic: "Prismic", salesforce: "Salesforce", shopify: "Shopify",
+  slack: "Slack", stripe: "Stripe", trello: "Trello", twitter: "X", x: "X", woocommerce: "WooCommerce", wordpress: "WordPress",
+  zoho: "Zoho", linkedin: "LinkedIn",
+});
+function reviewDestination(item) {
+  if (item?.workType === "document_feedback") return { name: "Writes nothing", state: "report" };
+  const change = item?.change;
+  if (!change || typeof change !== "object") return null;
+  if (change.erased) return { name: "Request erased · never runs", state: "erased" };
+  const normalize = (value) => String(value).toLowerCase().trim().replace(/[\s_]+/g, "-");
+  const recorded = String((change.connector === "treg" ? change.connection : change.connector) ?? "").trim();
+  if (!recorded) return null;
+  let key = normalize(recorded).replace(/^catalog-/, "");
+  const endpoint = String(change.endpoint ?? "");
+  if (change.connector === "treg") {
+    // Treg connection keys often start with a customer's name: the pinned path names the service.
+    const path = endpoint.toLowerCase().split("?")[0];
+    const family = path.match(/^\/([^/]+)(?:\/|$)/)?.[1];
+    if (/^\/tagmanager\/v2(?:\/|$)/.test(path)) key = "google-tag-manager";
+    else if (/^\/crm\/v3\/(?:objects|properties|associations|schemas)(?:\/|$)/.test(path)) key = "hubspot";
+    else if (/^\/admin\/api\//.test(path)) key = "shopify";
+    else if (/^\/services\/data\/v[\d.]+\//.test(path)) key = "salesforce";
+    else if (family && Object.hasOwn(REVIEW_PROVIDER_NAMES, family)) key = family;
+  }
+  if (/^google-ads(?:-|$)/.test(key)) key = "google-ads";
+  else if (/^(?:ga4|google-analytics)(?:-|$)/.test(key)) key = "google-analytics";
+  else if (/^google-search-console(?:-|$)/.test(key)) key = "search-console";
+  else if (/^google-tag-manager(?:-|$)/.test(key)) key = "google-tag-manager";
+  else if (key === "google-marketing") {
+    // A hostname in the pinned request, not the agent's words.
+    let host = "";
+    try { host = new URL(endpoint).hostname; } catch {}
+    if (host === "googleads.googleapis.com") key = "google-ads";
+    else if (["analyticsdata.googleapis.com", "analyticsadmin.googleapis.com"].includes(host)) key = "google-analytics";
+    else if (/^searchconsole\.googleapis\.com$/.test(host)) key = "search-console";
+    else if (host === "tagmanager.googleapis.com") key = "google-tag-manager";
+  }
+  const family = key.split("-")[0];
+  const name = REVIEW_PROVIDER_NAMES[key] ?? REVIEW_PROVIDER_NAMES[family] ?? plain(recorded, 60);
+  return { name: `Updates ${name}`, state: "known" };
+}
+
 /** Where a review came from, when the server says (staff only): the Buzz
  * thread and the job run that made it. Flat fields: `threadId`, and `job`
  * { jobId, jobName, runId, startedAt }. */
@@ -4156,6 +4241,8 @@ function reviewScreens(React, store, bridge) {
       return () => clearInterval(timer);
     }, [active]);
   };
+  /** The Customer menu's value for every business. */
+  const REVIEW_ALL_CUSTOMERS = "all";
   const capital = (text) => (text ? text.charAt(0).toUpperCase() + text.slice(1) : text);
   const STAKE_GLYPH = { money: "money", customers: "people", risk: "alert", none: null };
 
@@ -4216,7 +4303,7 @@ function reviewScreens(React, store, bridge) {
         items: [{ value: "before", label: "Now" }, { value: "after", label: "After" }] })] : null;
       if (shown === "before") return h(Canvas, { label: `The page now: ${item.title}`, toolbar }, h(CanvasImage, { src: before, alt: `${item.title}: now` }));
       // The live page over its capture: the capture shows until the page paints.
-      return h(Canvas, { label: `The work: ${item.title}`, toolbar },
+      return h(Canvas, { label: `The work: ${item.title}`, toolbar, fit: !!bridge.browser },
         bridge.browser
           ? h(ui.Layers, { key: link }, capture ? h(CanvasImage, { src: capture, alt: item.title }) : null,
               h(bridge.browser, { url: link, storage: "black4-review-work", label: `The work: ${item.title}` }))
@@ -4416,9 +4503,12 @@ function reviewScreens(React, store, bridge) {
       });
     }, [id, receipt?.state, review?.decideIn, compose, store.revision]);
 
+    // What approving writes to, from the pinned request: top right, beside the position.
+    const destination = item ? reviewDestination(item) : null;
     const header = (title) => h(PanelHeader, { title,
       navigation: onBack ? h(IconButton, { label: "Back to the queue", glyph: "back", large: true, onClick: onBack }) : null,
       actions: [
+        destination ? h(Chip, { key: "writes", label: destination.name, title: destination.state === "known" ? `Approving changes ${destination.name.replace(/^Updates /, "")}` : destination.name }) : null,
         step && step.position ? Caption(`${step.position} of ${step.total}`) : null,
         step ? h(IconButton, { key: "prev", label: "Previous decision (K)", glyph: "up", large: true, disabled: !step.previous, onClick: () => step.previous?.() }) : null,
         step ? h(IconButton, { key: "next", label: "Next decision (J)", glyph: "down", large: true, disabled: !step.next, onClick: () => step.next?.() }) : null,
@@ -4439,8 +4529,12 @@ function reviewScreens(React, store, bridge) {
     if (!review) return wrap("Reviews", h(Skeleton, { layout: "item" }), h(DecisionBar, { status: Caption("Loading…") }));
     if (!item) return wrap(review.businessName, Line("Nothing in this review is shown to you."));
     const card = item.card ?? {};
-    const body = h(ui.Article, { key: id, label: card.question || item.title },
-      h(Stack, { gap: 2 }, h(Byline, { review, item }), Question(card.question || item.title)),
+    const headline = reviewHeadline({ question: card.question, title: item.title, reviewTitle: review.title });
+    // One review can hold several decisions over one page of work: say which one this is.
+    const at = review.items.indexOf(item);
+    const among = review.items.length > 1 ? Caption(`Decision ${at + 1} of ${review.items.length}${review.title ? ` in ${review.title}` : ""}`) : null;
+    const body = h(ui.Article, { key: id, label: headline },
+      h(Stack, { gap: 2 }, h(Byline, { review, item }), among, Question(headline)),
       h(Work, { review, item }),
       h(Details, { review, item }));
     return wrap(review.businessName, body, h(Decide, { review, item, compose, setCompose, onReload: () => setRevision((n) => n + 1) }));
@@ -4450,7 +4544,7 @@ function reviewScreens(React, store, bridge) {
   /** A row's line: the question, else the title. */
   const questionOf = (entry) => {
     const cached = store.cachedReview(entry.businessId, entry.assetId)?.items?.find((item) => item.key === entry.key);
-    return { question: cached?.card?.question || entry.question || entry.title, stake: cached?.card?.stake?.text || entry.stake?.text || entry.brief || "" };
+    return { question: reviewHeadline({ question: cached?.card?.question || entry.question, title: entry.title, reviewTitle: entry.reviewTitle }), stake: cached?.card?.stake?.text || entry.stake?.text || entry.brief || "" };
   };
   const receiptWords = (receipt) => receipt ? reviewState(null, receipt).text + (receipt.state === "failed" ? " · didn't save" : receipt.state === "unknown" ? " · unconfirmed" : receipt.state === "conflict" ? " · changed" : "") : "";
 
@@ -4463,16 +4557,25 @@ function reviewScreens(React, store, bridge) {
     const attention = [...(queue.stalled ?? []).map((entry) => ({ ...entry, why: `Not started · ${entry.waitingOn ? `waiting on ${entry.waitingOn}` : "nobody has picked it up"}` })),
       ...(queue.blocked ?? []).map((entry) => ({ ...entry, why: entry.note ? `Blocked · ${entry.note}` : "Blocked" }))]
       .filter((entry) => (!filter || entry.businessId === filter) && (goal === REVIEW_ALL_GOALS || reviewServes({ goals: reviewGoalsOf(entry.goals) }, goal)));
-    const filterName = filter ? (reviewGroups(queue).find((group) => group.businessId === filter)?.businessName ?? attention[0]?.businessName ?? "this business") : "";
+    const filterName = filter ? (reviewBusinessCounts(store.queue).find((business) => business.businessId === filter)?.businessName
+      ?? reviewGroups(queue).find((group) => group.businessId === filter)?.businessName ?? attention[0]?.businessName ?? "this business") : "";
     // The Goal filter, only when some review here serves a goal.
     const goalPicker = goals?.goals?.length && onGoal ? h(ui.Pill, { key: "goal", label: "Goal", value: goal, onChange: onGoal, title: "Work the decisions behind one goal first",
       options: [{ id: REVIEW_ALL_GOALS, label: "All goals" },
         ...goals.goals.map((option) => ({ id: option.path, label: `${option.title} · ${option.count}` })),
         ...(goals.noGoal ? [{ id: REVIEW_NO_GOAL, label: `No goal · ${goals.noGoal}` }] : [])] }) : null;
     const goalName = goal === REVIEW_NO_GOAL ? "no goal" : goals?.goals?.find((option) => option.path === goal)?.title;
+    // The Customer menu: every business with decisions waiting, as the server
+    // counts them (the list itself is capped), and the one chosen even when
+    // its last decision has just gone.
+    const businesses = reviewBusinessCounts(store.queue);
+    const customerOptions = [{ id: REVIEW_ALL_CUSTOMERS, label: Number.isInteger(store.queue?.total) ? `All customers · ${store.queue.total}` : "All customers" },
+      ...businesses.map((business) => ({ id: business.businessId, label: `${business.businessName} · ${business.count}` })),
+      ...(filter && !businesses.some((business) => business.businessId === filter) ? [{ id: filter, label: `${filterName} · 0` }] : [])];
+    const customerPicker = onFilter && (businesses.length > 1 || filter) ? h(ui.Pill, { key: "customer", label: "Customer", value: filter ?? REVIEW_ALL_CUSTOMERS,
+      onChange: (value) => onFilter(value === REVIEW_ALL_CUSTOMERS ? null : value), title: "Work one customer's decisions", options: customerOptions }) : null;
     return h(Stack, { gap: 4 },
-      goalPicker || filter ? h(Actions, null, goalPicker,
-        filter ? Caption(`Only ${filterName}`) : null, filter ? h(Button, { key: "all", size: "sm", variant: "link", onClick: () => onFilter(null) }, "Show all") : null) : null,
+      customerPicker || goalPicker ? h(Actions, null, customerPicker, goalPicker) : null,
       attention.length ? h(ListGroup, { label: "Approved, not finished", count: attention.length },
         ...attention.map((entry) => h(SelectRow, { key: `a${entry.decisionId}`, title: entry.title, subtitle: entry.why, meta: entry.age, quiet: true,
           selected: selectedId === reviewItemId(entry.businessId, entry.assetId, entry.key),
@@ -4670,8 +4773,10 @@ function reviewsPart(ctx, bridge) {
     const work = useWorked(current.filter, link.status === "connected");
     const first = work.order[0];
     React.useEffect(() => {
-      if (!view.entry && first && !view.filter) setView({ entry: { businessId: first.businessId, assetId: first.assetId, itemKey: first.key } });
-    }, [first?.id]);
+      // Nothing open, or a customer chosen whose decisions aren't the one open.
+      const elsewhere = view.filter && view.entry && view.entry.businessId && view.entry.businessId !== view.filter;
+      if (first && (!view.entry || elsewhere)) setView({ entry: { businessId: first.businessId, assetId: first.assetId, itemKey: first.key } });
+    }, [first?.id, current.filter]);
     const step = useStepping(current.entry, setEntry, current.filter);
     surface = { next: step.next, previous: step.previous };
     React.useEffect(() => () => { surface = null; surfaceFocused = false; }, []);
@@ -4719,7 +4824,7 @@ function reviewsPart(ctx, bridge) {
     else if (error && !queue) list = h(ui.Failure, { message: plain(error.message, 300), retry, retryLabel: "Try again" });
     else if (!queue) list = h(ui.Skeleton, { layout: "list" });
     else list = h(QueueList, { queue: work.queue ?? queue, selectedId: current.entry ? order[reviewStep(order, current.entry).index]?.id : null, onOpen: setEntry,
-      picked: live, onPick: pick, notes, filter: current.filter, onFilter: (filter) => setView({ filter }), goal: work.goal, goals: work.choices, onGoal });
+      picked: live, onPick: pick, notes, filter: current.filter, onFilter: (filter) => { setPicked(new Set()); setView({ filter, entry: null }); }, goal: work.goal, goals: work.choices, onGoal });
     const detail = current.entry
       ? h(ReviewItem, { key: "item", entry: current.entry, step, onCommand, frame: true })
       : link.status === "connected" && queue ? h(ui.EmptyState, { glyph: "decisions", title: order.length ? "Choose a decision" : "Nothing to decide", frame: "none" }) : null;
@@ -4806,7 +4911,7 @@ function reviewsPart(ctx, bridge) {
     const item = review ? (review.items.find((candidate) => candidate.key === locator.itemKey) ?? review.items[0]) : null;
     const receipt = review && item ? store.receipt(reviewItemId(review.businessId, review.assetId, item.key)) : null;
     const state = item ? reviewState(item, receipt) : null;
-    const title = item ? (item.card?.question || item.title) : failed?.code === "elsewhere" ? "A Black 4 review" : failed ? "A Black 4 review" : "Loading the review…";
+    const title = item ? reviewHeadline({ question: item.card?.question, title: item.title, reviewTitle: review.title }) : failed?.code === "elsewhere" ? "A Black 4 review" : failed ? "A Black 4 review" : "Loading the review…";
     const { maker } = item ? reviewByline(review, item) : { maker: null };
     const profile = maker?.pubkey ? bridge.profile?.(maker.pubkey) : null;
     const kind = item ? store.pictureKind(review.businessId, review.assetId, item.key) : null;
@@ -4849,7 +4954,8 @@ function reviewsPart(ctx, bridge) {
   const rowsNow = () => {
     if (sidebarRevision !== store.revision) {
       sidebarRevision = store.revision;
-      const next = reviewGroups(store.queue).map((group) => ({ id: group.businessId, label: group.businessName, count: group.items.length }));
+      // The server's counts for every business, not what the capped list holds.
+      const next = reviewBusinessCounts(store.queue).map((business) => ({ id: business.businessId, label: business.businessName, count: business.count }));
       if (JSON.stringify(next) !== JSON.stringify(sidebarRows)) sidebarRows = next;
     }
     return sidebarRows;
@@ -4969,7 +5075,7 @@ function reviewsSlot(ctx, bridge) {
   };
 }
 // ---- end reviews ----
-export { reviewByline, reviewQueueOf, reviewGoalChoices, reviewGoalNow, reviewShown, REVIEW_ALL_GOALS, REVIEW_NO_GOAL, reviewLocator, reviewLink, reviewOrder, reviewGroups, reviewState, reviewData, wordDiff, reviewsPart, reviewsSlot, REVIEW_UNDO_MS };
+export { reviewByline, reviewQueueOf, reviewBusinessCounts, reviewHeadline, reviewDestination, reviewGoalChoices, reviewGoalNow, reviewShown, REVIEW_ALL_GOALS, REVIEW_NO_GOAL, reviewLocator, reviewLink, reviewOrder, reviewGroups, reviewState, reviewData, wordDiff, reviewsPart, reviewsSlot, REVIEW_UNDO_MS };
 
 /** buzz-acp's own conversation levers, by the names the machine lists them
  * under (`controls` in its models reply: the bounds or values of each, and

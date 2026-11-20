@@ -53,7 +53,7 @@ function reviewsPart(ctx, bridge) {
   const pluginId = ctx.pluginOwner?.id ?? "ai.black4";
   const pageTarget = (params) => ({ version: 1, kind: "page", pluginId, pageId: REVIEWS_PAGE, ...(params && Object.keys(params).length ? { route: { version: 1, params } } : {}) });
   const screens = reviewScreens(React, store, { use: bridge.use, SignInPrompt: bridge.SignInPrompt, browser: bridge.browser, openThread: bridge.openThread, profile: bridge.profile });
-  const { ReviewItem, QueueList, useStore, useConnection, NotConnected, approveTogether } = screens;
+  const { ReviewItem, QueueList, QueueFilters, useStore, useConnection, NotConnected, decideTogether } = screens;
   const disposers = [];
   const own = (dispose) => { if (typeof dispose === "function") disposers.push(dispose); else if (dispose?.dispose) disposers.push(() => dispose.dispose()); };
 
@@ -140,8 +140,10 @@ function reviewsPart(ctx, bridge) {
       setView({ filter: params.business ?? null, entry: params.asset ? { businessId: params.business, assetId: params.asset, itemKey: params.item } : view.entry });
     }, [pageNavigation?.entryId]);
     const [picked, setPicked] = React.useState(() => new Set());
-    // { ids, refused, preparing } for the last Approve N: its countdown and what it couldn't do.
+    // { ids, refused, preparing, verdict } for the last Approve N or Reject N: its countdown and what it couldn't do.
     const [bulk, setBulk] = React.useState(null);
+    // Reject N asks why first: one reason, sent with each.
+    const [bulkReject, setBulkReject] = React.useState(null); // null, or the reason typed so far
     const setEntry = (entry) => setView({ entry });
     // The first waiting item is open from the start: one less click per session.
     const work = useWorked(current.filter, link.status === "connected");
@@ -162,6 +164,7 @@ function reviewsPart(ctx, bridge) {
       const next = worked(current.filter).order[0];
       setView({ entry: next ? { businessId: next.businessId, assetId: next.assetId, itemKey: next.key } : null });
     };
+    const onFilter = (filter) => { setPicked(new Set()); setBulkReject(null); setView({ filter, entry: null }); };
     // Picks that left the queue (decided) drop out of the selection.
     const live = new Set([...picked].filter((id) => order.some((entry) => entry.id === id)));
     const pick = (id, value) => setPicked((now) => { const next = new Set(now); if (value) next.add(id); else next.delete(id); return next; });
@@ -172,40 +175,56 @@ function reviewsPart(ctx, bridge) {
       const timer = setInterval(() => tick((n) => n + 1), 250);
       return () => clearInterval(timer);
     }, [pending.length > 0]);
-    const approve = async () => {
+    const decideAll = async (verdict, feedback = "") => {
       const ids = new Set(live);
-      setBulk({ ids: [], refused: [], preparing: true });
-      const { proposed, refused } = await approveTogether(ids, order);
+      setBulk({ ids: [], refused: [], preparing: verdict, verdict });
+      const { proposed, refused } = await decideTogether(ids, order, verdict, feedback);
       setPicked(new Set());
-      setBulk({ ids: proposed, refused, preparing: false });
+      setBulkReject(null);
+      setBulk({ ids: proposed, refused, preparing: false, verdict });
     };
     const undoAll = () => { for (const receipt of pending) store.undo(receipt.id); };
-    const notes = new Map((bulk?.refused ?? []).map((id) => [id, "Can't be approved here: open it to see why"]));
-    let toolbar = null;
+    const words = bulk?.verdict === "rejected" ? { doing: "Rejecting", done: "rejected" } : { doing: "Approving", done: "approved" };
+    const notes = new Map((bulk?.refused ?? []).map((id) => [id, `Can't be ${words.done} here: open it to see why`]));
+    // Picked items take the one decision bar at the bottom, in place of the
+    // open item's own: one Approve on screen, never two.
+    let bulkBar = null;
     if (pending.length) {
-      toolbar = h(ui.Toolbar, { key: "bulk" }, ui.Status(`Approving ${pending.length} in ${Math.max(1, Math.ceil((Math.min(...pending.map((receipt) => receipt.deadline)) - Date.now()) / 1000))} s`),
-        h(ui.Button, { size: "sm", variant: "outline", onClick: undoAll }, "Undo"));
+      bulkBar = h(ui.DecisionBar, { status: ui.Status(`${words.doing} ${pending.length} in ${Math.max(1, Math.ceil((Math.min(...pending.map((receipt) => receipt.deadline)) - Date.now()) / 1000))} s`) },
+        h(ui.Button, { key: "undo", variant: "outline", autoFocus: true, onClick: undoAll }, "Undo"));
     } else if (bulk?.refused?.length && !live.size) {
-      toolbar = h(ui.Toolbar, { key: "bulk" }, ui.Line(`${bulk.refused.length} couldn't be approved here.`),
-        h(ui.Button, { size: "sm", variant: "ghost", onClick: () => setBulk(null) }, "Dismiss"));
+      bulkBar = h(ui.DecisionBar, { status: ui.Line(`${bulk.refused.length} couldn't be ${words.done} here.`) },
+        h(ui.Button, { key: "dismiss", variant: "ghost", onClick: () => setBulk(null) }, "Dismiss"));
+    } else if (live.size && bulkReject !== null) {
+      const send = () => { if (bulkReject.trim()) void decideAll("rejected", bulkReject); };
+      bulkBar = h(ui.DecisionBar, { stacked: true },
+        h(ui.TextField, { key: "why", label: live.size === 1 ? "Why reject it?" : `Why reject these ${live.size}?`, value: bulkReject, onChange: setBulkReject, rows: 3, maxLength: 8000, autoFocus: true,
+          onKeyDown: (event) => { if (event.key === "Escape") { event.stopPropagation(); setBulkReject(null); } else if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) send(); } }),
+        h(ui.Actions, { key: "actions" },
+          h(ui.Button, { key: "send", variant: "destructive", disabled: !bulkReject.trim(), loading: bulk?.preparing === "rejected", onClick: send }, `Reject ${live.size}`),
+          h(ui.Button, { key: "cancel", variant: "outline", onClick: () => setBulkReject(null) }, "Cancel")));
     } else if (live.size) {
-      toolbar = h(ui.Toolbar, { key: "bulk" }, ui.Strong(`${live.size} selected`),
-        h(ui.Button, { size: "sm", variant: "prominent", loading: !!bulk?.preparing, onClick: () => void approve() }, `Approve ${live.size}`),
-        h(ui.Button, { size: "sm", variant: "ghost", onClick: () => setPicked(new Set()) }, "Clear"));
+      bulkBar = h(ui.DecisionBar, { status: ui.Strong(`${live.size} selected`) },
+        h(ui.Button, { key: "approve", variant: "prominent", loading: bulk?.preparing === "approved", onClick: () => void decideAll("approved") }, `Approve ${live.size}`),
+        h(ui.Button, { key: "reject", variant: "outline", onClick: () => setBulkReject("") }, `Reject ${live.size}`),
+        h(ui.Button, { key: "clear", variant: "ghost", onClick: () => { setPicked(new Set()); setBulkReject(null); } }, "Clear"));
     }
     let list;
     if (link.status !== "connected") list = h(NotConnected, { link });
     else if (error && !queue) list = h(ui.Failure, { message: plain(error.message, 300), retry, retryLabel: "Try again" });
     else if (!queue) list = h(ui.Skeleton, { layout: "list" });
     else list = h(QueueList, { queue: work.queue ?? queue, selectedId: current.entry ? order[reviewStep(order, current.entry).index]?.id : null, onOpen: setEntry,
-      picked: live, onPick: pick, notes, filter: current.filter, onFilter: (filter) => { setPicked(new Set()); setView({ filter, entry: null }); }, goal: work.goal, goals: work.choices, onGoal });
+      picked: live, onPick: pick, notes, filter: current.filter, onFilter, goal: work.goal, goals: work.choices, onGoal, filters: false });
+    // The Customer and Goal menus stay above the list while it scrolls.
+    const listHeader = link.status === "connected" && queue
+      ? h(QueueFilters, { queue: work.queue ?? queue, filter: current.filter, onFilter, goal: work.goal, goals: work.choices, onGoal }) : null;
+    const empty = h(ui.EmptyState, { glyph: "decisions", title: order.length ? "Choose a decision" : "Nothing to decide", frame: "none" });
     const detail = current.entry
-      ? h(ReviewItem, { key: "item", entry: current.entry, step, onCommand, frame: true })
-      : link.status === "connected" && queue ? h(ui.EmptyState, { glyph: "decisions", title: order.length ? "Choose a decision" : "Nothing to decide", frame: "none" }) : null;
-    return h(ui.Page, { label: "Reviews", fill: true, header: h(ui.PanelHeader, { title: "Reviews", actions: [h(ui.IconButton, { key: "refresh", label: "Refresh", glyph: "refresh", large: true, onClick: () => bridge.queue.refresh() })] }),
+      ? h(ReviewItem, { key: "item", entry: current.entry, step, onCommand, frame: true, bar: bulkBar })
+      : link.status === "connected" && queue ? (bulkBar ? h(ui.Subview, { header: null, footer: bulkBar }, h(ui.PanelBody, null, empty)) : empty) : null;
+    return h(ui.Page, { label: "Reviews", fill: true, header: h(ui.PanelHeader, { title: "Reviews", glyph: "decisions", actions: [h(ui.IconButton, { key: "refresh", label: "Refresh", glyph: "refresh", large: true, onClick: () => bridge.queue.refresh() })] }),
       onFocus: focusIn, onBlur: focusOut },
-      toolbar,
-      h(ui.Split, { key: "split", label: "Decisions waiting", list, detail }));
+      h(ui.Split, { key: "split", label: "Decisions waiting", list, listHeader, detail }));
   }
 
   // ---- the side panel: one item, stepping through the queue -------------------

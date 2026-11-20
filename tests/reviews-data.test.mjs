@@ -6,7 +6,7 @@ import test from "node:test";
 import { freshPlugin, settle } from "./fakes.mjs";
 
 const { reviewData, reviewLocator, reviewLink, reviewOrder, reviewGroups, reviewState, wordDiff, REVIEW_UNDO_MS,
-  reviewGoalChoices, reviewGoalNow, reviewShown, REVIEW_ALL_GOALS, REVIEW_NO_GOAL, reviewBusinessCounts, reviewHeadline, reviewDestination } = await freshPlugin();
+  reviewGoalChoices, reviewGoalNow, reviewShown, REVIEW_ALL_GOALS, REVIEW_NO_GOAL, reviewBusinessCounts, reviewHeadline, reviewDestination, reviewScreens } = await freshPlugin();
 
 const token = (n) => `b4rd_${String(n).padEnd(43, "x")}`;
 const tool = (data, meta) => ({ structuredContent: { data }, content: [{ type: "text", text: JSON.stringify({ data }) }], ...(meta ? { _meta: { "ai.black4/review-card": meta } } : {}) });
@@ -387,7 +387,15 @@ test("a generic title gives way to the review's title; a real question is kept",
 
 test("what approving writes to is named from the pinned request only, as Platform Control names it", () => {
   const change = (connector, endpoint, connection) => ({ workType: "paid_media", change: { method: "POST", endpoint, connector, connection } });
-  assert.deepEqual(reviewDestination(change("google-marketing", "https://googleads.googleapis.com/v25/customers/1/campaigns:mutate", "connection-google-marketing-a")), { name: "Updates Google Ads", state: "known" });
+  const ads = reviewDestination(change("google-marketing", "https://googleads.googleapis.com/v25/customers/1/campaigns:mutate", "connection-google-marketing-a"));
+  assert.deepEqual({ name: ads.name, system: ads.system, state: ads.state }, { name: "Updates Google Ads", system: "Google Ads", state: "known" });
+  // Its mark is Platform Control's own Google Ads file, not Google's: the longest key wins.
+  const mark = (value) => Buffer.from(value.logo.split(",")[1], "base64").toString("utf8");
+  assert.match(ads.logo, /^data:image\/svg\+xml;base64,/);
+  assert.match(mark(ads), /#FBBC04/i, "Google Ads' yellow");
+  assert.notEqual(ads.logo, reviewDestination(change("google-drive", "/x")).logo, "Google Drive falls back to Google's mark");
+  assert.ok(reviewDestination(change("shopify", "/admin/api/2025-01/products.json")).logo, "Shopify's mark");
+  assert.equal(reviewDestination(change("odd-tool", "/x")).logo, null, "no mark for a system Platform Control has none for");
   assert.equal(reviewDestination(change("google-marketing", "https://searchconsole.googleapis.com/v1/sites")).name, "Updates Google Search Console");
   assert.equal(reviewDestination(change("shopify", "/admin/api/2025-01/products.json")).name, "Updates Shopify");
   assert.equal(reviewDestination(change("treg", "/admin/api/2025-01/products.json", "crumb-store")).name, "Updates Shopify", "Treg: the path names the service, not the connection's name");
@@ -396,4 +404,19 @@ test("what approving writes to is named from the pinned request only, as Platfor
   assert.deepEqual(reviewDestination({ workType: "paid_media", change: { connector: "shopify", erased: true } }), { name: "Request erased · never runs", state: "erased" });
   assert.deepEqual(reviewDestination({ workType: "document_feedback" }), { name: "Writes nothing", state: "report" });
   assert.equal(reviewDestination({ workType: "paid_media", action: "Raise the Google Ads budget" }), null, "never from the action sentence");
+});
+
+test("bulk reject: one reason, sent with each picked item as its own decision; no reason, nothing proposed", async () => {
+  const { store, calls, advance } = data();
+  const React = { createElement: () => null, Fragment: "fragment", useState: (v) => [v, () => {}], useRef: (v) => ({ current: v }), useEffect() {}, useLayoutEffect() {}, useId: () => "id" };
+  const { decideTogether } = reviewScreens(React, store, { use: () => ({ status: "connected" }) });
+  const order = reviewOrder(QUEUE).filter((entry) => entry.businessId === "business-crumb");
+  const ids = new Set(order.map((entry) => entry.id));
+  assert.deepEqual(await decideTogether(ids, order, "rejected", "  "), { proposed: [], refused: [...ids] }, "a rejection needs words");
+  const { proposed, refused } = await decideTogether(ids, order, "rejected", "Not this season.");
+  assert.deepEqual([proposed.length, refused.length], [2, 0]);
+  await advance(8000);
+  const sent = decideCalls(calls).map((entry) => entry.args);
+  assert.deepEqual(sent.map((args) => [args.itemKey, args.verdict, args.feedback]), [["hero", "rejected", "Not this season."], ["price", "rejected", "Not this season."]]);
+  assert.notEqual(sent[0].decisionToken, sent[1].decisionToken, "each its own token");
 });

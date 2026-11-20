@@ -251,7 +251,7 @@ function reviewScreens(React, store, bridge) {
    * `{ businessId?, assetId, itemKey? }`. `step`: { position, total, next,
    * previous } from the queue; `onBack`: to the queue. `onCommand` receives
    * this item's key commands while it is shown (shortcuts). */
-  function ReviewItem({ entry, step, onBack, onCommand, onSaved, frame = true }) {
+  function ReviewItem({ entry, step, onBack, onCommand, onSaved, frame = true, bar = null }) {
     const link = useConnection();
     useStore();
     const [state, setState] = React.useState({ review: null, error: null });
@@ -300,19 +300,21 @@ function reviewScreens(React, store, bridge) {
     React.useEffect(() => {
       if (!onCommand) return undefined;
       return onCommand({
-        approve: review && item && !receipt && !compose && store.canDecide(review, item) ? () => store.propose({ review, item, verdict: "approved" }) : null,
-        changes: review && item && !receipt && store.canDecide(review, item) ? () => setCompose("changes_requested") : null,
-        reject: review && item && !receipt && store.canDecide(review, item) ? () => setCompose("rejected") : null,
+        // While picked items' bar stands in for this one, its keys don't decide this item.
+        approve: !bar && review && item && !receipt && !compose && store.canDecide(review, item) ? () => store.propose({ review, item, verdict: "approved" }) : null,
+        changes: !bar && review && item && !receipt && store.canDecide(review, item) ? () => setCompose("changes_requested") : null,
+        reject: !bar && review && item && !receipt && store.canDecide(review, item) ? () => setCompose("rejected") : null,
         undo: receipt?.state === "pending" ? () => store.undo(id) : null,
       });
-    }, [id, receipt?.state, review?.decideIn, compose, store.revision]);
+    }, [id, receipt?.state, review?.decideIn, compose, store.revision, !!bar]);
 
     // What approving writes to, from the pinned request: top right, beside the position.
     const destination = item ? reviewDestination(item) : null;
     const header = (title) => h(PanelHeader, { title,
       navigation: onBack ? h(IconButton, { label: "Back to the queue", glyph: "back", large: true, onClick: onBack }) : null,
       actions: [
-        destination ? h(Chip, { key: "writes", label: destination.name, title: destination.state === "known" ? `Approving changes ${destination.name.replace(/^Updates /, "")}` : destination.name }) : null,
+        destination ? h(Chip, { key: "writes", label: destination.name, picture: destination.logo ?? undefined,
+          title: destination.state === "known" ? `Approving changes ${destination.system}` : destination.name }) : null,
         step && step.position ? Caption(`${step.position} of ${step.total}`) : null,
         step ? h(IconButton, { key: "prev", label: "Previous decision (K)", glyph: "up", large: true, disabled: !step.previous, onClick: () => step.previous?.() }) : null,
         step ? h(IconButton, { key: "next", label: "Next decision (J)", glyph: "down", large: true, disabled: !step.next, onClick: () => step.next?.() }) : null,
@@ -341,7 +343,7 @@ function reviewScreens(React, store, bridge) {
       h(Stack, { gap: 2 }, h(Byline, { review, item }), among, Question(headline)),
       h(Work, { review, item }),
       h(Details, { review, item }));
-    return wrap(review.businessName, body, h(Decide, { review, item, compose, setCompose, onReload: () => setRevision((n) => n + 1) }));
+    return wrap(review.businessName, body, bar ?? h(Decide, { review, item, compose, setCompose, onReload: () => setRevision((n) => n + 1) }));
   }
 
   // ---- the queue -----------------------------------------------------------------
@@ -352,15 +354,8 @@ function reviewScreens(React, store, bridge) {
   };
   const receiptWords = (receipt) => receipt ? reviewState(null, receipt).text + (receipt.state === "failed" ? " · didn't save" : receipt.state === "unknown" ? " · unconfirmed" : receipt.state === "conflict" ? " · changed" : "") : "";
 
-  /** The list: approved work that needs a push (quiet, at the top), then
-   * every waiting item grouped by business. Selection is explicit. */
-  function QueueList({ queue, selectedId, onOpen, picked, onPick, filter, onFilter, notes, goal = REVIEW_ALL_GOALS, goals, onGoal }) {
-    useStore();
-    const groups = reviewGroups(queue).filter((group) => !filter || group.businessId === filter)
-      .map((group) => ({ ...group, items: group.items.filter((entry) => reviewServes(entry, goal)) })).filter((group) => group.items.length);
-    const attention = [...(queue.stalled ?? []).map((entry) => ({ ...entry, why: `Not started · ${entry.waitingOn ? `waiting on ${entry.waitingOn}` : "nobody has picked it up"}` })),
-      ...(queue.blocked ?? []).map((entry) => ({ ...entry, why: entry.note ? `Blocked · ${entry.note}` : "Blocked" }))]
-      .filter((entry) => (!filter || entry.businessId === filter) && (goal === REVIEW_ALL_GOALS || reviewServes({ goals: reviewGoalsOf(entry.goals) }, goal)));
+  /** The Customer and Goal menus over a queue, and the names of what they chose. */
+  function queueMenus({ queue, filter, onFilter, goal = REVIEW_ALL_GOALS, goals, onGoal, attention = [] }) {
     const filterName = filter ? (reviewBusinessCounts(store.queue).find((business) => business.businessId === filter)?.businessName
       ?? reviewGroups(queue).find((group) => group.businessId === filter)?.businessName ?? attention[0]?.businessName ?? "this business") : "";
     // The Goal filter, only when some review here serves a goal.
@@ -378,8 +373,21 @@ function reviewScreens(React, store, bridge) {
       ...(filter && !businesses.some((business) => business.businessId === filter) ? [{ id: filter, label: `${filterName} · 0` }] : [])];
     const customerPicker = onFilter && (businesses.length > 1 || filter) ? h(ui.Pill, { key: "customer", label: "Customer", value: filter ?? REVIEW_ALL_CUSTOMERS,
       onChange: (value) => onFilter(value === REVIEW_ALL_CUSTOMERS ? null : value), title: "Work one customer's decisions", options: customerOptions }) : null;
+    return { filterName, goalName, customerPicker, goalPicker };
+  }
+
+  /** The list: approved work that needs a push (quiet, at the top), then
+   * every waiting item grouped by business. Selection is explicit. */
+  function QueueList({ queue, selectedId, onOpen, picked, onPick, filter, onFilter, notes, goal = REVIEW_ALL_GOALS, goals, onGoal, filters = true }) {
+    useStore();
+    const groups = reviewGroups(queue).filter((group) => !filter || group.businessId === filter)
+      .map((group) => ({ ...group, items: group.items.filter((entry) => reviewServes(entry, goal)) })).filter((group) => group.items.length);
+    const attention = [...(queue.stalled ?? []).map((entry) => ({ ...entry, why: `Not started · ${entry.waitingOn ? `waiting on ${entry.waitingOn}` : "nobody has picked it up"}` })),
+      ...(queue.blocked ?? []).map((entry) => ({ ...entry, why: entry.note ? `Blocked · ${entry.note}` : "Blocked" }))]
+      .filter((entry) => (!filter || entry.businessId === filter) && (goal === REVIEW_ALL_GOALS || reviewServes({ goals: reviewGoalsOf(entry.goals) }, goal)));
+    const { filterName, goalName, customerPicker, goalPicker } = queueMenus({ queue, filter, onFilter, goal, goals, onGoal, attention });
     return h(Stack, { gap: 4 },
-      customerPicker || goalPicker ? h(Actions, null, customerPicker, goalPicker) : null,
+      filters && (customerPicker || goalPicker) ? h(Actions, null, customerPicker, goalPicker) : null,
       attention.length ? h(ListGroup, { label: "Approved, not finished", count: attention.length },
         ...attention.map((entry) => h(SelectRow, { key: `a${entry.decisionId}`, title: entry.title, subtitle: entry.why, meta: entry.age, quiet: true,
           selected: selectedId === reviewItemId(entry.businessId, entry.assetId, entry.key),
@@ -403,10 +411,18 @@ function reviewScreens(React, store, bridge) {
       queue.truncated ? Note(`Showing ${queue.listed} of ${queue.total}. Decide some to see the rest.`) : null);
   }
 
-  /** Approves the picked items together: each its own call, token and receipt. */
+  /** The Customer and Goal menus alone, for a page that keeps them above its scrolling list. */
+  function QueueFilters({ queue, filter, onFilter, goal, goals, onGoal }) {
+    useStore();
+    const { customerPicker, goalPicker } = queueMenus({ queue, filter, onFilter, goal, goals, onGoal });
+    return customerPicker || goalPicker ? h(Actions, null, customerPicker, goalPicker) : null;
+  }
+
+  /** Decides the picked items together (approve, or reject with one reason
+   * for all): each is its own decision, call, token and receipt. */
   // First every review is read (for its tokens), then every approval starts
   // at once, so one Undo stops them all and nothing starts after it.
-  const approveTogether = async (ids, order) => {
+  const decideTogether = async (ids, order, verdict = "approved", feedback = "") => {
     const entries = order.filter((entry) => ids.has(entry.id));
     const ready = [];
     const refused = [];
@@ -420,10 +436,10 @@ function reviewScreens(React, store, bridge) {
     }));
     const proposed = [];
     for (const { entry, review, item } of entries.map((entry) => ready.find((candidate) => candidate.entry === entry)).filter(Boolean)) {
-      if (store.propose({ review, item, verdict: "approved" })) proposed.push(entry.id); else refused.push(entry.id);
+      if (store.propose({ review, item, verdict, feedback })) proposed.push(entry.id); else refused.push(entry.id);
     }
     return { proposed, refused };
   };
 
-  return { useStore, useConnection, NotConnected, ReviewItem, QueueList, Work, Decide, Byline, bylineWords, approveTogether, questionOf, receiptWords };
+  return { useStore, useConnection, NotConnected, ReviewItem, QueueList, QueueFilters, Work, Decide, Byline, bylineWords, decideTogether, approveTogether: (ids, order) => decideTogether(ids, order, "approved"), questionOf, receiptWords };
 }

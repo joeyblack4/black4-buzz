@@ -7,7 +7,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 
 /** Each module: its marker name and its source files, stamped in order. */
 export const MODULES = [
-  { name: "reviews", files: ["src/reviews/data.js", "src/reviews/ui.js", "src/reviews/part.js"] },
+  { name: "reviews", files: ["src/reviews/logos.js", "src/reviews/data.js", "src/reviews/ui.js", "src/reviews/part.js"] },
 ];
 export const TARGET = "plugins/black4/plugin.js";
 export const begin = (name) => `// ---- ${name}: stamped from src/${name}/ by \`npm run build\`; edit it there ----`;

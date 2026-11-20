@@ -1,0 +1,53 @@
+# Moves `stable` back to the previous release (or a named release tag). Buzz
+# compares plugin contents, not Git history, so every install on stable is
+# offered the older plugin as an ordinary update. No canary run first: the
+# target was already released. See scripts/release/rollback.mjs.
+#
+#   gh workflow run rollback
+#   gh workflow run rollback -f to=release-20261117-1
+name: rollback
+on:
+  workflow_dispatch:
+    inputs:
+      to:
+        description: "Release tag to go back to (default: the release before the current one)"
+        required: false
+      ack_permissions:
+        description: "The older release asks for access the current one dropped: everyone reviews permissions"
+        type: boolean
+        default: false
+      dry_run:
+        description: "Say what would happen, move nothing"
+        type: boolean
+        default: false
+permissions:
+  contents: write
+concurrency:
+  group: release
+  cancel-in-progress: false
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ssh-key: ${{ secrets.RELEASE_DEPLOY_KEY }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - env:
+          TO: ${{ inputs.to }}
+          ACK: ${{ inputs.ack_permissions }}
+          DRY: ${{ inputs.dry_run }}
+        run: |
+          set -o pipefail
+          flags=()
+          [ -n "$TO" ] && flags+=(--to "$TO")
+          [ "$ACK" = true ] && flags+=(--ack-permissions)
+          [ "$DRY" = true ] && flags+=(--dry-run)
+          node scripts/release/rollback.mjs "${flags[@]}" | tee -a "$GITHUB_STEP_SUMMARY"

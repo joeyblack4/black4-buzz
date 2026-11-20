@@ -1,16 +1,92 @@
+# Every pull request and every commit on main. Jobs run side by side; the
+# `required` job is the one check branch protection asks for, and the one the
+# release script reads on the commit it releases.
 name: ci
 on:
   pull_request:
+    # labeled/unlabeled: the restarts-agent-sessions label changes a gate's answer.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   push:
-    branches: [main, stable]
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
 jobs:
   check:
+    name: plugins
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # tests/release.test.mjs checks a revision against real history
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - run: npm run setup
-      - run: npm run check
+      - name: npm run check, except the agent-machine tests (the machine job runs those)
+        run: node scripts/ci-check.mjs --except machine
       - run: npm run test:subscriptions
+
+  machine:
+    name: agent machine
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: scope
+        name: Does this change touch machine/?
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ -n "$BASE" ] && git diff --quiet "$BASE" HEAD -- machine/; then
+            echo "No change under machine/: its tests (about 2.5 minutes) are skipped on this pull request and run on main."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.scope.outputs.skip != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - if: steps.scope.outputs.skip != 'true'
+        run: node scripts/ci-check.mjs --only machine
+
+  gates:
+    name: what this does to people's Buzz
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: node scripts/pr-gates.mjs "$BASE" HEAD
+
+  canary:
+    # Buzz's real activation of each plugin, against the Buzz release that
+    # Update installs now, on every change (not only those under plugins/).
+    uses: ./.github/workflows/buzz-canary.yml
+    with:
+      which: release
+
+  required:
+    if: always()
+    needs: [check, machine, gates, canary]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          echo "$NEEDS" | jq -e 'to_entries | all(.value.result == "success" or .value.result == "skipped")' > /dev/null \
+            || { echo "::error::A required job failed; open it above for its one-sentence reason."; exit 1; }

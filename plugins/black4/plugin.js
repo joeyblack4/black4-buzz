@@ -3941,12 +3941,12 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
       } else tokens.delete(id);
       const after = meta?.previews?.[item.key];
       const before = meta?.beforePreviews?.[item.key];
-      if (after || before) previews.set(id, { after, before });
+      if (after || before) previews.set(id, { after, before }); else previews.delete(id);
       // Captures of the item's page (and of its before page), desktop width.
       const shot = (entry) => { const link = entry?.desktop ?? entry?.phone; return typeof link?.url === "string" && /^https:\/\//.test(link.url) ? { url: link.url, contentType: link.contentType ?? "image/jpeg" } : null; };
       const capture = shot(meta?.captures?.[item.key]);
       const beforeCapture = shot(meta?.beforeCaptures?.[item.key]);
-      if (capture || beforeCapture) captures.set(id, { capture, beforeCapture });
+      if (capture || beforeCapture) captures.set(id, { capture, beforeCapture }); else captures.delete(id);
       // A decision the server now shows replaces a receipt still unsure of it.
       const receipt = receipts.get(id);
       // A newer version is new work: the old version's receipt no longer speaks for it.
@@ -3958,11 +3958,20 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
     return data;
   };
 
-  const ask = async (args) => {
+  /** True when a queue answer already lists one of this review's items at a
+   * newer version than `data` holds: an answer that was in flight when the
+   * newer version was listed. */
+  const behindQueue = (data) => [queue, ...[...scoped.values()].map((known) => known.queue)].some((listed) =>
+    (listed?.reviews ?? []).some((review) => review.assetId === data.assetId && review.businessId === data.businessId
+      && (review.items ?? []).some((item) => Number.isInteger(item.version)
+        && !(data.items ?? []).some((known) => known.key === item.key && known.version >= item.version))));
+  const ask = async (args, again = true) => {
     const { data, meta } = answer(await call("open_review", args));
     if (data?.kind !== "black4_review" || data.assetId !== args.assetId || (args.businessId && data.businessId !== args.businessId)) {
       throw new Error("The review Black 4 sent does not match this link.");
     }
+    // Never keep or show an answer older than what the queue already lists: read it once more.
+    if (again && behindQueue(data)) return ask(args, false);
     return keep(data, meta);
   };
   /** Which business a review belongs to, without asking when it is known. */
@@ -4032,18 +4041,26 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
   };
   /** An image of the item's work as a data URL (or a capture's own link):
    * `which` is "after" (the preview), "before", "capture" or "beforeCapture". */
+  /** The link the server gave now for one of the item's pictures. */
+  const mediaLink = (id, which) => {
+    const shots = captures.get(id);
+    return which === "capture" ? shots?.capture : which === "beforeCapture" ? shots?.beforeCapture : previews.get(id)?.[which];
+  };
+  /** Pictures are kept by the exact link they were read from, so a new
+   * version's work never shows an older version's picture, even one whose
+   * read finishes late. */
+  const mediaKey = (id, which, link) => `${id}/${which}/${link?.url ?? ""}`;
   const image = (businessId, assetId, key, which = "after") => {
     const id = reviewItemId(businessId, assetId, key);
-    const shots = captures.get(id);
-    const link = which === "capture" ? shots?.capture : which === "beforeCapture" ? shots?.beforeCapture : previews.get(id)?.[which];
+    const link = mediaLink(id, which);
     const version = cachedReview(businessId, assetId)?.items?.find((entry) => entry.key === key)?.version;
-    return pictureFrom(businessId, assetId, version, link, `${id}/${which}`, { direct: which === "capture" || which === "beforeCapture" });
+    return pictureFrom(businessId, assetId, version, link, mediaKey(id, which, link), { direct: which === "capture" || which === "beforeCapture" });
   };
   /** The capture the queue lists for a review (a later platform slice), once read. */
   const queuePicture = (entry) => {
     const link = entry?.capture?.desktop ?? entry?.capture?.phone ?? entry?.capture;
     if (typeof link?.url !== "string") return null;
-    const cacheKey = `${entry.businessId}/${entry.assetId}/queue-capture`;
+    const cacheKey = `${entry.businessId}/${entry.assetId}/queue-capture/${link.url}`;
     const ready = pictures.get(cacheKey);
     if (!ready) void pictureFrom(entry.businessId, entry.assetId, entry.version, { url: link.url, contentType: link.contentType ?? "image/jpeg" }, cacheKey, { direct: true });
     return ready ?? null;
@@ -4235,7 +4252,10 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
     get queue() { return queue; },
     noteQueue, readQueue, readScoped, scopedQueue, scopedError, open, cachedReview, peek, canDecide, image,
     /** An image of the work already read (`after`, `before` or `capture`), or null. */
-    picture: (businessId, assetId, key, which = "after") => pictures.get(`${reviewItemId(businessId, assetId, key)}/${which}`) ?? null,
+    picture: (businessId, assetId, key, which = "after") => {
+      const id = reviewItemId(businessId, assetId, key);
+      return pictures.get(mediaKey(id, which, mediaLink(id, which))) ?? null;
+    },
     /** Which picture of the work there is to show: the platform's capture, else an image preview. */
     pictureKind: (businessId, assetId, key) => {
       const id = reviewItemId(businessId, assetId, key);

@@ -489,3 +489,60 @@ test("after changes asked, a listed v2 opens as v2 through the normal open, not 
   await store.readQueue();
   assert.equal(store.cachedReview("business-crumb", "rv_bakery").items[0].version, 2);
 });
+
+test("an open_review answer still in flight when the queue lists a newer version is read again, never kept", async () => {
+  let version = 1;
+  let release;
+  const listed = () => ({ kind: "black4_review_queue", total: 1, listed: 1, reviews: [
+    { businessId: "business-crumb", businessName: "Crumb & Co", assetId: "rv_bakery", title: "Menu", items: [{ key: "hero", version, title: "Change hero", age: "1m" }] }] });
+  const answers = [];
+  const { store, calls } = data({
+    review_queue: () => tool(listed()),
+    open_review: () => {
+      const value = bakery({ version, decided: version === 1 ? { hero: { verdict: "changes_requested", reviewer: "Pat" } } : {} });
+      const reply = tool(value, { decisionTokens: { hero: { token: token(answers.length + 1), version, expiresAt: "2099-01-01T00:00:00Z" } }, previews: {}, beforePreviews: {} });
+      answers.push(value.version);
+      // The first answer (v1) is held back until released.
+      return answers.length === 1 ? new Promise((resolve) => { release = () => resolve(reply); }) : reply;
+    },
+  });
+  await store.readQueue();
+  const opening = store.open({ assetId: "rv_bakery", businessId: "business-crumb" });
+  await settle();
+  version = 2;
+  await store.readQueue();
+  release();
+  const opened = await opening;
+  assert.equal(opened.items[0].version, 2, "the late v1 answer is read again");
+  assert.deepEqual(answers, [1, 2]);
+  const again = await store.open({ assetId: "rv_bakery", businessId: "business-crumb" });
+  assert.equal(again.items[0].version, 2);
+  assert.equal(calls.filter((call) => call.name === "open_review").length, 2, "v2 is now what is kept");
+});
+
+test("pictures follow the version: a new version's capture never shows the old one, even when the old read finishes late", async () => {
+  let version = 1;
+  const V1 = "https://content.example.test/v/g1/_captures/hero-v1.jpg";
+  const V2 = "https://content.example.test/v/g2/_captures/hero-v2.jpg";
+  let holdV1;
+  const listed = () => ({ kind: "black4_review_queue", total: 1, listed: 1, reviews: [
+    { businessId: "business-crumb", businessName: "Crumb & Co", assetId: "rv_bakery", title: "Menu", items: [{ key: "hero", version, title: "Change hero", age: "1m" }] }] });
+  const { store } = data({
+    review_queue: () => tool(listed()),
+    open_review: () => tool(bakery({ version }), { decisionTokens: {}, previews: {}, beforePreviews: {},
+      captures: { hero: { desktop: { url: version === 1 ? V1 : V2, contentType: "image/jpeg" } } } }),
+    // The v1 capture read is slow; v2's is not.
+    get_review_file: (args) => args.path.endsWith("hero-v1.jpg") ? new Promise((resolve) => { holdV1 = () => resolve(refusal("review_file_not_found")); }) : refusal("review_file_not_found"),
+  });
+  await store.readQueue();
+  await store.open({ assetId: "rv_bakery", businessId: "business-crumb" });
+  const late = store.image("business-crumb", "rv_bakery", "hero", "capture");
+  version = 2;
+  await store.readQueue();
+  await store.open({ assetId: "rv_bakery", businessId: "business-crumb" });
+  assert.equal(await store.image("business-crumb", "rv_bakery", "hero", "capture"), V2);
+  holdV1();
+  assert.equal(await late, V1, "the old read finishes with the old picture...");
+  await settle();
+  assert.equal(store.picture("business-crumb", "rv_bakery", "hero", "capture"), V2, "...and the card still shows the new one");
+});

@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { freshPlugin, settle } from "./fakes.mjs";
 
-const { reviewData, reviewLocator, reviewLink, reviewOrder, reviewGroups, reviewState, wordDiff, REVIEW_UNDO_MS,
+const { reviewData, reviewReplaces, reviewLocator, reviewLink, reviewOrder, reviewGroups, reviewState, wordDiff, REVIEW_UNDO_MS,
   reviewGoalChoices, reviewGoalNow, reviewShown, REVIEW_ALL_GOALS, REVIEW_NO_GOAL, reviewBusinessCounts, reviewHeadline, reviewDestination, reviewScreens } = await freshPlugin();
 
 const token = (n) => `b4rd_${String(n).padEnd(43, "x")}`;
@@ -419,4 +419,161 @@ test("bulk reject: one reason, sent with each picked item as its own decision; n
   const sent = decideCalls(calls).map((entry) => entry.args);
   assert.deepEqual(sent.map((args) => [args.itemKey, args.verdict, args.feedback]), [["hero", "rejected", "Not this season."], ["price", "rejected", "Not this season."]]);
   assert.notEqual(sent[0].decisionToken, sent[1].decisionToken, "each its own token");
+});
+
+test("a rejected item that comes back as a new version is new work: no stale Rejected, no bounce, and it can be decided", async () => {
+  let version = 1;
+  const listed = () => ({ kind: "black4_review_queue", total: 2, listed: 2, reviews: [
+    { businessId: "business-crumb", businessName: "Crumb & Co", assetId: "rv_bakery", title: "Menu",
+      items: [{ key: "hero", version, title: "Change hero", age: "1m" }, { key: "price", version: 1, title: "Change price", age: "2h" }] }] });
+  const { store, calls, advance } = data({ review: () => bakery({ version }), review_queue: () => tool(listed()) });
+  await store.readQueue();
+  const review = await store.open({ assetId: "rv_bakery", businessId: "business-crumb" });
+  const receipt = store.propose({ review, item: review.items[0], verdict: "rejected", feedback: "Wrong offer" });
+  await advance(8000);
+  assert.equal(store.receipt(receipt.id).state, "saved");
+  const ids = () => reviewOrder(store.queue).map((entry) => `${entry.id}@${entry.version}`);
+  assert.deepEqual(ids(), ["business-crumb/rv_bakery/price@1"], "the decided item leaves the list at once");
+
+  // A poll read before the decision still lists version 1: it stays off the list.
+  await store.readQueue();
+  assert.deepEqual(ids(), ["business-crumb/rv_bakery/price@1"]);
+  assert.equal(store.queue.total, 1);
+  assert.equal(store.receipt(receipt.id).state, "saved");
+
+  // The agent sends version 2 (after changes asked; a rejected review comes back as a new review instead).
+  version = 2;
+  await store.readQueue();
+  assert.deepEqual(ids(), ["business-crumb/rv_bakery/hero@2", "business-crumb/rv_bakery/price@1"]);
+  assert.equal(store.receipt(receipt.id), null, "version 1's receipt no longer speaks for version 2");
+  const fresh = await store.open({ assetId: "rv_bakery", businessId: "business-crumb" }, { fresh: true });
+  const hero = fresh.items[0];
+  assert.deepEqual(reviewState(hero, store.receipt(receipt.id)), { tone: "waiting", text: "Waiting for you" });
+  const again = store.propose({ review: fresh, item: hero, verdict: "approved" });
+  assert.equal(again.state, "pending", "a new decision, not the old saved one");
+  await advance(8000);
+  assert.deepEqual(decideCalls(calls).map((call) => [call.args.itemKey, call.args.version, call.args.verdict]), [["hero", 1, "rejected"], ["hero", 2, "approved"]]);
+});
+
+test("a redo says which rejected review it replaces, and why that one was rejected", () => {
+  assert.equal(reviewReplaces({ supersedes: { assetId: "rv_old", title: "Paid search plan", rejectedFeedback: "Grow the brand, not one store" } }),
+    "Replaces “Paid search plan”, which was rejected: Grow the brand, not one store");
+  assert.equal(reviewReplaces({ supersedes: { assetId: "rv_old", title: "Paid search plan", rejectedFeedback: null } }), "Replaces “Paid search plan”, which was rejected");
+  assert.equal(reviewReplaces({ supersedes: null }), null);
+  assert.equal(reviewReplaces({}), null);
+  const [entry] = reviewOrder({ kind: "black4_review_queue", reviews: [{ businessId: "b", businessName: "B", assetId: "rv_new", title: "Brand plan",
+    supersedes: { assetId: "rv_old", title: "Paid search plan", rejectedFeedback: "No" }, items: [{ key: "plan", version: 1, title: "Plan" }] }] });
+  assert.equal(entry.replaces, "Replaces “Paid search plan”, which was rejected: No");
+});
+
+test("after changes asked, a listed v2 opens as v2 through the normal open, not the cached decided v1", async () => {
+  let version = 1;
+  const listed = () => ({ kind: "black4_review_queue", total: 1, listed: 1, reviews: [
+    { businessId: "business-crumb", businessName: "Crumb & Co", assetId: "rv_bakery", title: "Menu", items: [{ key: "hero", version, title: "Change hero", age: "1m" }] }] });
+  const { store, calls, advance } = data({ review: () => bakery({ version }), review_queue: () => tool(listed()) });
+  await store.readQueue();
+  const review = await store.open({ assetId: "rv_bakery", businessId: "business-crumb" });
+  store.propose({ review, item: review.items[0], verdict: "changes_requested", feedback: "Shorter" });
+  await advance(8000);
+  assert.equal(store.cachedReview("business-crumb", "rv_bakery").items[0].status, "decided");
+  // Within the fresh window, the agent's v2 is listed.
+  version = 2;
+  await store.readQueue();
+  assert.equal(store.cachedReview("business-crumb", "rv_bakery"), null, "the stale review is forgotten");
+  const opens = calls.filter((call) => call.name === "open_review").length;
+  const again = await store.open({ assetId: "rv_bakery", businessId: "business-crumb" });
+  assert.equal(calls.filter((call) => call.name === "open_review").length, opens + 1, "read again, not served from cache");
+  assert.equal(again.items[0].version, 2);
+  assert.equal(store.canDecide(again, again.items[0]), true);
+  // A listing of the same version keeps the cache.
+  await store.readQueue();
+  assert.equal(store.cachedReview("business-crumb", "rv_bakery").items[0].version, 2);
+});
+
+test("an open_review answer still in flight when the queue lists a newer version is read again, never kept", async () => {
+  let version = 1;
+  let release;
+  const listed = () => ({ kind: "black4_review_queue", total: 1, listed: 1, reviews: [
+    { businessId: "business-crumb", businessName: "Crumb & Co", assetId: "rv_bakery", title: "Menu", items: [{ key: "hero", version, title: "Change hero", age: "1m" }] }] });
+  const answers = [];
+  const { store, calls } = data({
+    review_queue: () => tool(listed()),
+    open_review: () => {
+      const value = bakery({ version, decided: version === 1 ? { hero: { verdict: "changes_requested", reviewer: "Pat" } } : {} });
+      const reply = tool(value, { decisionTokens: { hero: { token: token(answers.length + 1), version, expiresAt: "2099-01-01T00:00:00Z" } }, previews: {}, beforePreviews: {} });
+      answers.push(value.version);
+      // The first answer (v1) is held back until released.
+      return answers.length === 1 ? new Promise((resolve) => { release = () => resolve(reply); }) : reply;
+    },
+  });
+  await store.readQueue();
+  const opening = store.open({ assetId: "rv_bakery", businessId: "business-crumb" });
+  await settle();
+  version = 2;
+  await store.readQueue();
+  release();
+  const opened = await opening;
+  assert.equal(opened.items[0].version, 2, "the late v1 answer is read again");
+  assert.deepEqual(answers, [1, 2]);
+  const again = await store.open({ assetId: "rv_bakery", businessId: "business-crumb" });
+  assert.equal(again.items[0].version, 2);
+  assert.equal(calls.filter((call) => call.name === "open_review").length, 2, "v2 is now what is kept");
+});
+
+test("pictures follow the version: a new version's capture never shows the old one, even when the old read finishes late", async () => {
+  let version = 1;
+  const V1 = "https://content.example.test/v/g1/_captures/hero-v1.jpg";
+  const V2 = "https://content.example.test/v/g2/_captures/hero-v2.jpg";
+  let holdV1;
+  const listed = () => ({ kind: "black4_review_queue", total: 1, listed: 1, reviews: [
+    { businessId: "business-crumb", businessName: "Crumb & Co", assetId: "rv_bakery", title: "Menu", items: [{ key: "hero", version, title: "Change hero", age: "1m" }] }] });
+  const { store } = data({
+    review_queue: () => tool(listed()),
+    open_review: () => tool(bakery({ version }), { decisionTokens: {}, previews: {}, beforePreviews: {},
+      captures: { hero: { desktop: { url: version === 1 ? V1 : V2, contentType: "image/jpeg" } } } }),
+    // The v1 capture read is slow; v2's is not.
+    get_review_file: (args) => args.path.endsWith("hero-v1.jpg") ? new Promise((resolve) => { holdV1 = () => resolve(refusal("review_file_not_found")); }) : refusal("review_file_not_found"),
+  });
+  await store.readQueue();
+  await store.open({ assetId: "rv_bakery", businessId: "business-crumb" });
+  const late = store.image("business-crumb", "rv_bakery", "hero", "capture");
+  version = 2;
+  await store.readQueue();
+  await store.open({ assetId: "rv_bakery", businessId: "business-crumb" });
+  assert.equal(await store.image("business-crumb", "rv_bakery", "hero", "capture"), V2);
+  holdV1();
+  assert.equal(await late, V1, "the old read finishes with the old picture...");
+  await settle();
+  assert.equal(store.picture("business-crumb", "rv_bakery", "hero", "capture"), V2, "...and the card still shows the new one");
+});
+
+test("a re-read that is behind too (the queue moved again meanwhile) is refused, never kept; trying again reads the newest", async () => {
+  let version = 1;
+  const held = [];
+  const listed = () => ({ kind: "black4_review_queue", total: 1, listed: 1, reviews: [
+    { businessId: "business-crumb", businessName: "Crumb & Co", assetId: "rv_bakery", title: "Menu", items: [{ key: "hero", version, title: "Change hero", age: "1m" }] }] });
+  let holding = true;
+  const { store, calls } = data({
+    review_queue: () => tool(listed()),
+    open_review: () => {
+      const reply = tool(bakery({ version }), { decisionTokens: {}, previews: {}, beforePreviews: {} });
+      return holding ? new Promise((resolve) => held.push(() => resolve(reply))) : reply;
+    },
+  });
+  await store.readQueue();
+  const opening = store.open({ assetId: "rv_bakery", businessId: "business-crumb" });
+  await settle();
+  version = 2;
+  await store.readQueue();
+  held.shift()(); // v1 arrives late: read again (the re-read answers v2, held)
+  await settle();
+  version = 3;
+  await store.readQueue();
+  held.shift()(); // the re-read's v2 arrives, behind v3
+  await assert.rejects(opening, (error) => error.code === "newer_version");
+  assert.equal(store.cachedReview("business-crumb", "rv_bakery"), null, "nothing behind the queue is kept");
+  holding = false;
+  const fresh = await store.open({ assetId: "rv_bakery", businessId: "business-crumb" }, { fresh: true });
+  assert.equal(fresh.items[0].version, 3);
+  assert.equal(calls.filter((call) => call.name === "open_review").length, 3);
 });

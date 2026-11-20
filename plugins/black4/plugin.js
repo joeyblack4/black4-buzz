@@ -3970,8 +3970,13 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
     if (data?.kind !== "black4_review" || data.assetId !== args.assetId || (args.businessId && data.businessId !== args.businessId)) {
       throw new Error("The review Black 4 sent does not match this link.");
     }
-    // Never keep or show an answer older than what the queue already lists: read it once more.
-    if (again && behindQueue(data)) return ask(args, false);
+    // Never keep or show an answer older than what the queue already lists: read it
+    // once more, and if that is behind too (the queue moved again meanwhile),
+    // say so instead of showing it; trying again reads afresh.
+    if (behindQueue(data)) {
+      if (again) return ask(args, false);
+      throw Object.assign(new Error("A newer version arrived while this was loading. Try again to read it."), { code: "newer_version" });
+    }
     return keep(data, meta);
   };
   /** Which business a review belongs to, without asking when it is known. */

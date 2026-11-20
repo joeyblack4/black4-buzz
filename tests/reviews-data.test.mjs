@@ -546,3 +546,34 @@ test("pictures follow the version: a new version's capture never shows the old o
   await settle();
   assert.equal(store.picture("business-crumb", "rv_bakery", "hero", "capture"), V2, "...and the card still shows the new one");
 });
+
+test("a re-read that is behind too (the queue moved again meanwhile) is refused, never kept; trying again reads the newest", async () => {
+  let version = 1;
+  const held = [];
+  const listed = () => ({ kind: "black4_review_queue", total: 1, listed: 1, reviews: [
+    { businessId: "business-crumb", businessName: "Crumb & Co", assetId: "rv_bakery", title: "Menu", items: [{ key: "hero", version, title: "Change hero", age: "1m" }] }] });
+  let holding = true;
+  const { store, calls } = data({
+    review_queue: () => tool(listed()),
+    open_review: () => {
+      const reply = tool(bakery({ version }), { decisionTokens: {}, previews: {}, beforePreviews: {} });
+      return holding ? new Promise((resolve) => held.push(() => resolve(reply))) : reply;
+    },
+  });
+  await store.readQueue();
+  const opening = store.open({ assetId: "rv_bakery", businessId: "business-crumb" });
+  await settle();
+  version = 2;
+  await store.readQueue();
+  held.shift()(); // v1 arrives late: read again (the re-read answers v2, held)
+  await settle();
+  version = 3;
+  await store.readQueue();
+  held.shift()(); // the re-read's v2 arrives, behind v3
+  await assert.rejects(opening, (error) => error.code === "newer_version");
+  assert.equal(store.cachedReview("business-crumb", "rv_bakery"), null, "nothing behind the queue is kept");
+  holding = false;
+  const fresh = await store.open({ assetId: "rv_bakery", businessId: "business-crumb" }, { fresh: true });
+  assert.equal(fresh.items[0].version, 3);
+  assert.equal(calls.filter((call) => call.name === "open_review").length, 3);
+});

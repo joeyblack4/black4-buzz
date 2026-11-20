@@ -235,7 +235,12 @@ function reviewDestination(item) {
   }
   const family = key.split("-")[0];
   const name = REVIEW_PROVIDER_NAMES[key] ?? REVIEW_PROVIDER_NAMES[family] ?? plain(recorded, 60);
-  return { name: `Updates ${name}`, state: "known" };
+  // Its mark, chosen as Platform Control chooses it (providerLogoKey): the exact
+  // provider key, or a key the recorded one starts with; any other Google product, Google's.
+  // The longest match wins, so google-ads is Google Ads' mark, not Google's.
+  const logoKey = Object.keys(REVIEW_PROVIDER_LOGOS).filter((candidate) => key === candidate || key.startsWith(`${candidate}-`))
+    .sort((a, b) => b.length - a.length)[0] ?? (name.startsWith("Google ") ? "google" : null);
+  return { name: `Updates ${name}`, system: name, logo: logoKey ? REVIEW_PROVIDER_LOGOS[logoKey] : null, state: "known" };
 }
 
 /** Where a review came from, when the server says (staff only): the Buzz

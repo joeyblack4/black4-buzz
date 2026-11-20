@@ -230,6 +230,7 @@ test("an open decision says what approving writes to and which of the review's d
   Object.assign(price, { workType: "document_feedback" });
   let view = await a.shown();
   assert.match(a.label(view), /Updates Shopify/, "the system, from the pinned request");
+  assert.ok(a.find(view, (node) => node.type === "img" && /^data:image\/svg\+xml;base64,/.test(node.props?.src ?? "")), "with Shopify's own mark beside it");
   assert.match(a.label(view), /Decision 1 of 2 in Winter menu/, "one review, two decisions: this is the first");
   view = await a.shown("https://app.black4.ai/r/rv_bakery?v=1&item=price");
   assert.match(a.label(view), /Writes nothing/, "feedback on a document writes nothing");
@@ -254,4 +255,22 @@ test("the Customer menu: every business the server counts, with its count; choos
   a.page(); await settle(); await settle();
   assert.deepEqual(a.reviews.calls.filter((call) => call.name === "review_queue").map((call) => call.args).at(-1), { businessId: "business-crumb" }, "the server filters by business");
   assert.match(a.label(a.page()), /Change the hero\?/, "its first decision opens");
+});
+
+test("the page: its title drawn as Buzz's pages draw theirs, and the Customer and Goal menus kept above the scrolling list", async (t) => {
+  const SPRING = { path: "goals/spring-orders.md", title: "More spring orders" };
+  const a = await app(t, { reviews: { goals: { hero: [SPRING], price: [] }, businesses: [
+    { businessId: "business-crumb", businessName: "Crumb & Co", decisions: 2 }, { businessId: "business-dune", businessName: "Dune Kites", decisions: 9 }] } });
+  a.page(); await settle(); await settle();
+  const view = a.page();
+  const label = a.find(view, (node) => node.props?.className === "panel-header-label");
+  assert.ok(label, "the page title sits in Buzz's panel-header-label, inset with its icon");
+  assert.equal(a.label(label), "Reviews");
+  const region = a.find(view, (node) => node.props?.role === "region" && node.props["aria-label"] === "Decisions waiting");
+  const [pinned, scrolling] = region.children.filter(Boolean);
+  assert.equal(scrolling.props.style.overflow, "auto", "the list scrolls");
+  assert.notEqual(pinned.props.style?.overflow, "auto", "the menus don't scroll with it");
+  const menus = (node) => { const out = []; (function walk(n) { if (!n || typeof n !== "object") return; if (n.props?.role === "combobox") out.push(n.props["aria-label"]); for (const c of n.children ?? []) walk(c); })(node); return out; };
+  assert.deepEqual(menus(pinned), ["Customer", "Goal"]);
+  assert.deepEqual(menus(scrolling), [], "and only once");
 });

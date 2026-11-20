@@ -290,11 +290,17 @@ function buzzUi(React, { nativeSelect = false } = {}) {
       h("span", { className: "buzz-button-label" }, icon(ICON[glyph] ?? ICON.check, large ? 18 : 16)));
 
   /** PanelHeader.tsx: a page's or drill-in's bar: `navigation` (a back
-   * IconButton) first, the title, then `actions`. */
-  const PanelHeader = ({ title, navigation, actions }) =>
+   * IconButton) first, the title, then `actions`. `glyph`: a dock page's own
+   * title, drawn as Buzz's pages draw theirs (PanelHeaderLabel: inset, with
+   * its icon), so it doesn't sit in the panel's corner. */
+  const PanelHeader = ({ title, navigation, actions, glyph }) =>
     h("header", { "data-buzz-ui": "", className: "panel-header", "data-variant": "default" },
       navigation ?? null,
-      h("div", { className: "panel-header-title" }, h("h2", { className: "text-label text-primary" }, title)),
+      h("div", { className: "panel-header-title" }, glyph
+        ? h("div", { className: "panel-header-label" },
+            ICON[glyph] ? h("span", { className: "panel-header-label-icon", "aria-hidden": true }, icon(ICON[glyph], 16)) : null,
+            h("h2", null, title))
+        : h("h2", { className: "text-label text-primary" }, title)),
       actions ? h("div", { className: "panel-header-actions" }, ...each(actions)) : null);
 
   /** A dock page's surface (Panel.tsx, laid out as Shared notes' page):
@@ -435,9 +441,12 @@ function buzzUi(React, { nativeSelect = false } = {}) {
   /** ValueChip.tsx: a short read-only value (a stake, a fact). `glyph`: an
    * ICON name for its 12px mark; `emphasis`: the label in the standard weight
    * (the stake), else the chip's own. */
-  const Chip = ({ label, glyph, title }) =>
+  const Chip = ({ label, glyph, picture, title }) =>
     h("span", { "data-buzz-ui": "", className: "buzz-value-chip" },
-      glyph && ICON[glyph] ? h("span", { className: "buzz-value-chip-icon", "aria-hidden": true }, icon(ICON[glyph], 12)) : null,
+      // `picture`: a product's own mark (a data URL) in place of a glyph.
+      picture ? h("span", { className: "buzz-value-chip-icon", "aria-hidden": true },
+        h("img", { src: picture, alt: "", width: 14, height: 14, style: { display: "block", width: "14px", height: "14px", objectFit: "contain" } }))
+        : glyph && ICON[glyph] ? h("span", { className: "buzz-value-chip-icon", "aria-hidden": true }, icon(ICON[glyph], 12)) : null,
       h("span", { className: "buzz-value-chip-text", title: title ?? (typeof label === "string" ? label : undefined) }, label));
   /** Chips in a row that wraps. */
   const ChipRow = ({ children }) => h("div", { className: "flex flex-wrap items-center gap-2", style: { minWidth: 0 } }, ...each(children));
@@ -551,7 +560,7 @@ function buzzUi(React, { nativeSelect = false } = {}) {
   /** Activity's workspace: the list pane beside the preview (Inbox.module.css
    * `.workspace`, `.listPane`, `.scroll`). Too narrow for both, the preview
    * takes the space while it shows something. */
-  const Split = ({ label, list, detail, showing = false }) => {
+  const Split = ({ label, list, listHeader, detail, showing = false }) => {
     const box = React.useRef(null);
     const [narrow, setNarrow] = React.useState(false);
     React.useLayoutEffect(() => {
@@ -564,6 +573,8 @@ function buzzUi(React, { nativeSelect = false } = {}) {
     const pane = { display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0 };
     return h("div", { ref: box, "data-buzz-ui": "", style: { display: "flex", flex: 1, minWidth: 0, minHeight: 0 } },
       narrow && showing ? null : h("div", { role: "region", "aria-label": label, style: { ...pane, flex: narrow ? 1 : "0 0 min(26rem, 42%)", borderRight: narrow ? undefined : "1px solid var(--border-standard)" } },
+        // `listHeader` (the list's filters) stays put while the list scrolls under it.
+        listHeader ? h("div", { style: { flex: "0 0 auto", padding: "var(--space-3) var(--space-row-gap) var(--space-2)", borderBottom: "1px solid var(--border-standard)" } }, listHeader) : null,
         h("div", { style: { flex: 1, minHeight: 0, overflow: "auto", padding: "var(--space-3) var(--space-row-gap) var(--space-panel-inset)" } }, list)),
       narrow && !showing ? null : h("div", { style: { ...pane, flex: 1 } }, detail));
   };

@@ -391,8 +391,10 @@ MCP connection or the agent tools.
   for changes, **R** rejects; a saved decision moves on by itself. Items of one
   business and one kind of work sit together. Buzz has no swipe gesture, so
   neither does Reviews.
-- **What approving writes to.** The top right of an open decision names the
-  system its pinned request changes ("Updates Google Ads", "Updates Shopify"),
+- **What approving writes to.** The top right of an open decision shows the
+  mark and name of the system its pinned request changes ("Updates Google
+  Ads", "Updates Shopify"); the marks are Platform Control's own bundled
+  provider logos, carried in the plugin, so nothing is fetched to draw them,
   named only from that request the way Platform Control names it, never from
   the action sentence; feedback on a document says "Writes nothing". When one
   review holds several decisions over one page of work, the decision says
@@ -405,10 +407,14 @@ MCP connection or the agent tools.
   `review_queue`'s `businesses` counts, never what the list holds (an older
   server sends none; then the listed items are counted). Choosing a business
   asks Black 4 for its queue and opens its first decision.
-- **Bulk approve.** Pick items in the queue (nothing is picked for you), then
-  **Approve N**. Each is still its own decision with its own token and receipt;
-  a partial failure shows per item. Ask for changes and Reject stay one at a
-  time.
+- **Bulk approve and reject.** Pick items in the queue (nothing is picked for
+  you): the decision bar at the bottom becomes theirs, **Approve N**,
+  **Reject N** and **Clear**, in place of the open item's own, so there is
+  only ever one Approve on screen. Reject N asks for one reason, sent with
+  each. Each is still its own decision with its own token, Undo and receipt;
+  a partial failure shows per item. Ask for changes stays one at a time.
+- **Menus stay put.** On the Reviews page the Customer and Goal menus sit
+  above the list and stay there while it scrolls.
 - **Goal filter.** When reviews in the queue serve goals (the goals of the job
   that made each one), a Goal menu narrows the list to one goal, or to those
   serving none: "All goals", each goal with its count of waiting reviews, and

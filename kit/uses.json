@@ -148,6 +148,8 @@
     "panel",
     "panel-header",
     "panel-header-actions",
+    "panel-header-label",
+    "panel-header-label-icon",
     "panel-header-title"
   ],
   "utilities": [

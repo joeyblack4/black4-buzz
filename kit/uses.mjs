@@ -56,7 +56,7 @@ export function collect() {
     for (const gap of variants.Column.gap) parts.push(h(ui.Column, { gap }, "x"));
     for (const level of variants.Header.level) parts.push(h(ui.Header, { title: "T", subtitle: "S", eyebrow: "E", actions: "a", level }));
     parts.push(h(ui.IconButton, { label: "L", glyph: "back", large: true, disabled: true }), h(ui.IconButton, { label: "L", glyph: "refresh" }));
-    parts.push(h(ui.PanelHeader, { title: "T", navigation: "n", actions: ["a"] }), h(ui.Page, { label: "P", header: "h" }, "x"), h(ui.Page, { label: "P", fill: true }, "x"),
+    parts.push(h(ui.PanelHeader, { title: "T", navigation: "n", actions: ["a"] }), h(ui.PanelHeader, { title: "T", glyph: "decisions" }), h(ui.Page, { label: "P", header: "h" }, "x"), h(ui.Page, { label: "P", fill: true }, "x"),
       h(ui.PanelBody, null, "x"), h(ui.Subview, { header: "h" }, "x"), h(ui.Fill, null, "x"), h(ui.Toolbar, null, "x"), h(ui.EmptyState, { glyph: "inbox", title: "T", description: "D", action: "a" }),
       h(ui.EmptyState, { title: "T", frame: "none" }), h(ui.NavItem, { label: "L", trailing: "t", selected: true, multiline: true }), h(ui.NavItem, { label: "L" }),
       h(ui.Tabs, { label: "L", value: "a", items: [{ value: "a", label: "A" }, { value: "b", label: "B" }], onChange() {} }),
@@ -64,7 +64,7 @@ export function collect() {
       h(ui.CountBadge, { count: 3, label: "3" }), h(ui.Dot, { label: "L" }), h(ui.LinkChip, { label: "L" }),
       h(ui.CodeColumn, null, h(ui.OneTimeCode, { code: "AB12" })), h(ui.Failure, { message: "m", retry() {} }), h(ui.Notice, { title: "T" }, "x"),
       h(ui.Surface, { label: "S" }, "x"), h(ui.Subview, { header: "h", footer: "f" }, "x"), h(ui.Glyph, { name: "decisions" }),
-      h(ui.ChipRow, null, h(ui.Chip, { label: "C", glyph: "money" }), h(ui.Chip, { label: "C" })),
+      h(ui.ChipRow, null, h(ui.Chip, { label: "C", glyph: "money" }), h(ui.Chip, { label: "C" }), h(ui.Chip, { label: "C", picture: "p" })),
       h(ui.DiffText, { label: "L", runs: [{ kind: "same", text: "a " }, { kind: "removed", text: "b" }, { kind: "added", text: "c" }] }), h(ui.DiffText, { runs: [] }),
       h(ui.ChangeTable, { rows: [{ label: "L", before: "a", after: "b", changed: true }, { label: "", before: "a", after: "a", changed: false }] }),
       h(ui.MediaPair, { before: "data:image/png;base64,", after: "data:image/png;base64," }), h(ui.MediaPair, { after: null, loading: true }),
@@ -73,7 +73,7 @@ export function collect() {
       h(ui.Checkbox, { checked: true, label: "L", onCheckedChange() {} }), h(ui.Checkbox, { checked: false, size: "sm", disabled: true, label: "L", onCheckedChange() {} }),
       h(ui.ListGroup, { label: "L", count: 2 }, h(ui.SelectRow, { title: "T", subtitle: "S", meta: "2h", selected: true, picked: true, onPick() {}, onOpen() {} }),
         h(ui.SelectRow, { title: "T", quiet: true, onOpen() {} })),
-      h(ui.Split, { label: "L", list: "l", detail: "d" }), h(ui.Frame, { label: "L" }, "x"), h(ui.Avatar, { name: "N", picture: "p", size: "small" }), h(ui.Avatar, { name: "N", size: "tiny", shape: "squircle", label: "L" }), h(ui.Avatar, { name: "N", size: "compact" }),
+      h(ui.Split, { label: "L", list: "l", listHeader: "f", detail: "d" }), h(ui.Frame, { label: "L" }, "x"), h(ui.Avatar, { name: "N", picture: "p", size: "small" }), h(ui.Avatar, { name: "N", size: "tiny", shape: "squircle", label: "L" }), h(ui.Avatar, { name: "N", size: "compact" }),
       h(ui.Byline, { avatar: "a", name: "N", app: "A", origin: "O", originGlyph: "clock" }), h(ui.Byline, { name: "N", origin: "O", originGlyph: "message", onOrigin() {} }),
       h(ui.Canvas, { label: "L", toolbar: ["t"] }, h(ui.CanvasImage, { src: "s", alt: "A" })), h(ui.CanvasImage, { alt: "A" }), h(ui.Layers, null, "a", "b"), h(ui.Byline, { name: "N", badge: "Signed", detail: "D", origin: "O" }), h(ui.QuietLine, { glyph: "money" }, "q"), ui.Question("q"), ui.Permits("p"), h(ui.Article, { label: "L" }, "x"),
       h(ui.Tabs, { label: "L", value: "a", variant: "segmented", items: [{ value: "a", label: "A" }], onChange() {} }),

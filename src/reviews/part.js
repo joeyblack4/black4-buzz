@@ -147,8 +147,10 @@ function reviewsPart(ctx, bridge) {
     const work = useWorked(current.filter, link.status === "connected");
     const first = work.order[0];
     React.useEffect(() => {
-      if (!view.entry && first && !view.filter) setView({ entry: { businessId: first.businessId, assetId: first.assetId, itemKey: first.key } });
-    }, [first?.id]);
+      // Nothing open, or a customer chosen whose decisions aren't the one open.
+      const elsewhere = view.filter && view.entry && view.entry.businessId && view.entry.businessId !== view.filter;
+      if (first && (!view.entry || elsewhere)) setView({ entry: { businessId: first.businessId, assetId: first.assetId, itemKey: first.key } });
+    }, [first?.id, current.filter]);
     const step = useStepping(current.entry, setEntry, current.filter);
     surface = { next: step.next, previous: step.previous };
     React.useEffect(() => () => { surface = null; surfaceFocused = false; }, []);
@@ -196,7 +198,7 @@ function reviewsPart(ctx, bridge) {
     else if (error && !queue) list = h(ui.Failure, { message: plain(error.message, 300), retry, retryLabel: "Try again" });
     else if (!queue) list = h(ui.Skeleton, { layout: "list" });
     else list = h(QueueList, { queue: work.queue ?? queue, selectedId: current.entry ? order[reviewStep(order, current.entry).index]?.id : null, onOpen: setEntry,
-      picked: live, onPick: pick, notes, filter: current.filter, onFilter: (filter) => setView({ filter }), goal: work.goal, goals: work.choices, onGoal });
+      picked: live, onPick: pick, notes, filter: current.filter, onFilter: (filter) => { setPicked(new Set()); setView({ filter, entry: null }); }, goal: work.goal, goals: work.choices, onGoal });
     const detail = current.entry
       ? h(ReviewItem, { key: "item", entry: current.entry, step, onCommand, frame: true })
       : link.status === "connected" && queue ? h(ui.EmptyState, { glyph: "decisions", title: order.length ? "Choose a decision" : "Nothing to decide", frame: "none" }) : null;
@@ -283,7 +285,7 @@ function reviewsPart(ctx, bridge) {
     const item = review ? (review.items.find((candidate) => candidate.key === locator.itemKey) ?? review.items[0]) : null;
     const receipt = review && item ? store.receipt(reviewItemId(review.businessId, review.assetId, item.key)) : null;
     const state = item ? reviewState(item, receipt) : null;
-    const title = item ? (item.card?.question || item.title) : failed?.code === "elsewhere" ? "A Black 4 review" : failed ? "A Black 4 review" : "Loading the review…";
+    const title = item ? reviewHeadline({ question: item.card?.question, title: item.title, reviewTitle: review.title }) : failed?.code === "elsewhere" ? "A Black 4 review" : failed ? "A Black 4 review" : "Loading the review…";
     const { maker } = item ? reviewByline(review, item) : { maker: null };
     const profile = maker?.pubkey ? bridge.profile?.(maker.pubkey) : null;
     const kind = item ? store.pictureKind(review.businessId, review.assetId, item.key) : null;
@@ -326,7 +328,8 @@ function reviewsPart(ctx, bridge) {
   const rowsNow = () => {
     if (sidebarRevision !== store.revision) {
       sidebarRevision = store.revision;
-      const next = reviewGroups(store.queue).map((group) => ({ id: group.businessId, label: group.businessName, count: group.items.length }));
+      // The server's counts for every business, not what the capped list holds.
+      const next = reviewBusinessCounts(store.queue).map((business) => ({ id: business.businessId, label: business.businessName, count: business.count }));
       if (JSON.stringify(next) !== JSON.stringify(sidebarRows)) sidebarRows = next;
     }
     return sidebarRows;

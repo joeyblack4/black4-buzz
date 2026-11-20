@@ -391,6 +391,20 @@ MCP connection or the agent tools.
   for changes, **R** rejects; a saved decision moves on by itself. Items of one
   business and one kind of work sit together. Buzz has no swipe gesture, so
   neither does Reviews.
+- **What approving writes to.** The top right of an open decision names the
+  system its pinned request changes ("Updates Google Ads", "Updates Shopify"),
+  named only from that request the way Platform Control names it, never from
+  the action sentence; feedback on a document says "Writes nothing". When one
+  review holds several decisions over one page of work, the decision says
+  which it is ("Decision 2 of 3 in …"). A generic title such as "Review this
+  document" gives way to the review's own title.
+- **Customer menu.** Beside Goal, a Customer menu narrows Reviews to one
+  business: "All customers" and every business with decisions waiting, each
+  with its count. The **Decisions** section in the sidebar lists the same
+  businesses and counts. The queue lists at most 50 items, so both use
+  `review_queue`'s `businesses` counts, never what the list holds (an older
+  server sends none; then the listed items are counted). Choosing a business
+  asks Black 4 for its queue and opens its first decision.
 - **Bulk approve.** Pick items in the queue (nothing is picked for you), then
   **Approve N**. Each is still its own decision with its own token and receipt;
   a partial failure shows per item. Ask for changes and Reject stay one at a

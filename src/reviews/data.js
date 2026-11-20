@@ -156,6 +156,88 @@ function reviewGroups(queue) {
   return [...groups.values()];
 }
 
+/** Every business with decisions waiting, with how many: `[{ businessId,
+ * businessName, count }]`. The queue lists at most 50 items, so counting what
+ * it lists shows too few and drops businesses: the server's own `businesses`
+ * counts come first. An older server sends none; then what is listed is
+ * counted, which is all there is. */
+function reviewBusinessCounts(queue) {
+  if (Array.isArray(queue?.businesses)) {
+    const out = [];
+    for (const business of queue.businesses) {
+      const businessId = typeof business?.businessId === "string" ? business.businessId : "";
+      const count = Number.isInteger(business?.decisions) && business.decisions > 0 ? business.decisions : 0;
+      if (!businessId || !count || out.some((known) => known.businessId === businessId) || out.length >= 200) continue;
+      out.push({ businessId, businessName: plain(business.businessName, 120) || businessId, count });
+    }
+    return out;
+  }
+  return reviewGroups(queue).map((group) => ({ businessId: group.businessId, businessName: group.businessName, count: group.items.length }));
+}
+
+/** A title that names no decision ("Review this document"): the review's own
+ * title says more. */
+const REVIEW_GENERIC_TITLE = /^(?:please\s+)?review\s+(?:this|the)\s+(?:document|report|draft|page|file|work|change)s?\.?$/i;
+/** What a decision is called: its question, else its title; a generic one
+ * gives way to the review's title. */
+function reviewHeadline({ question, title, reviewTitle } = {}) {
+  const own = String(question || title || "").trim();
+  return own && REVIEW_GENERIC_TITLE.test(own) && reviewTitle ? String(reviewTitle) : own || String(reviewTitle || "");
+}
+
+/** The system approving writes to, named only from the pinned request (never
+ * from the action sentence), as Platform Control's review screen names it:
+ * `{ name, state: "known" | "erased" | "report" }`, or null when nothing is
+ * pinned. `report`: a document's feedback, which writes nothing. */
+const REVIEW_PROVIDER_NAMES = Object.freeze({
+  "google-tag-manager": "Google Tag Manager", "google-ads": "Google Ads", "google-analytics": "Google Analytics", "search-console": "Google Search Console",
+  "google-workspace": "Google Workspace", "google-marketing": "Google Marketing", "google-calendar": "Google Calendar", "google-drive": "Google Drive",
+  "google-docs": "Google Docs", "google-sheets": "Google Sheets", "google-slides": "Google Slides", "microsoft-graph": "Microsoft 365",
+  "zoho-crm": "Zoho CRM", "zoho-campaigns": "Zoho Campaigns",
+  acumatica: "Acumatica", ahrefs: "Ahrefs", airtable: "Airtable", asana: "Asana", canva: "Canva", framer: "Framer",
+  github: "GitHub", gitlab: "GitLab", google: "Google", granola: "Granola", hubspot: "HubSpot", klaviyo: "Klaviyo", linear: "Linear",
+  meta: "Meta", microsoft: "Microsoft", notion: "Notion", prismic: "Prismic", salesforce: "Salesforce", shopify: "Shopify",
+  slack: "Slack", stripe: "Stripe", trello: "Trello", twitter: "X", x: "X", woocommerce: "WooCommerce", wordpress: "WordPress",
+  zoho: "Zoho", linkedin: "LinkedIn",
+});
+function reviewDestination(item) {
+  if (item?.workType === "document_feedback") return { name: "Writes nothing", state: "report" };
+  const change = item?.change;
+  if (!change || typeof change !== "object") return null;
+  if (change.erased) return { name: "Request erased · never runs", state: "erased" };
+  const normalize = (value) => String(value).toLowerCase().trim().replace(/[\s_]+/g, "-");
+  const recorded = String((change.connector === "treg" ? change.connection : change.connector) ?? "").trim();
+  if (!recorded) return null;
+  let key = normalize(recorded).replace(/^catalog-/, "");
+  const endpoint = String(change.endpoint ?? "");
+  if (change.connector === "treg") {
+    // Treg connection keys often start with a customer's name: the pinned path names the service.
+    const path = endpoint.toLowerCase().split("?")[0];
+    const family = path.match(/^\/([^/]+)(?:\/|$)/)?.[1];
+    if (/^\/tagmanager\/v2(?:\/|$)/.test(path)) key = "google-tag-manager";
+    else if (/^\/crm\/v3\/(?:objects|properties|associations|schemas)(?:\/|$)/.test(path)) key = "hubspot";
+    else if (/^\/admin\/api\//.test(path)) key = "shopify";
+    else if (/^\/services\/data\/v[\d.]+\//.test(path)) key = "salesforce";
+    else if (family && Object.hasOwn(REVIEW_PROVIDER_NAMES, family)) key = family;
+  }
+  if (/^google-ads(?:-|$)/.test(key)) key = "google-ads";
+  else if (/^(?:ga4|google-analytics)(?:-|$)/.test(key)) key = "google-analytics";
+  else if (/^google-search-console(?:-|$)/.test(key)) key = "search-console";
+  else if (/^google-tag-manager(?:-|$)/.test(key)) key = "google-tag-manager";
+  else if (key === "google-marketing") {
+    // A hostname in the pinned request, not the agent's words.
+    let host = "";
+    try { host = new URL(endpoint).hostname; } catch {}
+    if (host === "googleads.googleapis.com") key = "google-ads";
+    else if (["analyticsdata.googleapis.com", "analyticsadmin.googleapis.com"].includes(host)) key = "google-analytics";
+    else if (/^searchconsole\.googleapis\.com$/.test(host)) key = "search-console";
+    else if (host === "tagmanager.googleapis.com") key = "google-tag-manager";
+  }
+  const family = key.split("-")[0];
+  const name = REVIEW_PROVIDER_NAMES[key] ?? REVIEW_PROVIDER_NAMES[family] ?? plain(recorded, 60);
+  return { name: `Updates ${name}`, state: "known" };
+}
+
 /** Where a review came from, when the server says (staff only): the Buzz
  * thread and the job run that made it. Flat fields: `threadId`, and `job`
  * { jobId, jobName, runId, startedAt }. */

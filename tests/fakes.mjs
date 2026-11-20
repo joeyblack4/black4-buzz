@@ -232,7 +232,8 @@ export async function until(ready, { timeoutMs = 2000, what = "the condition" } 
  * businesses only. */
 /** `goals`: the goals each item serves, by key (opt in: an older queue has none). The queue then answers
  * as Platform Control's does: `goal` filters it, and top-level goals and noGoal count every waiting review. */
-export function fakeReviews({ decide = ["ok"], cardClient = true, needsBusiness = false, goals = null } = {}) {
+/** `businesses`: the queue's per-business counts, passed through as Platform Control sends them (opt in). */
+export function fakeReviews({ decide = ["ok"], cardClient = true, needsBusiness = false, goals = null, businesses = null } = {}) {
   const item = (key, extra = {}) => ({
     key, version: 1, title: `Change ${key}`, workType: "storefront_content", action: "Update the bakery's menu page.", status: "awaiting_decision", decidable: true, decision: null,
     brief: { why: "The menu changed.", expectedResult: "Fewer wrong orders.", before: "Rye", after: "Sourdough" },
@@ -257,6 +258,7 @@ export function fakeReviews({ decide = ["ok"], cardClient = true, needsBusiness 
     const counts = new Map();
     for (const entry of goals ? decidable : []) for (const goal of of(entry)) counts.set(goal.path, { ...goal, reviews: (counts.get(goal.path)?.reviews ?? 0) + 1 });
     return { kind: "black4_review_queue", audience: "staff", total: waiting.length, listed: 2, truncated: false, ...(goals && args.goal ? { goal: args.goal } : {}),
+      ...(businesses ? { businesses } : {}),
       reviews: waiting.length ? [{ businessId: self.review.businessId, businessName: self.review.businessName, assetId: self.review.assetId, title: self.review.title, version: 1,
         items: waiting.map((entry) => ({ key: entry.key, version: entry.version, title: entry.title, action: entry.action, workType: entry.workType, brief: "The menu changed.", age: "2h",
           ...(goals ? { goals: of(entry) } : {}) })) }] : [],

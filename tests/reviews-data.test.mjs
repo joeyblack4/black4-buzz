@@ -6,7 +6,7 @@ import test from "node:test";
 import { freshPlugin, settle } from "./fakes.mjs";
 
 const { reviewData, reviewLocator, reviewLink, reviewOrder, reviewGroups, reviewState, wordDiff, REVIEW_UNDO_MS,
-  reviewGoalChoices, reviewGoalNow, reviewShown, REVIEW_ALL_GOALS, REVIEW_NO_GOAL } = await freshPlugin();
+  reviewGoalChoices, reviewGoalNow, reviewShown, REVIEW_ALL_GOALS, REVIEW_NO_GOAL, reviewBusinessCounts, reviewHeadline, reviewDestination } = await freshPlugin();
 
 const token = (n) => `b4rd_${String(n).padEnd(43, "x")}`;
 const tool = (data, meta) => ({ structuredContent: { data }, content: [{ type: "text", text: JSON.stringify({ data }) }], ...(meta ? { _meta: { "ai.black4/review-card": meta } } : {}) });
@@ -359,4 +359,41 @@ test("reviewShown narrows a loaded queue by business and by each review's own go
   assert.equal(ids(reviewShown(goalServer(), { goal: LOYAL.path })), "rv_mail:a");
   assert.equal(ids(reviewShown(goalServer(), { goal: REVIEW_NO_GOAL })), "rv_hours:a");
   assert.equal(ids(reviewShown(goalServer(), { businessId: "business-surf" })), "");
+});
+
+test("each business's waiting count is the server's, not the capped list's; every business shows", () => {
+  // The list holds 3 items of 2 businesses; the server counts 47, 9 and 2 across 3.
+  const capped = { ...QUEUE, total: 58, listed: 3, truncated: true, businesses: [
+    { businessId: "business-crumb", businessName: "Crumb & Co", decisions: 47 },
+    { businessId: "business-dune", businessName: "Dune Kites", decisions: 9 },
+    { businessId: "business-tide", businessName: "Tide Surf", decisions: 2 },
+    { businessId: "business-none", businessName: "Nothing Waiting", decisions: 0 },
+    { businessId: "business-crumb", businessName: "Crumb & Co again", decisions: 5 },
+  ] };
+  assert.deepEqual(reviewBusinessCounts(capped).map((row) => [row.businessName, row.count]),
+    [["Crumb & Co", 47], ["Dune Kites", 9], ["Tide Surf", 2]], "the server's counts, none at zero, each business once");
+  assert.deepEqual(reviewBusinessCounts(QUEUE).map((row) => [row.businessName, row.count]), [["Crumb & Co", 2], ["Tide Surf", 1]],
+    "an older server sends no counts: what is listed is all there is");
+  assert.deepEqual(reviewBusinessCounts(null), []);
+});
+
+test("a generic title gives way to the review's title; a real question is kept", () => {
+  assert.equal(reviewHeadline({ title: "Review this document", reviewTitle: "Weekly organic read" }), "Weekly organic read");
+  assert.equal(reviewHeadline({ title: "Review this report", reviewTitle: "Spend audit" }), "Spend audit");
+  assert.equal(reviewHeadline({ question: "Pause the ad?", title: "Review this document", reviewTitle: "Ads" }), "Pause the ad?");
+  assert.equal(reviewHeadline({ title: "Review this document" }), "Review this document", "nothing better to say");
+  assert.equal(reviewHeadline({ title: "Review this document's pricing table", reviewTitle: "Menu" }), "Review this document's pricing table");
+});
+
+test("what approving writes to is named from the pinned request only, as Platform Control names it", () => {
+  const change = (connector, endpoint, connection) => ({ workType: "paid_media", change: { method: "POST", endpoint, connector, connection } });
+  assert.deepEqual(reviewDestination(change("google-marketing", "https://googleads.googleapis.com/v25/customers/1/campaigns:mutate", "connection-google-marketing-a")), { name: "Updates Google Ads", state: "known" });
+  assert.equal(reviewDestination(change("google-marketing", "https://searchconsole.googleapis.com/v1/sites")).name, "Updates Google Search Console");
+  assert.equal(reviewDestination(change("shopify", "/admin/api/2025-01/products.json")).name, "Updates Shopify");
+  assert.equal(reviewDestination(change("treg", "/admin/api/2025-01/products.json", "crumb-store")).name, "Updates Shopify", "Treg: the path names the service, not the connection's name");
+  assert.equal(reviewDestination(change("google-ads-crumb", "/x")).name, "Updates Google Ads");
+  assert.equal(reviewDestination(change("odd-tool", "/x")).name, "Updates odd-tool", "an unknown system keeps its recorded name");
+  assert.deepEqual(reviewDestination({ workType: "paid_media", change: { connector: "shopify", erased: true } }), { name: "Request erased · never runs", state: "erased" });
+  assert.deepEqual(reviewDestination({ workType: "document_feedback" }), { name: "Writes nothing", state: "report" });
+  assert.equal(reviewDestination({ workType: "paid_media", action: "Raise the Google Ads budget" }), null, "never from the action sentence");
 });

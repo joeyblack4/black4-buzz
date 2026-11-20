@@ -3036,8 +3036,15 @@ elif sys.argv[1:3] == ["messages", "send"]:
 """
 
 
-def drop_line(author, at="2026-11-18T09:00:12.000000Z", dm=False, channel="6f1c7c1e-1d5b-4c55-9d43-0c1f0b6a2f10", colour=True):
+def recent(second):
+    """A log time an hour ago, at `second` past the minute: agentctl keeps a
+    day of drops by the real clock, so a fixed date stops counting a day on."""
+    return time.strftime("%Y-%m-%dT%H:%M:", time.gmtime(time.time() - 3600)) + f"{second:02d}.000000Z"
+
+
+def drop_line(author, at=None, dm=False, channel="6f1c7c1e-1d5b-4c55-9d43-0c1f0b6a2f10", colour=True):
     """The line buzz-acp 0.5.30 writes when its author gate drops an event."""
+    at = at or recent(12)
     target = "\x1b[2mbuzz_acp::inbound_author_gate\x1b[0m\x1b[2m:\x1b[0m" if colour else "buzz_acp::inbound_author_gate:"
     return (f"{at}  INFO {target} inbound author gate \u2014 dropping event channel_id={channel} raw_author={author} "
             f"effective_author={author} mode=allowlist is_dm={'true' if dm else 'false'}\n")
@@ -3152,7 +3159,8 @@ class DroppedMentions(Base):
         with open(self.log, "a") as f: f.write(drop_line(NEWCOMER))
         self.a.supervise_pass(now + 1)
         self.assertEqual(spawned, [self.d.name])
-        with open(self.log, "a") as f: f.write(drop_line(NEWCOMER, at="2026-11-18T09:00:40.000000Z"))
+        later = recent(40)
+        with open(self.log, "a") as f: f.write(drop_line(NEWCOMER, at=later))
         self.a.supervise_pass(now + 2)
         self.assertEqual(spawned, [self.d.name], "not again within the minute")
         self.a.supervise_pass(now + self.a.DROP_EVERY + 3)
@@ -3160,7 +3168,7 @@ class DroppedMentions(Base):
         self.a.supervise_pass(now + 2 * self.a.DROP_EVERY + 4)
         self.assertEqual(len(spawned), 2, "nothing new: no ask")
         view = self.req(op="status", pubkey=self.d.name)["audience"]["unheard"]
-        self.assertEqual((view["count"], view["lastAt"]), (2, int(self.a.log_stamp("2026-11-18T09:00:40.000000Z"))))
+        self.assertEqual((view["count"], view["lastAt"]), (2, int(self.a.log_stamp(later))))
 
     def test_a_newly_linked_person_is_heard_after_the_turns_in_flight_and_told_so_once(self):
         self.link(NEWCOMER)

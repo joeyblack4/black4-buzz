@@ -86,7 +86,7 @@ function reviewListed(queue) {
         madeBy: item.madeBy ?? review.madeBy ?? null, requestedBy: item.requestedBy ?? review.requestedBy ?? null, job: item.job ?? review.job ?? null,
         producer: item.producer ?? review.producer ?? null, origin: item.origin ?? review.origin ?? null,
         capture: item.capture && typeof item.capture === "object" ? item.capture : review.capture && typeof review.capture === "object" ? review.capture : null,
-        goals: reviewGoalsOf(item.goals ?? review.goals) });
+        goals: reviewGoalsOf(item.goals ?? review.goals), replaces: reviewReplaces(review) });
     }
   }
   return out;
@@ -307,6 +307,17 @@ function reviewByline(review, item) {
   return { maker, origin };
 }
 
+/** What a redo replaces, in words: Platform Control's `supersedes` on a
+ * review (Reject is final, so redone work comes back as a new review naming
+ * the rejected one). Null when it replaces nothing. */
+function reviewReplaces(review) {
+  const prior = review?.supersedes;
+  if (!prior || typeof prior !== "object") return null;
+  const title = plain(prior.title, 120) || "an earlier review";
+  const why = plain(prior.rejectedFeedback, 240);
+  return `Replaces “${title}”, which was rejected${why ? `: ${why}` : ""}`;
+}
+
 /** An item's state in words, from its own decision fields: approval is never
  * shown as completion. */
 function reviewState(item, receipt) {
@@ -369,8 +380,35 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
     return { data: data?.data && data.kind === undefined ? data.data : data, meta };
   };
 
+  /** A queue answer squared with the decisions made here. A newer version of
+   * an item a person decided is new work, so the old version's receipt no
+   * longer speaks for it and is dropped (Reject is final: redone work comes
+   * back as a new review, and changes asked for come back as a new version).
+   * An item still listed at the very version just decided is from an answer
+   * read before the decision: it stays off the list. */
+  const squared = (value) => {
+    if (!value?.reviews) return value;
+    let gone = 0;
+    const reviews = value.reviews.map((review) => {
+      const items = (review.items ?? []).filter((item) => {
+        const id = reviewItemId(review.businessId, review.assetId, item.key);
+        const receipt = receipts.get(id);
+        if (!receipt || !Number.isInteger(item.version)) return true;
+        if (item.version > receipt.version) {
+          if (receipt.state === "saved") receipts.delete(id);
+          return true;
+        }
+        if (receipt.state === "saved" && item.version === receipt.version) { gone += 1; return false; }
+        return true;
+      });
+      return items.length === (review.items ?? []).length ? review : { ...review, items };
+    }).filter((review) => (review.items ?? []).length);
+    return gone ? { ...value, total: Math.max(0, (value.total ?? gone) - gone), reviews } : { ...value, reviews };
+  };
+
   const noteQueue = (value) => {
     if (!value || value.kind !== "black4_review_queue") return;
+    value = squared(value);
     queue = value;
     for (const review of value.reviews ?? []) remember(review.assetId, review.businessId);
     for (const entry of [...(value.blocked ?? []), ...(value.stalled ?? [])]) remember(entry.assetId, entry.businessId);
@@ -394,7 +432,7 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
       try {
         const data = reviewQueueOf(await call("review_queue", { ...(businessId ? { businessId } : {}), ...(goal && goal !== REVIEW_ALL_GOALS ? { goal } : {}) }));
         if (data?.kind !== "black4_review_queue") throw new Error("Black 4 answered with something Reviews cannot show.");
-        if (at === epoch) { known.queue = data; known.error = null; }
+        if (at === epoch) { known.queue = squared(data); known.error = null; }
         return data;
       } catch (error) { if (at === epoch) known.error = error; throw error; }
       finally { known.flight = null; if (at === epoch) changed(); }
@@ -435,7 +473,9 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
       if (capture || beforeCapture) captures.set(id, { capture, beforeCapture });
       // A decision the server now shows replaces a receipt still unsure of it.
       const receipt = receipts.get(id);
-      if (receipt && item.decision && ["unknown", "conflict"].includes(receipt.state)) receipts.set(id, { ...receipt, state: "saved", decision: item.decision });
+      // A newer version is new work: the old version's receipt no longer speaks for it.
+      if (receipt?.state === "saved" && Number.isInteger(item.version) && item.version > receipt.version) receipts.delete(id);
+      else if (receipt && item.decision && ["unknown", "conflict"].includes(receipt.state)) receipts.set(id, { ...receipt, state: "saved", decision: item.decision });
     }
     reviews.set(key, { data, readAt: now() });
     changed();

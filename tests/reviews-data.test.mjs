@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { freshPlugin, settle } from "./fakes.mjs";
 
-const { reviewData, reviewLocator, reviewLink, reviewOrder, reviewGroups, reviewState, wordDiff, REVIEW_UNDO_MS,
+const { reviewData, reviewReplaces, reviewLocator, reviewLink, reviewOrder, reviewGroups, reviewState, wordDiff, REVIEW_UNDO_MS,
   reviewGoalChoices, reviewGoalNow, reviewShown, REVIEW_ALL_GOALS, REVIEW_NO_GOAL, reviewBusinessCounts, reviewHeadline, reviewDestination, reviewScreens } = await freshPlugin();
 
 const token = (n) => `b4rd_${String(n).padEnd(43, "x")}`;
@@ -419,4 +419,49 @@ test("bulk reject: one reason, sent with each picked item as its own decision; n
   const sent = decideCalls(calls).map((entry) => entry.args);
   assert.deepEqual(sent.map((args) => [args.itemKey, args.verdict, args.feedback]), [["hero", "rejected", "Not this season."], ["price", "rejected", "Not this season."]]);
   assert.notEqual(sent[0].decisionToken, sent[1].decisionToken, "each its own token");
+});
+
+test("a rejected item that comes back as a new version is new work: no stale Rejected, no bounce, and it can be decided", async () => {
+  let version = 1;
+  const listed = () => ({ kind: "black4_review_queue", total: 2, listed: 2, reviews: [
+    { businessId: "business-crumb", businessName: "Crumb & Co", assetId: "rv_bakery", title: "Menu",
+      items: [{ key: "hero", version, title: "Change hero", age: "1m" }, { key: "price", version: 1, title: "Change price", age: "2h" }] }] });
+  const { store, calls, advance } = data({ review: () => bakery({ version }), review_queue: () => tool(listed()) });
+  await store.readQueue();
+  const review = await store.open({ assetId: "rv_bakery", businessId: "business-crumb" });
+  const receipt = store.propose({ review, item: review.items[0], verdict: "rejected", feedback: "Wrong offer" });
+  await advance(8000);
+  assert.equal(store.receipt(receipt.id).state, "saved");
+  const ids = () => reviewOrder(store.queue).map((entry) => `${entry.id}@${entry.version}`);
+  assert.deepEqual(ids(), ["business-crumb/rv_bakery/price@1"], "the decided item leaves the list at once");
+
+  // A poll read before the decision still lists version 1: it stays off the list.
+  await store.readQueue();
+  assert.deepEqual(ids(), ["business-crumb/rv_bakery/price@1"]);
+  assert.equal(store.queue.total, 1);
+  assert.equal(store.receipt(receipt.id).state, "saved");
+
+  // The agent sends version 2 (after changes asked; a rejected review comes back as a new review instead).
+  version = 2;
+  await store.readQueue();
+  assert.deepEqual(ids(), ["business-crumb/rv_bakery/hero@2", "business-crumb/rv_bakery/price@1"]);
+  assert.equal(store.receipt(receipt.id), null, "version 1's receipt no longer speaks for version 2");
+  const fresh = await store.open({ assetId: "rv_bakery", businessId: "business-crumb" }, { fresh: true });
+  const hero = fresh.items[0];
+  assert.deepEqual(reviewState(hero, store.receipt(receipt.id)), { tone: "waiting", text: "Waiting for you" });
+  const again = store.propose({ review: fresh, item: hero, verdict: "approved" });
+  assert.equal(again.state, "pending", "a new decision, not the old saved one");
+  await advance(8000);
+  assert.deepEqual(decideCalls(calls).map((call) => [call.args.itemKey, call.args.version, call.args.verdict]), [["hero", 1, "rejected"], ["hero", 2, "approved"]]);
+});
+
+test("a redo says which rejected review it replaces, and why that one was rejected", () => {
+  assert.equal(reviewReplaces({ supersedes: { assetId: "rv_old", title: "Paid search plan", rejectedFeedback: "Grow the brand, not one store" } }),
+    "Replaces “Paid search plan”, which was rejected: Grow the brand, not one store");
+  assert.equal(reviewReplaces({ supersedes: { assetId: "rv_old", title: "Paid search plan", rejectedFeedback: null } }), "Replaces “Paid search plan”, which was rejected");
+  assert.equal(reviewReplaces({ supersedes: null }), null);
+  assert.equal(reviewReplaces({}), null);
+  const [entry] = reviewOrder({ kind: "black4_review_queue", reviews: [{ businessId: "b", businessName: "B", assetId: "rv_new", title: "Brand plan",
+    supersedes: { assetId: "rv_old", title: "Paid search plan", rejectedFeedback: "No" }, items: [{ key: "plan", version: 1, title: "Plan" }] }] });
+  assert.equal(entry.replaces, "Replaces “Paid search plan”, which was rejected: No");
 });

@@ -284,16 +284,18 @@ function reviewScreens(React, store, bridge) {
     const item = review ? (review.items.find((candidate) => candidate.key === entry.itemKey) ?? review.items.find((candidate) => candidate.key === review.focusItemKey) ?? review.items[0]) : null;
     const id = review && item ? reviewItemId(review.businessId, review.assetId, item.key) : null;
     const receipt = id ? store.receipt(id) : null;
-    // A saved decision moves on to the next waiting item by itself.
-    const savedRef = React.useRef(receipt?.state === "saved");
+    // A saved decision moves on to the next waiting item by itself: only when
+    // this item's own decision saves while it is shown, never on arriving at an
+    // item already decided.
+    const savedRef = React.useRef({ id, saved: receipt?.state === "saved" });
     React.useEffect(() => {
       const saved = receipt?.state === "saved";
-      if (saved && !savedRef.current && step?.next) {
+      const was = savedRef.current;
+      savedRef.current = { id, saved };
+      if (saved && was.id === id && !was.saved && step?.next) {
         const timer = setTimeout(() => { onSaved?.(id); step.next(); }, 900);
-        savedRef.current = saved;
         return () => clearTimeout(timer);
       }
-      savedRef.current = saved;
       return undefined;
     }, [receipt?.state, id]);
     // Key commands for this item (the surface's shortcuts call them).
@@ -340,7 +342,7 @@ function reviewScreens(React, store, bridge) {
     const at = review.items.indexOf(item);
     const among = review.items.length > 1 ? Caption(`Decision ${at + 1} of ${review.items.length}${review.title ? ` in ${review.title}` : ""}`) : null;
     const body = h(ui.Article, { key: id, label: headline },
-      h(Stack, { gap: 2 }, h(Byline, { review, item }), among, Question(headline)),
+      h(Stack, { gap: 2 }, h(Byline, { review, item }), reviewReplaces(review) ? Caption(reviewReplaces(review)) : null, among, Question(headline)),
       h(Work, { review, item }),
       h(Details, { review, item }));
     return wrap(review.businessName, body, bar ?? h(Decide, { review, item, compose, setCompose, onReload: () => setRevision((n) => n + 1) }));

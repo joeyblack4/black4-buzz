@@ -465,3 +465,27 @@ test("a redo says which rejected review it replaces, and why that one was reject
     supersedes: { assetId: "rv_old", title: "Paid search plan", rejectedFeedback: "No" }, items: [{ key: "plan", version: 1, title: "Plan" }] }] });
   assert.equal(entry.replaces, "Replaces “Paid search plan”, which was rejected: No");
 });
+
+test("after changes asked, a listed v2 opens as v2 through the normal open, not the cached decided v1", async () => {
+  let version = 1;
+  const listed = () => ({ kind: "black4_review_queue", total: 1, listed: 1, reviews: [
+    { businessId: "business-crumb", businessName: "Crumb & Co", assetId: "rv_bakery", title: "Menu", items: [{ key: "hero", version, title: "Change hero", age: "1m" }] }] });
+  const { store, calls, advance } = data({ review: () => bakery({ version }), review_queue: () => tool(listed()) });
+  await store.readQueue();
+  const review = await store.open({ assetId: "rv_bakery", businessId: "business-crumb" });
+  store.propose({ review, item: review.items[0], verdict: "changes_requested", feedback: "Shorter" });
+  await advance(8000);
+  assert.equal(store.cachedReview("business-crumb", "rv_bakery").items[0].status, "decided");
+  // Within the fresh window, the agent's v2 is listed.
+  version = 2;
+  await store.readQueue();
+  assert.equal(store.cachedReview("business-crumb", "rv_bakery"), null, "the stale review is forgotten");
+  const opens = calls.filter((call) => call.name === "open_review").length;
+  const again = await store.open({ assetId: "rv_bakery", businessId: "business-crumb" });
+  assert.equal(calls.filter((call) => call.name === "open_review").length, opens + 1, "read again, not served from cache");
+  assert.equal(again.items[0].version, 2);
+  assert.equal(store.canDecide(again, again.items[0]), true);
+  // A listing of the same version keeps the cache.
+  await store.readQueue();
+  assert.equal(store.cachedReview("business-crumb", "rv_bakery").items[0].version, 2);
+});

@@ -386,10 +386,17 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
    * back as a new review, and changes asked for come back as a new version).
    * An item still listed at the very version just decided is from an answer
    * read before the decision: it stays off the list. */
+  const reviews_ = reviews; // the cache; `reviews` below is the answer's list
   const squared = (value) => {
     if (!value?.reviews) return value;
     let gone = 0;
     const reviews = value.reviews.map((review) => {
+      // A review read before a newer version of one of its items arrived is
+      // stale: forget it, so opening it reads the new version.
+      const key = reviewAssetKey(review.businessId, review.assetId);
+      const cached = reviews_.get(key)?.data;
+      if (cached && (review.items ?? []).some((item) => Number.isInteger(item.version)
+        && !(cached.items ?? []).some((known) => known.key === item.key && known.version >= item.version))) reviews_.delete(key);
       const items = (review.items ?? []).filter((item) => {
         const id = reviewItemId(review.businessId, review.assetId, item.key);
         const receipt = receipts.get(id);

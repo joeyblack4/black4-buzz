@@ -3855,10 +3855,17 @@ function reviewData(call, { now = () => Date.now(), setTimer = (fn, ms) => setTi
    * back as a new review, and changes asked for come back as a new version).
    * An item still listed at the very version just decided is from an answer
    * read before the decision: it stays off the list. */
+  const reviews_ = reviews; // the cache; `reviews` below is the answer's list
   const squared = (value) => {
     if (!value?.reviews) return value;
     let gone = 0;
     const reviews = value.reviews.map((review) => {
+      // A review read before a newer version of one of its items arrived is
+      // stale: forget it, so opening it reads the new version.
+      const key = reviewAssetKey(review.businessId, review.assetId);
+      const cached = reviews_.get(key)?.data;
+      if (cached && (review.items ?? []).some((item) => Number.isInteger(item.version)
+        && !(cached.items ?? []).some((known) => known.key === item.key && known.version >= item.version))) reviews_.delete(key);
       const items = (review.items ?? []).filter((item) => {
         const id = reviewItemId(review.businessId, review.assetId, item.key);
         const receipt = receipts.get(id);
@@ -4552,6 +4559,9 @@ function reviewScreens(React, store, bridge) {
     const [compose, setCompose] = React.useState(null);
     const key = `${entry?.businessId ?? ""}/${entry?.assetId ?? ""}`;
     React.useEffect(() => setCompose(null), [key, entry?.itemKey]);
+    // The store forgets a review when a newer version of one of its items is
+    // listed: then it is read again, never left showing the old version.
+    const held = !!(entry?.businessId && store.cachedReview(entry.businessId, entry.assetId));
     React.useEffect(() => {
       let live = true;
       if (link.status !== "connected" || !entry?.assetId) return () => { live = false; };
@@ -4559,7 +4569,7 @@ function reviewScreens(React, store, bridge) {
       setState({ review: cached, error: null });
       store.open(entry, { fresh: revision > 0 }).then((review) => { if (live) setState({ review, error: null }); }, (error) => { if (live) setState({ review: null, error }); });
       return () => { live = false; };
-    }, [key, link.status, revision]);
+    }, [key, link.status, revision, held]);
     const shown = state.review && entry?.assetId === state.review.assetId ? state.review : store.peek(entry);
     const review = shown ? (store.cachedReview(shown.businessId, shown.assetId) ?? shown) : null;
     // The next item is read while this one is on screen, so stepping is instant.
@@ -4580,17 +4590,18 @@ function reviewScreens(React, store, bridge) {
     // A saved decision moves on to the next waiting item by itself: only when
     // this item's own decision saves while it is shown, never on arriving at an
     // item already decided.
-    const savedRef = React.useRef({ id, saved: receipt?.state === "saved" });
+    const shownAs = item ? `${id}@${item.version}` : null;
+    const savedRef = React.useRef({ shownAs, saved: receipt?.state === "saved" });
     React.useEffect(() => {
       const saved = receipt?.state === "saved";
       const was = savedRef.current;
-      savedRef.current = { id, saved };
-      if (saved && was.id === id && !was.saved && step?.next) {
+      savedRef.current = { shownAs, saved };
+      if (saved && was.shownAs === shownAs && !was.saved && step?.next) {
         const timer = setTimeout(() => { onSaved?.(id); step.next(); }, 900);
         return () => clearTimeout(timer);
       }
       return undefined;
-    }, [receipt?.state, id]);
+    }, [receipt?.state, shownAs]);
     // Key commands for this item (the surface's shortcuts call them).
     React.useEffect(() => {
       if (!onCommand) return undefined;
@@ -4634,7 +4645,8 @@ function reviewScreens(React, store, bridge) {
     // One review can hold several decisions over one page of work: say which one this is.
     const at = review.items.indexOf(item);
     const among = review.items.length > 1 ? Caption(`Decision ${at + 1} of ${review.items.length}${review.title ? ` in ${review.title}` : ""}`) : null;
-    const body = h(ui.Article, { key: id, label: headline },
+    // Keyed by version too: a new version is a new card, with nothing carried over.
+    const body = h(ui.Article, { key: `${id}@${item.version}`, label: headline },
       h(Stack, { gap: 2 }, h(Byline, { review, item }), reviewReplaces(review) ? Caption(reviewReplaces(review)) : null, among, Question(headline)),
       h(Work, { review, item }),
       h(Details, { review, item }));

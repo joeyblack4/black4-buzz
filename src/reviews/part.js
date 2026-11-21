@@ -220,7 +220,7 @@ function reviewsPart(ctx, bridge) {
       ? h(QueueFilters, { queue: work.queue ?? queue, filter: current.filter, onFilter, goal: work.goal, goals: work.choices, onGoal }) : null;
     const empty = h(ui.EmptyState, { glyph: "decisions", title: order.length ? "Choose a decision" : "Nothing to decide", frame: "none" });
     const detail = current.entry
-      ? h(ReviewItem, { key: "item", entry: current.entry, step, onCommand, frame: true, bar: bulkBar })
+      ? h(ReviewItem, { key: "item", entry: current.entry, step, onCommand, bar: bulkBar })
       : link.status === "connected" && queue ? (bulkBar ? h(ui.Subview, { header: null, footer: bulkBar }, h(ui.PanelBody, null, empty)) : empty) : null;
     return h(ui.Page, { label: "Reviews", fill: true, header: h(ui.PanelHeader, { title: "Reviews", glyph: "decisions", actions: [h(ui.IconButton, { key: "refresh", label: "Refresh", glyph: "refresh", large: true, onClick: () => bridge.queue.refresh() })] }),
       onFocus: focusIn, onBlur: focusOut },

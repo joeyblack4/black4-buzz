@@ -2678,8 +2678,8 @@ function buzzUi(React, { nativeSelect = false } = {}) {
   const Surface = ({ label, onFocus, onBlur, children }) =>
     h("div", { "data-buzz-ui": "", role: "region", "aria-label": label, onFocus, onBlur, style: { display: "flex", flexDirection: "column", height: "100%", minHeight: 0 } }, ...each(children));
   /** A side panel's body: Buzz leaves the inset to the panel (as GitHub's). */
-  const PanelBody = ({ children }) =>
-    h("div", { "data-buzz-ui": "", style: { padding: "var(--space-panel-inset)", overflowY: "auto", minHeight: 0, flex: 1, display: "flex", flexDirection: "column", gap: "var(--space-4)", color: "var(--text-standard)" } },
+  const PanelBody = ({ fit = false, children }) =>
+    h("div", { "data-buzz-ui": "", style: { padding: "var(--space-panel-inset)", overflowY: fit ? "hidden" : "auto", minHeight: 0, flex: 1, display: "flex", flexDirection: "column", gap: "var(--space-4)", color: "var(--text-standard)" } },
       ...each(children));
 
   /** A child that fills the rest of a `fill` page (an embedded browser). */
@@ -2964,12 +2964,11 @@ function buzzUi(React, { nativeSelect = false } = {}) {
         ? h("span", null, h(Button, { variant: "link", size: "text", onClick: onOrigin }, h(Fragment, null, originGlyph && ICON[originGlyph] ? icon(ICON[originGlyph], 12, { style: { marginInlineEnd: "var(--space-1)", verticalAlign: "-1px" } }) : null, origin)))
         : h("span", { className: "flex items-center gap-1 text-caption text-subtle" }, originGlyph && ICON[originGlyph] ? icon(ICON[originGlyph], 12) : null, origin)) : null);
   /** The work, big: a frame that takes the panel's height (Diffs' card,
-   * `.preview`), its toggle (Now / After) floating at the top. `fit`: it holds
-   * an embedded browser, which Buzz draws over the window, not inside the
-   * scrolling body: it takes only the room the body has, so it never runs
-   * under the decision bar below. */
+   * `.preview`), with its Now / After toggle at the top. The live work area is
+   * sized by the article's grid. Buzz places the native browser using its
+   * measured bounds, regardless of any DOM overflow clipping. */
   const Canvas = ({ label, toolbar, fit = false, children }) =>
-    h("figure", { "aria-label": label, style: { ...card, margin: 0, position: "relative", display: "flex", flexDirection: "column", flex: "1 1 auto", minHeight: fit ? "min(14rem, 32vh)" : "min(34rem, 64vh)" } },
+    h("figure", { "aria-label": label, style: { ...card, margin: 0, position: "relative", display: "flex", flexDirection: "column", flex: "1 1 auto", minHeight: fit ? 0 : "min(34rem, 64vh)" } },
       toolbar ? h("div", { style: { ...cardHeader, justifyContent: "space-between" } }, ...each(toolbar)) : null,
       h("div", { style: { flex: 1, minHeight: 0, display: "flex", alignItems: "stretch", justifyContent: "center", overflow: "auto", background: "var(--surface-inset)" } }, ...each(children)));
   /** Layers in the canvas, each filling it, the last on top (a live page over its capture). */
@@ -2988,9 +2987,14 @@ function buzzUi(React, { nativeSelect = false } = {}) {
       h("span", { style: { minWidth: 0, overflowWrap: "anywhere" } }, children));
   /** What approving permits, in full. */
   const Permits = (text) => h("p", { className: "m-0 text-body-sm text-standard", style: { overflowWrap: "anywhere" } }, text);
-  /** One review item's column: its heading, the canvas taking the rest, then details. */
-  const Article = ({ label, children }) =>
-    h("article", { "aria-label": label, style: { display: "flex", flexDirection: "column", gap: "var(--space-3)", flex: "1 0 auto", minHeight: "100%" } }, ...each(children));
+  /** The heading and details scroll within their rows when live work fills
+   * the panel. The browser itself scrolls within the space between them. */
+  const Article = ({ label, heading, details, fit = false, children }) =>
+    h("article", { "aria-label": label, style: fit
+        ? { display: "grid", gridTemplateRows: "fit-content(25%) minmax(0, 1fr) fit-content(25%)", gap: "var(--space-3)", flex: 1, minHeight: 0 }
+        : { display: "flex", flexDirection: "column", gap: "var(--space-3)", flex: "1 0 auto", minHeight: "100%" } },
+      fit ? h("div", { style: { overflow: "auto" } }, heading) : heading, ...each(children),
+      fit ? h("div", { style: { overflow: "auto" } }, details) : details);
   /** The question, in full, the heading of the item. */
   const Question = (text) => h("h2", { className: "m-0 text-label", style: { overflowWrap: "anywhere" } }, text);
 
@@ -4430,7 +4434,7 @@ function reviewScreens(React, store, bridge) {
       const before = usePicture(review, item, hasBefore && shown === "before" ? "beforeCapture" : null);
       const toolbar = hasBefore ? [Caption(item.title), h(Tabs, { key: "toggle", variant: "segmented", label: "Show", value: shown, onChange: setWhich,
         items: [{ value: "before", label: "Now" }, { value: "after", label: "After" }] })] : null;
-      if (shown === "before") return h(Canvas, { label: `The page now: ${item.title}`, toolbar }, h(CanvasImage, { src: before, alt: `${item.title}: now` }));
+      if (shown === "before") return h(Canvas, { label: `The page now: ${item.title}`, toolbar, fit: !!bridge.browser }, h(CanvasImage, { src: before, alt: `${item.title}: now` }));
       // The live page over its capture: the capture shows until the page paints.
       return h(Canvas, { label: `The work: ${item.title}`, toolbar, fit: !!bridge.browser },
         bridge.browser
@@ -4466,12 +4470,8 @@ function reviewScreens(React, store, bridge) {
     },
   };
   /** Which canvas a review item gets: its artifact page, its image, else the fallback. */
-  function Work({ review, item }) {
-    const link = store.preview(review.businessId, review.assetId, item.key);
-    // An item Black 4 marks as not work-first keeps its earlier look when it
-    // has a card to show; the page is still shown when that is all there is.
-    const older = item.workFirst === false && item.card?.show && item.card.show.type !== "media";
-    if (link && !older) return h(CANVAS.page, { review, item, link });
+  function Work({ review, item, link }) {
+    if (link) return h(CANVAS.page, { review, item, link });
     if (store.pictureKind(review.businessId, review.assetId, item.key) || item.card?.show?.type === "media") return h(CANVAS.media, { review, item });
     return h(CANVAS.fallback, { item });
   }
@@ -4576,7 +4576,7 @@ function reviewScreens(React, store, bridge) {
    * `{ businessId?, assetId, itemKey? }`. `step`: { position, total, next,
    * previous } from the queue; `onBack`: to the queue. `onCommand` receives
    * this item's key commands while it is shown (shortcuts). */
-  function ReviewItem({ entry, step, onBack, onCommand, onSaved, frame = true, bar = null }) {
+  function ReviewItem({ entry, step, onBack, onCommand, onSaved, bar = null }) {
     const link = useConnection();
     useStore();
     const [state, setState] = React.useState({ review: null, error: null });
@@ -4651,9 +4651,8 @@ function reviewScreens(React, store, bridge) {
         step ? h(IconButton, { key: "next", label: "Next decision (J)", glyph: "down", large: true, disabled: !step.next, onClick: () => step.next?.() }) : null,
         h(IconButton, { key: "refresh", label: "Refresh", glyph: "refresh", large: true, onClick: () => setRevision((n) => n + 1) }),
       ].filter(Boolean) });
-    const wrap = (title, body, bar = null) => frame
-      ? h(Subview, { header: header(title), footer: bar }, h(PanelBody, null, body))
-      : h(Stack, { gap: 4 }, body, bar);
+    const wrap = (title, body, bar = null, fit = false) =>
+      h(Subview, { header: header(title), footer: bar }, h(PanelBody, { fit }, body));
 
     if (link.status !== "connected") return wrap("Reviews", h(NotConnected, { link }));
     if (state.error) {
@@ -4670,12 +4669,16 @@ function reviewScreens(React, store, bridge) {
     // One review can hold several decisions over one page of work: say which one this is.
     const at = review.items.indexOf(item);
     const among = review.items.length > 1 ? Caption(`Decision ${at + 1} of ${review.items.length}${review.title ? ` in ${review.title}` : ""}`) : null;
+    // Older cards keep their original renderer when the review marks them as not work-first.
+    const older = item.workFirst === false && card.show && card.show.type !== "media";
+    const preview = older ? null : store.preview(review.businessId, review.assetId, item.key);
+    const fit = !!(preview && bridge.browser);
     // Keyed by version too: a new version is a new card, with nothing carried over.
-    const body = h(ui.Article, { key: `${id}@${item.version}`, label: headline },
-      h(Stack, { gap: 2 }, h(Byline, { review, item }), reviewReplaces(review) ? Caption(reviewReplaces(review)) : null, among, Question(headline)),
-      h(Work, { review, item }),
-      h(Details, { review, item }));
-    return wrap(review.businessName, body, bar ?? h(Decide, { review, item, compose, setCompose, onReload: () => setRevision((n) => n + 1) }));
+    const body = h(ui.Article, { key: `${id}@${item.version}`, label: headline, fit,
+      heading: h(Stack, { gap: 2 }, h(Byline, { review, item }), reviewReplaces(review) ? Caption(reviewReplaces(review)) : null, among, Question(headline)),
+      details: h(Details, { review, item }) },
+      h(Work, { review, item, link: preview }));
+    return wrap(review.businessName, body, bar ?? h(Decide, { review, item, compose, setCompose, onReload: () => setRevision((n) => n + 1) }), fit);
   }
 
   // ---- the queue -----------------------------------------------------------------
@@ -4998,7 +5001,7 @@ function reviewsPart(ctx, bridge) {
       ? h(QueueFilters, { queue: work.queue ?? queue, filter: current.filter, onFilter, goal: work.goal, goals: work.choices, onGoal }) : null;
     const empty = h(ui.EmptyState, { glyph: "decisions", title: order.length ? "Choose a decision" : "Nothing to decide", frame: "none" });
     const detail = current.entry
-      ? h(ReviewItem, { key: "item", entry: current.entry, step, onCommand, frame: true, bar: bulkBar })
+      ? h(ReviewItem, { key: "item", entry: current.entry, step, onCommand, bar: bulkBar })
       : link.status === "connected" && queue ? (bulkBar ? h(ui.Subview, { header: null, footer: bulkBar }, h(ui.PanelBody, null, empty)) : empty) : null;
     return h(ui.Page, { label: "Reviews", fill: true, header: h(ui.PanelHeader, { title: "Reviews", glyph: "decisions", actions: [h(ui.IconButton, { key: "refresh", label: "Refresh", glyph: "refresh", large: true, onClick: () => bridge.queue.refresh() })] }),
       onFocus: focusIn, onBlur: focusOut },

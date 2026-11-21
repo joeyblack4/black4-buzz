@@ -233,7 +233,8 @@ export async function until(ready, { timeoutMs = 2000, what = "the condition" } 
 /** `goals`: the goals each item serves, by key (opt in: an older queue has none). The queue then answers
  * as Platform Control's does: `goal` filters it, and top-level goals and noGoal count every waiting review. */
 /** `businesses`: the queue's per-business counts, passed through as Platform Control sends them (opt in). */
-export function fakeReviews({ decide = ["ok"], cardClient = true, needsBusiness = false, goals = null, businesses = null } = {}) {
+export function fakeReviews({ decide = ["ok"], cardClient = true, needsBusiness = false, goals = null, businesses = null,
+  preview = { url: "https://content.example.test/v/grant-secret/hero.png", contentType: "image/png" } } = {}) {
   const item = (key, extra = {}) => ({
     key, version: 1, title: `Change ${key}`, workType: "storefront_content", action: "Update the bakery's menu page.", status: "awaiting_decision", decidable: true, decision: null,
     brief: { why: "The menu changed.", expectedResult: "Fewer wrong orders.", before: "Rye", after: "Sourdough" },
@@ -279,7 +280,7 @@ export function fakeReviews({ decide = ["ok"], cardClient = true, needsBusiness 
         decisionTokens[entry.key] = { token, version: entry.version, expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString() };
       }
       return data({ ...self.review, decideIn: cardClient ? "card" : "reviews" }, { decisionTokens,
-        previews: { hero: { url: "https://content.example.test/v/grant-secret/hero.png", contentType: "image/png" } }, beforePreviews: {} });
+        previews: { hero: preview }, beforePreviews: {} });
     }
     if (name === "get_review_file") return { result: { content: [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }] } };
     if (name === "decide_review_item") {

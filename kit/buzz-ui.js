@@ -321,8 +321,8 @@ function buzzUi(React, { nativeSelect = false } = {}) {
   const Surface = ({ label, onFocus, onBlur, children }) =>
     h("div", { "data-buzz-ui": "", role: "region", "aria-label": label, onFocus, onBlur, style: { display: "flex", flexDirection: "column", height: "100%", minHeight: 0 } }, ...each(children));
   /** A side panel's body: Buzz leaves the inset to the panel (as GitHub's). */
-  const PanelBody = ({ children }) =>
-    h("div", { "data-buzz-ui": "", style: { padding: "var(--space-panel-inset)", overflowY: "auto", minHeight: 0, flex: 1, display: "flex", flexDirection: "column", gap: "var(--space-4)", color: "var(--text-standard)" } },
+  const PanelBody = ({ fit = false, children }) =>
+    h("div", { "data-buzz-ui": "", style: { padding: "var(--space-panel-inset)", overflowY: fit ? "hidden" : "auto", minHeight: 0, flex: 1, display: "flex", flexDirection: "column", gap: "var(--space-4)", color: "var(--text-standard)" } },
       ...each(children));
 
   /** A child that fills the rest of a `fill` page (an embedded browser). */
@@ -607,12 +607,11 @@ function buzzUi(React, { nativeSelect = false } = {}) {
         ? h("span", null, h(Button, { variant: "link", size: "text", onClick: onOrigin }, h(Fragment, null, originGlyph && ICON[originGlyph] ? icon(ICON[originGlyph], 12, { style: { marginInlineEnd: "var(--space-1)", verticalAlign: "-1px" } }) : null, origin)))
         : h("span", { className: "flex items-center gap-1 text-caption text-subtle" }, originGlyph && ICON[originGlyph] ? icon(ICON[originGlyph], 12) : null, origin)) : null);
   /** The work, big: a frame that takes the panel's height (Diffs' card,
-   * `.preview`), its toggle (Now / After) floating at the top. `fit`: it holds
-   * an embedded browser, which Buzz draws over the window, not inside the
-   * scrolling body: it takes only the room the body has, so it never runs
-   * under the decision bar below. */
+   * `.preview`), with its Now / After toggle at the top. The live work area is
+   * sized by the article's grid. Buzz places the native browser using its
+   * measured bounds, regardless of any DOM overflow clipping. */
   const Canvas = ({ label, toolbar, fit = false, children }) =>
-    h("figure", { "aria-label": label, style: { ...card, margin: 0, position: "relative", display: "flex", flexDirection: "column", flex: "1 1 auto", minHeight: fit ? "min(14rem, 32vh)" : "min(34rem, 64vh)" } },
+    h("figure", { "aria-label": label, style: { ...card, margin: 0, position: "relative", display: "flex", flexDirection: "column", flex: "1 1 auto", minHeight: fit ? 0 : "min(34rem, 64vh)" } },
       toolbar ? h("div", { style: { ...cardHeader, justifyContent: "space-between" } }, ...each(toolbar)) : null,
       h("div", { style: { flex: 1, minHeight: 0, display: "flex", alignItems: "stretch", justifyContent: "center", overflow: "auto", background: "var(--surface-inset)" } }, ...each(children)));
   /** Layers in the canvas, each filling it, the last on top (a live page over its capture). */
@@ -631,9 +630,14 @@ function buzzUi(React, { nativeSelect = false } = {}) {
       h("span", { style: { minWidth: 0, overflowWrap: "anywhere" } }, children));
   /** What approving permits, in full. */
   const Permits = (text) => h("p", { className: "m-0 text-body-sm text-standard", style: { overflowWrap: "anywhere" } }, text);
-  /** One review item's column: its heading, the canvas taking the rest, then details. */
-  const Article = ({ label, children }) =>
-    h("article", { "aria-label": label, style: { display: "flex", flexDirection: "column", gap: "var(--space-3)", flex: "1 0 auto", minHeight: "100%" } }, ...each(children));
+  /** The heading and details scroll within their rows when live work fills
+   * the panel. The browser itself scrolls within the space between them. */
+  const Article = ({ label, heading, details, fit = false, children }) =>
+    h("article", { "aria-label": label, style: fit
+        ? { display: "grid", gridTemplateRows: "fit-content(25%) minmax(0, 1fr) fit-content(25%)", gap: "var(--space-3)", flex: 1, minHeight: 0 }
+        : { display: "flex", flexDirection: "column", gap: "var(--space-3)", flex: "1 0 auto", minHeight: "100%" } },
+      fit ? h("div", { style: { overflow: "auto" } }, heading) : heading, ...each(children),
+      fit ? h("div", { style: { overflow: "auto" } }, details) : details);
   /** The question, in full, the heading of the item. */
   const Question = (text) => h("h2", { className: "m-0 text-label", style: { overflowWrap: "anywhere" } }, text);
 

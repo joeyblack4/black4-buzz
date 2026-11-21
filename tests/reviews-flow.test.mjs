@@ -29,7 +29,7 @@ async function app(t, options = {}) {
     agents: { snapshot: () => ({ running: [] }), addTool: (tool) => { tools.set(tool.name, tool); return () => tools.delete(tool.name); }, register() {} },
     settingsCards: { register() {} }, pages: { register: (value) => { if (value.id === "reviews") registered.page = value; } }, panels: { register: (value) => { registered.panel = value; } },
     conversation: { registerLink() {}, registerAccessory: (value) => { registered.accessory = value; } },
-    browser: { available: false },
+    browser: options.browser ?? { available: false },
     effect: (fn) => { const off = fn(); if (off) cleanups.push(off); },
     host: { request: net.request },
   });
@@ -58,6 +58,24 @@ async function app(t, options = {}) {
   return { reviews, mcp, tools, registered, panel, page, shown, button, find, label, text, expand };
 }
 const decided = (a) => a.reviews.calls.filter((call) => call.name === "decide_review_item");
+
+test("a live artifact fits the panel body above the separate decision bar", async (t) => {
+  const a = await app(t, {
+    reviews: { preview: { url: "https://content.example.test/v/preview/menu.html", contentType: "text/html" } },
+    browser: { available: true, View: () => ({ type: "browser-view" }) },
+  });
+  const view = await a.shown();
+  const frame = a.find(view, (node) => node.children?.some((child) => child?.props?.["aria-label"] === "Decision"));
+  const [, body, bar] = frame.children;
+  assert.ok(a.find(body, (node) => node.type === "browser-view"));
+  assert.equal(body.props.style.overflowY, "hidden");
+  const article = a.find(body, (node) => node.type === "article");
+  assert.match(article.props.style.gridTemplateRows, /minmax\(0, 1fr\)/);
+  assert.equal(a.find(article, (node) => node.type === "figure").props.style.minHeight, 0);
+  assert.ok(a.button(bar, "Approve"));
+  assert.ok(a.button(bar, "Ask for changes"));
+  assert.ok(a.button(bar, "Reject"));
+});
 
 test("initialize declares the MCP Apps extension, so Black 4 may issue decision tokens", async (t) => {
   const a = await app(t);

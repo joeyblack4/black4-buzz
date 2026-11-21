@@ -105,7 +105,7 @@ function reviewScreens(React, store, bridge) {
       const before = usePicture(review, item, hasBefore && shown === "before" ? "beforeCapture" : null);
       const toolbar = hasBefore ? [Caption(item.title), h(Tabs, { key: "toggle", variant: "segmented", label: "Show", value: shown, onChange: setWhich,
         items: [{ value: "before", label: "Now" }, { value: "after", label: "After" }] })] : null;
-      if (shown === "before") return h(Canvas, { label: `The page now: ${item.title}`, toolbar }, h(CanvasImage, { src: before, alt: `${item.title}: now` }));
+      if (shown === "before") return h(Canvas, { label: `The page now: ${item.title}`, toolbar, fit: !!bridge.browser }, h(CanvasImage, { src: before, alt: `${item.title}: now` }));
       // The live page over its capture: the capture shows until the page paints.
       return h(Canvas, { label: `The work: ${item.title}`, toolbar, fit: !!bridge.browser },
         bridge.browser
@@ -141,12 +141,8 @@ function reviewScreens(React, store, bridge) {
     },
   };
   /** Which canvas a review item gets: its artifact page, its image, else the fallback. */
-  function Work({ review, item }) {
-    const link = store.preview(review.businessId, review.assetId, item.key);
-    // An item Black 4 marks as not work-first keeps its earlier look when it
-    // has a card to show; the page is still shown when that is all there is.
-    const older = item.workFirst === false && item.card?.show && item.card.show.type !== "media";
-    if (link && !older) return h(CANVAS.page, { review, item, link });
+  function Work({ review, item, link }) {
+    if (link) return h(CANVAS.page, { review, item, link });
     if (store.pictureKind(review.businessId, review.assetId, item.key) || item.card?.show?.type === "media") return h(CANVAS.media, { review, item });
     return h(CANVAS.fallback, { item });
   }
@@ -251,7 +247,7 @@ function reviewScreens(React, store, bridge) {
    * `{ businessId?, assetId, itemKey? }`. `step`: { position, total, next,
    * previous } from the queue; `onBack`: to the queue. `onCommand` receives
    * this item's key commands while it is shown (shortcuts). */
-  function ReviewItem({ entry, step, onBack, onCommand, onSaved, frame = true, bar = null }) {
+  function ReviewItem({ entry, step, onBack, onCommand, onSaved, bar = null }) {
     const link = useConnection();
     useStore();
     const [state, setState] = React.useState({ review: null, error: null });
@@ -326,9 +322,8 @@ function reviewScreens(React, store, bridge) {
         step ? h(IconButton, { key: "next", label: "Next decision (J)", glyph: "down", large: true, disabled: !step.next, onClick: () => step.next?.() }) : null,
         h(IconButton, { key: "refresh", label: "Refresh", glyph: "refresh", large: true, onClick: () => setRevision((n) => n + 1) }),
       ].filter(Boolean) });
-    const wrap = (title, body, bar = null) => frame
-      ? h(Subview, { header: header(title), footer: bar }, h(PanelBody, null, body))
-      : h(Stack, { gap: 4 }, body, bar);
+    const wrap = (title, body, bar = null, fit = false) =>
+      h(Subview, { header: header(title), footer: bar }, h(PanelBody, { fit }, body));
 
     if (link.status !== "connected") return wrap("Reviews", h(NotConnected, { link }));
     if (state.error) {
@@ -345,12 +340,16 @@ function reviewScreens(React, store, bridge) {
     // One review can hold several decisions over one page of work: say which one this is.
     const at = review.items.indexOf(item);
     const among = review.items.length > 1 ? Caption(`Decision ${at + 1} of ${review.items.length}${review.title ? ` in ${review.title}` : ""}`) : null;
+    // Older cards keep their original renderer when the review marks them as not work-first.
+    const older = item.workFirst === false && card.show && card.show.type !== "media";
+    const preview = older ? null : store.preview(review.businessId, review.assetId, item.key);
+    const fit = !!(preview && bridge.browser);
     // Keyed by version too: a new version is a new card, with nothing carried over.
-    const body = h(ui.Article, { key: `${id}@${item.version}`, label: headline },
-      h(Stack, { gap: 2 }, h(Byline, { review, item }), reviewReplaces(review) ? Caption(reviewReplaces(review)) : null, among, Question(headline)),
-      h(Work, { review, item }),
-      h(Details, { review, item }));
-    return wrap(review.businessName, body, bar ?? h(Decide, { review, item, compose, setCompose, onReload: () => setRevision((n) => n + 1) }));
+    const body = h(ui.Article, { key: `${id}@${item.version}`, label: headline, fit,
+      heading: h(Stack, { gap: 2 }, h(Byline, { review, item }), reviewReplaces(review) ? Caption(reviewReplaces(review)) : null, among, Question(headline)),
+      details: h(Details, { review, item }) },
+      h(Work, { review, item, link: preview }));
+    return wrap(review.businessName, body, bar ?? h(Decide, { review, item, compose, setCompose, onReload: () => setRevision((n) => n + 1) }), fit);
   }
 
   // ---- the queue -----------------------------------------------------------------

@@ -13,6 +13,7 @@ a plugin in this repository, one folder each under `plugins/`:
 | **Black 4** (`ai.black4`) | `plugins/black4` | Everyone. Black 4 staff also get **Black 4 hardware** agents from it. |
 | **Claude Sub Plugin** (`black4.claude-subscription`) | `plugins/claude-subscription` | A person who wants agents on their own Claude subscription. |
 | **Grok Sub Plugin** (`black4.grok-subscription`) | `plugins/grok-subscription` | A person who wants agents on their own Grok subscription. |
+| **Gemini Sub Plugin** (`black4.gemini-subscription`) | `plugins/gemini-subscription` | A person who wants agents on their own Google AI (Gemini) subscription, on Google's Antigravity. |
 
 ## Set up your Buzz
 
@@ -555,16 +556,26 @@ sudo sh ~/workforce/.staging/machine/platform-user.sh
 
 After that, `machine/deploy.sh` installs the release for that user too.
 
-## Agents on your own Claude or Grok subscription
+## Agents on your own Claude, Grok or Gemini subscription
 
-The two subscription plugins add agent types that run the provider's official
+The subscription plugins add agent types that run the provider's official
 command-line tool on your computer, signed in as you: Claude Code for Claude,
-Grok Build for Grok. Install either from its folder:
+Grok Build for Grok, Antigravity (`agy`) for Gemini. Install any from its folder:
 
 ```
 buzz://plugin-install?repository=joeyblack4%2Fblack4-buzz&ref=stable&path=plugins%2Fclaude-subscription
 buzz://plugin-install?repository=joeyblack4%2Fblack4-buzz&ref=stable&path=plugins%2Fgrok-subscription
+buzz://plugin-install?repository=joeyblack4%2Fblack4-buzz&ref=stable&path=plugins%2Fgemini-subscription
 ```
+
+Gemini: **Install** runs Google's own installer (`antigravity.google/cli/install.sh`,
+which checks the download's SHA-512) into `~/.local/bin/agy`. **Sign in with
+Google** shows a Google link; approve it with the Google account that has your
+plan, then paste the code antigravity.google shows. A Google Workspace account
+gets only Antigravity's starter models (Gemini 4 Hydrogen and Flash); Gemini 4
+Neon, Carbon and Argon need Google AI Pro or Ultra on a personal Google
+account. Model and Thinking list exactly what Antigravity offers that account,
+and each turn stops before any model call unless Antigravity confirms both.
 
 Then open **Agents → New agent**, choose the type, and use **Install CLI** and
 **Sign in** if the tool is not set up yet. Each person uses their own

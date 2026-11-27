@@ -12,7 +12,7 @@ const uses = JSON.parse(read("kit/uses.json"));
 /** A className or style, or a raw control or <style>, drawn outside the kit. */
 const HOMEMADE = /\bclassName\s*:|\bstyle\s*:|\b(?:h|createElement)\(\s*["'](?:button|input|select|textarea|style)["']/g;
 /** Plugins built from subscriptions/src: their sources are what people edit. */
-const BUILT = new Set(["claude-subscription", "grok-subscription"]);
+const BUILT = new Set(["claude-subscription", "grok-subscription", "gemini-subscription"]);
 
 function sources() {
   const out = [];

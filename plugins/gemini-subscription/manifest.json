@@ -1,0 +1,27 @@
+{
+  "id": "black4.gemini-subscription",
+  "name": "Gemini Sub Plugin",
+  "apiVersion": 1,
+  "description": "Gemini subscription agents on Google's Antigravity, with personal sign-in, models, thinking, coding and Buzz tools. Runs on your computer.",
+  "updates": {
+    "defaultEnabled": true
+  },
+  "host": {
+    "processes": [
+      {
+        "id": "gemini",
+        "program": "agy"
+      },
+      {
+        "id": "install",
+        "program": "/bin/sh",
+        "args": [
+          "-c",
+          "/usr/bin/curl -fsSL https://antigravity.google/cli/install.sh | /bin/bash"
+        ]
+      }
+    ],
+    "mcp": true,
+    "files": true
+  }
+}

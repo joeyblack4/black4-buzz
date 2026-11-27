@@ -12,7 +12,7 @@ const PROVIDERS = [
   // Google's Antigravity CLI is not on npm: Google's own installer fetches it
   // and checks its SHA-512 (into ~/.local/bin/agy, on Buzz's PATH).
   { provider: "gemini", title: "Gemini Sub Plugin", defaultModel: "gemini-4-neon", program: "agy",
-    install: { program: "/bin/sh", args: ["-c", "/usr/bin/curl -fsSL https://antigravity.google/cli/install.sh | /bin/bash"] },
+    install: { program: "bash", args: ["-c", "curl -fsSL https://antigravity.google/cli/install.sh | bash"] },
     description: "Gemini subscription agents on Google's Antigravity, with personal sign-in, models, thinking, coding and Buzz tools. Runs on your computer." },
 ];
 const check = process.argv.includes("--check");

@@ -858,18 +858,23 @@ def agy_listing(slot, home=None):
     if key and rows:
         names = google_models(key)
         if names is None: return None, None
-        rows = [r for r in rows if any(n == r["id"] or n.startswith(r["id"] + "-") for n in names)]
+        # Only an exact name Google lists for this key as generating content:
+        # a variant (gemini-4-carbon-image) proves nothing about the model agy
+        # runs. A key that has none of agy's models is an answer, not "unsure".
+        return True, [r for r in rows if r["id"] in names]
     return (True, rows) if rows else (None, None)
 
 
 def google_models(key):
-    """The model names Google's own list has for this key ("gemini-4-carbon",
-    without "models/"), or None when it cannot tell."""
+    """The model names Google's own list has for this key that generate
+    content ("gemini-4-carbon", without "models/"), or None when it cannot tell."""
     base, names, page = KEYS["antigravity"]["bases"][0][1], [], ""
     for _ in range(10):
         status, body = http_get_json(f"{base}/models?pageSize=1000" + (f"&pageToken={page}" if page else ""), KEYS["antigravity"]["headers"](key))
         if status != 200 or not isinstance(body, dict): return None
-        names += [m["name"].split("/", 1)[-1] for m in body.get("models") or [] if isinstance(m, dict) and isinstance(m.get("name"), str)]
+        names += [m["name"].split("/", 1)[-1] for m in body.get("models") or []
+                  if isinstance(m, dict) and isinstance(m.get("name"), str)
+                  and "generateContent" in (m.get("supportedGenerationMethods") or [])]
         page = body.get("nextPageToken")
         if not isinstance(page, str) or not re.fullmatch(r"[A-Za-z0-9_\-=.]{1,512}", page): return names
     return names
@@ -2496,12 +2501,12 @@ def refresh_models(harness, wait=False, force=False):
     lock = open(private_dir(CRED_RUN) / f"{harness}-models.lock", "a")
     try:
         try: fcntl.flock(lock, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
-        except OSError: return
+        except OSError: return None
         token = signin()
-        if not token: return
+        if not token: return False
         cache = read_json(CRED_RUN / f"{harness}-models.json", {}) or {}
         if cache.get("hash") != token_hash(token): cache = {}  # another sign-in: nothing of the last one holds
-        elif not force and not models_stale(cache): return
+        elif not force and not models_stale(cache): return True
         models = lister()
         now = time.time()
         if models is not None:
@@ -2511,6 +2516,7 @@ def refresh_models(harness, wait=False, force=False):
             cache = {**cache, "hash": token_hash(token), "fails": fails, "failedAt": now,
                      "retryAt": now + min(CLAUDE_MODELS_FAIL_TTL * 2 ** (fails - 1), CLAUDE_MODELS_FAIL_MAX)}
         write_private(CRED_RUN / f"{harness}-models.json", json.dumps(cache))
+        return models is not None  # True: this listing was made just now
     finally:
         lock.close()
 
@@ -2751,13 +2757,25 @@ def _start(d):
     # this machine lists itself: make it now (a few seconds, once per sign-in)
     # rather than start a model that may not be offered. One waiting out a
     # failure is not retried here.
-    if model_source(slot) and listing_due(slot): refresh_models(slot, wait=True)
     # Antigravity's listing is one ACP session and calls no model, and buzz-acp
     # runs agy's default without a word when the chosen id is not in it (a
-    # plan changed): so it is made again at every start, and the choice below
-    # is checked against what agy offers now.
-    elif harness == "antigravity": refresh_models(slot, wait=True, force=True)
-    picked = choice(harness, s)
+    # plan changed): so it is made again at every start, and the choice is
+    # checked against that listing only. When it cannot be made, a chosen
+    # model is refused (the last listing proves nothing now) and an agent on
+    # the default runs agy's own, named as unchecked.
+    if harness == "antigravity":
+        if refresh_models(slot, wait=True, force=True):
+            if offered(slot) == []:
+                fail(f"Google lists no model Antigravity can run for {ACCOUNT}'s {'API key' if pays == 'key' else 'sign-in'}.")
+            picked = choice(harness, s)
+        elif (s.get("model") or "").strip():
+            fail(f"Antigravity could not list its models on this machine just now, so {s['model'].strip()} cannot be checked. Try again in a moment.")
+        else:
+            picked = {"model": None, "effort": None, "checked": False,
+                      "note": "Antigravity could not list its models at start; it runs its own default."}
+    else:
+        if model_source(slot) and listing_due(slot): refresh_models(slot, wait=True)
+        picked = choice(harness, s)
     if picked.get("problem"): fail(picked["problem"])
     compact_at = s.get("compactAt") if isinstance(s.get("compactAt"), int) and not isinstance(s.get("compactAt"), bool) else None
     model_env, args = launch(harness, picked, pays, compact_at)
@@ -3875,7 +3893,7 @@ def agy_helper(login_id, d, info):
         if status == 0 and signed:
             # Checked in its own folder first: a sign-in Google refuses, or one
             # that cannot be checked, never replaces the one agents use.
-            ok, _ = agy_listing("antigravity", home)
+            ok, rows = agy_listing("antigravity", home)
             if ok is False:
                 return finish({"ok": False, "error": f"{label} signed in, but Google refused the sign-in. Check the account and start the sign-in again."})
             if ok is None:
@@ -3885,6 +3903,9 @@ def agy_helper(login_id, d, info):
                 emails = EMAIL_RE.findall(text)
                 account = emails[-1].rstrip(".") if emails else None
             with agy_signin_lock():
+                # A sign-out since this sign-in began cancelled it (it removes
+                # this folder): it never comes back after the sign-out.
+                if not (d / "helper.json").exists(): return finish({"ok": False, "error": "cancelled"})
                 # The agents on the old sign-in stop first: agy refreshes its own
                 # file, and one still running could write the old sign-in back.
                 stop_harness_agents("antigravity", "subscription")
@@ -3897,12 +3918,15 @@ def agy_helper(login_id, d, info):
                     write_private(target, source.read_text())
                     source.unlink(missing_ok=True)
                 save_agy_account(account)
-            run_check("antigravity", wait=True)
-            _, check = last_check("antigravity")
-            if check.get("ok") is False:
-                return finish({"ok": False, "error": f"{label} signed in, but Google refused the sign-in. Check the account and start the sign-in again."})
+                # What the staged check found is the check and the listing of
+                # the sign-in now in place: nothing is checked after the move,
+                # so nothing can fail half-way through it.
+                cred = agy_cred()
+                write_private(private_dir(CRED_RUN) / "antigravity-check.json",
+                              json.dumps({"hash": cred, "ok": True, "at": time.time(), "account": account}))
+                write_private(CRED_RUN / "antigravity-models.json",
+                              json.dumps({"hash": token_hash(cred), "at": time.time(), "models": rows}))
             finish({"ok": True, "account": account})
-            refresh_models("antigravity", wait=True)  # what this account offers, before its agents start
             return restart_harness_agents("antigravity", "subscription")  # after the reply is free to go
         if re.search(r"invalid_grant|invalid.{0,20}code|malformed|bad request", text, re.I):
             return finish({"ok": False, "error": "That code was not accepted. Start the sign-in again to get a new link."})
@@ -3913,6 +3937,14 @@ def agy_helper(login_id, d, info):
         try: os.close(fd)
         except OSError: pass
         shutil.rmtree(d / "home", ignore_errors=True)
+
+
+def cancel_agy_signins():
+    """Ends this person's Antigravity subscription sign-ins that are under way."""
+    if not LOGINS.exists(): return
+    for d in LOGINS.iterdir():
+        info = read_json(d / "helper.json", {}) or {}
+        if d.is_dir() and info.get("harness") == "antigravity" and info.get("kind") != "key": kill_login(d)
 
 
 def logout(harness, pays="subscription"):
@@ -3931,6 +3963,7 @@ def logout(harness, pays="subscription"):
         # again while its agents stop: it is forgotten again once they have,
         # and no new sign-in moves in meanwhile.
         with agy_signin_lock():
+            cancel_agy_signins()  # one under way would otherwise move in after this
             forget_agy()
             stop_harness_agents(harness, pays)
             forget_agy()

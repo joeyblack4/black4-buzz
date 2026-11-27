@@ -36,7 +36,7 @@ for (const [name, adapter] of Object.entries(pins.adapters)) {
   }
 }
 for (const [name, cli] of Object.entries(pins.clis ?? {})) {
-  for (const [field, variable] of [["version", cli.versionVar], ["sha256", cli.sha256Var]]) {
+  for (const [field, variable] of [["version", cli.versionVar], ["sha256", cli.sha256Var], ["sha512", cli.sha512Var], ["build", cli.buildVar]]) {
     if (!variable) continue;
     if (vars[variable] !== cli[field]) problems.push(`machine/setup.sh sets ${variable}=${vars[variable] ?? "(missing)"}, but machine/pins.json pins ${name} ${field} ${cli[field]}.`);
   }

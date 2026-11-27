@@ -2,7 +2,7 @@
 
 Status: current  
 Owner: Black 4 platform  
-Updated: 2026-11-17
+Updated: 2026-11-27
 
 Black 4 runs its AI workforce in [Buzz](https://github.com/block/buzz-app).
 Buzz stays stock, so it can be updated at any time; everything Black 4 adds is
@@ -134,6 +134,10 @@ sees only the sign-in it pays with.
 - **Subscription.**
   - **Claude Code** (Claude subscription): open the link, approve, then paste
     the code the Anthropic page shows into the form.
+  - **Antigravity** (a Google account with Gemini: Google AI Pro or Ultra for
+    Gemini 4 Carbon and Neon; a free or Plus account gets Hydrogen and Flash):
+    open the Google link, approve, then paste the code antigravity.google
+    shows into the form.
   - **Codex** (ChatGPT), **Grok Build** (SuperGrok or grok.com) and **Qwen
     Code** (a Qwen membership, Plus or Pro on chat.qwen.ai): open the link
     and approve the short code the form shows. There is nothing to paste: the
@@ -144,7 +148,8 @@ sees only the sign-in it pays with.
   and it never comes back to Buzz: an Anthropic key for Claude Code, an
   OpenAI key for Codex (Codex keeps its own copy in that home, the way its
   `login --with-api-key` does), an xAI key for Grok Build, a QwenCloud key for
-  Qwen Code (pay-as-you-go or Token Plan).
+  Qwen Code (pay-as-you-go or Token Plan), a Gemini key from Google AI Studio
+  for Antigravity.
 
 Qwen Code runs in a private home per sign-in with its self-update, usage
 statistics and managed memory off (`tools.toolOutputBatchBudget` 100k
@@ -157,6 +162,27 @@ is what keeps a long session from re-reading them on every request. New agents r
 model that sign-in lists), with no effort setting: Qwen Code has no effort
 lever for a model it is given this way, so the service's default thinking for
 the model applies.
+
+Antigravity is Google's own CLI (`agy acp`), pinned to one build that setup.sh
+checks against Google's SHA-512 and keeps in a read-only folder, so it never
+replaces itself. Each sign-in gets a private folder passed as `--gemini-dir`
+(never the machine user's `~/.gemini`), and its Google sign-in is kept in that
+folder, never the macOS keychain. The models are the ones Antigravity itself
+lists for that sign-in, each with its own thinking levels (Gemini 4 Neon and
+Hydrogen go to XHigh, Carbon to High), and the plan decides which: the
+Claude and GPT-OSS models Antigravity carries show up too when the account
+has them. New agents run Gemini 4 Carbon at high thinking, or Neon, then
+Hydrogen, when the plan lacks it. On a key, only the models Google's own
+model list has for that key are offered.
+
+**Whose sign-ins agents can read.** Every agent on a machine runs as that
+machine's one macOS user, with full access. Each person's sign-ins sit in
+their own folders, and an agent is started with only its creator's, but a
+private file does not stop another agent on the same machine from reading it
+if it goes looking: the machine is shared trust among Black 4 staff, for every
+harness's sign-ins (Claude tokens, ChatGPT, Grok, Qwen and Google sign-ins,
+API keys). Keeping people's sign-ins apart from each other's agents would take
+an OS user per person; that is not built.
 
 A harness that the machine has installed but Buzz can't sign in (Goose) is
 listed as unavailable, with the reason.
@@ -253,7 +279,7 @@ or runs sandboxed (`FULL_ACCESS` in `agentctl`; `doctor` shows each one's mode).
 Changes to a customer's systems are gated by Reviews in Platform Control.
 
 Every agent knows what it is: its home holds a short note, in its CLI's own
-instructions file (`CLAUDE.md`, `AGENTS.md`, `QWEN.md`), saying it is a
+instructions file (`CLAUDE.md`, `AGENTS.md`, `QWEN.md`, `GEMINI.md`), saying it is a
 Black 4 hardware agent on this machine, which folder is its own, and the exact
 `agentctl` commands to read and change its heartbeat, model, effort,
 instructions, and to restart. When an agent changes itself from its shell (a

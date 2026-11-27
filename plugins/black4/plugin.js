@@ -1718,6 +1718,7 @@ export const HARNESSES = [
   { id: "codex", label: "Codex" },
   { id: "grok", label: "Grok Build" },
   { id: "qwen", label: "Qwen Code" },
+  { id: "antigravity", label: "Antigravity" },
   { id: "goose", label: "Goose" },
 ];
 /** Whom an agent answers (its Audience), as one choice: "staff", the

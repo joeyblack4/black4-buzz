@@ -76,11 +76,44 @@ if "-p" in args:
 FAKE_BUZZ_ACP = f"""#!{PY}
 import json, os, sys, time
 home = os.environ["HOME"]
+def agent_args():
+    return next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--agent-args=")), "")
 if sys.argv[1:2] == ["auth-methods"]:  # buzz-acp's own ACP initialize with an adapter
     with open(os.path.join(home, "handshakes.txt"), "a") as f: f.write(sys.argv[sys.argv.index("--agent-command") + 1] + "\\n")
+    with open(os.path.join(home, "handshake-args.txt"), "a") as f: f.write(agent_args() + "\\n")
     if os.path.exists(os.path.join(home, "handshake-fail.txt")):
         sys.stderr.write("error: initialize failed: -32602 Invalid params\\n"); sys.exit(1)
     print(json.dumps({{"methods": []}})); sys.exit(0)
+if sys.argv[1:2] == ["models"] and sys.argv[sys.argv.index("--agent-command") + 1] == "agy":
+    # What 0.5.30 printed for Antigravity 1.5.18 (trimmed): signed in, or a key with
+    # modelProvider gemini in the folder's settings; else -32000.
+    args = agent_args().split(",")
+    folder = args[args.index("--gemini-dir") + 1]
+    with open(os.path.join(home, "listings.txt"), "a") as f: f.write("agy " + folder + "\\n")
+    staged = os.sep + "logins" + os.sep in folder
+    if staged and os.path.exists(os.path.join(home, "agy-hold.txt")):
+        open(os.path.join(home, "agy-holding.txt"), "w").write("x")
+        while os.path.exists(os.path.join(home, "agy-hold.txt")): time.sleep(0.05)
+    if os.path.exists(os.path.join(home, "agy-list-fail.txt")):
+        print("error: agent communication failed: timed out", file=sys.stderr); sys.exit(1)
+    if not staged and os.path.exists(os.path.join(home, "agy-refuse-live.txt")):
+        print("error: agent communication failed: Agent reported error (code -32000): Authentication required", file=sys.stderr); sys.exit(1)
+    cred = os.path.join(folder, "antigravity-cli", "antigravity-oauth-token")
+    settings = os.path.join(folder, "antigravity-cli", "settings.json")
+    keyed = os.environ.get("GEMINI_API_KEY") and os.path.exists(settings) and json.load(open(settings)).get("modelProvider") == "gemini"
+    signed = (os.environ.get("AGY_CLI_FORCE_FILE_TOKEN_STORAGE") == "1" and os.path.exists(cred) and "fake-subscription-credential-" in open(cred).read()
+              and "refused-" not in open(cred).read() and not os.path.exists(os.path.join(home, "agy-revoked.txt")))
+    if not (keyed or signed):
+        print("error: agent communication failed: Agent reported error (code -32000): Authentication required", file=sys.stderr); sys.exit(1)
+    models = [("gemini-4-neon", "Gemini 4 Neon", ("high", "xhigh", "medium", "low")), ("gemini-4-carbon", "Gemini 4 Carbon", ("high", "medium", "low")),
+              ("gemini-4-hydrogen", "Gemini 4 Hydrogen", ("high", "xhigh", "medium", "low")), ("gemini-3.1-pro", "Gemini 3.1 Pro", ("high", "low"))]
+    if (keyed and not signed) or os.path.exists(os.path.join(home, "agy-no-neon.txt")): models = [m for m in models if m[0] != "gemini-4-neon"]
+    print(json.dumps({{"agent": {{"name": "Antigravity ACP Server", "version": "1.5.18"}},
+        "stable": {{"configOptions": [{{"category": "model", "id": "model", "currentValue": "gemini-3.1-pro", "type": "select",
+                                       "options": [{{"name": n, "value": i}} for i, n, _ in models]}}]}},
+        "unstable": {{"availableModels": [{{"modelId": i + "-" + e, "name": n + " (" + e.capitalize() + ")"}} for i, n, es in models for e in es],
+                      "currentModelId": "gemini-3.1-pro-low"}}}}))
+    sys.exit(0)
 if sys.argv[1:2] == ["models"]:  # what 0.5.30 printed for claude-agent-acp 0.94.0
     opts = [{{"value": "default", "name": "Default (recommended)"}}, {{"value": "sonnet", "name": "Sonnet 5.5"}},
             {{"value": "fable", "name": "Fable 5.1"}}, {{"value": "opus", "name": "Opus 5.5"}}, {{"value": "haiku", "name": "Haiku 5.5"}}]
@@ -90,7 +123,15 @@ if sys.argv[1:2] == ["models"]:  # what 0.5.30 printed for claude-agent-acp 0.94
 if os.path.exists(os.path.join(home, "crash.txt")):
     print("buzz-acp: relay refused the connection", flush=True); sys.exit(1)
 import signal
-signal.signal(signal.SIGTERM, lambda *_: (open(os.path.join(home, "got-term.txt"), "a").write(str(os.getpid()) + "\\n"), sys.exit(0)))
+def on_term(*_):
+    open(os.path.join(home, "got-term.txt"), "a").write(str(os.getpid()) + "\\n")
+    args = os.environ.get("BUZZ_ACP_AGENT_ARGS", "").split(",")
+    if "--gemini-dir" in args:  # the Antigravity sign-in this agent was stopped on
+        cred = os.path.join(args[args.index("--gemini-dir") + 1], "antigravity-cli", "antigravity-oauth-token")
+        seen = json.load(open(cred))["token"]["access_token"] if os.path.exists(cred) else "none"
+        open(os.path.join(home, "term-token.txt"), "a").write(seen + "\\n")
+    sys.exit(0)
+signal.signal(signal.SIGTERM, on_term)
 print("2026-11-17T00:00:00.000000Z  INFO buzz_acp: buzz-acp starting: relay=wss://relay.example.com pubkey=x agent_cmd=fake", flush=True)
 # The real wire log hands the MCP server the agent's key in session/new.
 print('2026-11-17T00:00:00.000000Z DEBUG acp::wire: \u2192 {{"id":1,"jsonrpc":"2.0","method":"session/new","params":{{"mcpServers":[{{"env":[{{"name":"BUZZ_PRIVATE_KEY","value":"' + os.environ.get("BUZZ_PRIVATE_KEY", "") + '"}}]}}]}}}}', flush=True)
@@ -101,7 +142,7 @@ if os.path.exists(os.path.join(home, "turn.txt")):
     while not os.path.exists(os.path.join(home, "finish.txt")): time.sleep(0.1)
     print('2026-11-17T00:00:00.000000Z DEBUG acp::wire: \u2190 {{"jsonrpc": "2.0", "id": 2, "result": {{"stopReason": "end_turn"}}}}', flush=True)
 with open("env.json", "w") as f:
-    json.dump({{k: v for k, v in os.environ.items() if k.startswith(("BUZZ_ACP", "BLACK4_", "RUST_LOG", "CLAUDE_CODE", "CLAUDE_CONFIG_DIR", "PATH", "CODEX", "GROK", "QWEN", "NO_BROWSER", "OPENAI", "XAI", "INITIAL_AGENT_MODE", "GOOSE", "ANTHROPIC"))}}, f)
+    json.dump({{k: v for k, v in os.environ.items() if k.startswith(("BUZZ_ACP", "BLACK4_", "RUST_LOG", "CLAUDE_CODE", "CLAUDE_CONFIG_DIR", "PATH", "CODEX", "GROK", "QWEN", "NO_BROWSER", "OPENAI", "XAI", "INITIAL_AGENT_MODE", "GOOSE", "ANTHROPIC", "AGY_", "GEMINI"))}}, f)
 while True: time.sleep(1)
 """
 
@@ -176,6 +217,39 @@ if args[:1] == ["models"]:  # what 1.0.70 prints; it calls no model
 # Qwen Code is only started by buzz-acp (the fake above records its
 # environment); agentctl itself never runs it, so a stub will do.
 FAKE_QWEN = "#!/bin/sh\nexit 0\n"
+# What `agy acp --login` (1.5.18) shows on a terminal: a Google link, then it
+# waits for the code antigravity.google shows. With the good code it keeps the
+# sign-in in its folder (file storage only when AGY_CLI_FORCE_FILE_TOKEN_STORAGE
+# says so; the real one would use the keychain) and exits 0.
+FAKE_AGY = f"""#!{PY}
+import os, sys, time
+args = sys.argv[1:]
+if args[:2] == ["acp", "--login"]:
+    folder = args[args.index("--gemini-dir") + 1]
+    out = sys.stdout
+    out.write("Open this link in a browser to log in with Google:\\r\\n\\r\\n  https://accounts.google.com/o/oauth2/auth?access_type=offline&client_id=x.apps.googleusercontent.com&code_challenge=c&redirect_uri=https%3A%2F%2Fantigravity.google%2Foauth-callback&response_type=code&state=s\\r\\n\\r\\n")
+    out.write("Then paste the authorization code, or the full URL of the page you land on, and press Enter:\\r\\n")
+    out.flush()
+    code = sys.stdin.readline().strip()
+    if code in ({GOOD_CODE!r}, "refused-code-123456"):
+        refused = code != {GOOD_CODE!r}
+        if os.environ.get("AGY_CLI_FORCE_FILE_TOKEN_STORAGE") != "1":
+            out.write("Saved your sign-in to the macOS Keychain.\\r\\n"); out.flush(); sys.exit(0)
+        import json
+        os.makedirs(os.path.join(folder, "antigravity-cli", "cache"), exist_ok=True)
+        with open(os.path.join(folder, "antigravity-cli", "antigravity-oauth-token"), "w") as f:
+            json.dump({{"token": {{"access_token": "a-" + {FAKE_CRED!r}, "refresh_token": ("refused-" if refused else "") + {FAKE_CRED!r}, "token_type": "Bearer", "expires_in": 3599, "expiry": "2026-11-27T23:35:00Z"}},
+                       "auth_method": "consumer", "id_token_email": "owner@example.com"}}, f)
+        with open(os.path.join(folder, "antigravity-cli", "cache", "acp-auth-state.json"), "w") as f: json.dump({{"methodId": "oauth-personal"}}, f)
+        with open(os.path.join(folder, "antigravity-cli", "cache", "onboarding.json"), "w") as f: json.dump({{"consumerOnboardingComplete": True, "onboardingComplete": True}}, f)
+        out.write("\\r\\nLogged in as owner@example.com.\\r\\n"); out.flush()
+        time.sleep(0.3)
+        sys.exit(0)
+    out.write("\\r\\nError: oauth2: \\"invalid_grant\\" \\"Malformed auth code.\\"\\r\\n"); out.flush()
+    sys.exit(1)
+sys.exit(0)
+"""
+FAKE_GEMINI_KEY = "AIza-fake-gemini-key-" + "G" * 24  # what the fake service accepts; not a real key
 FAKE_QWEN_KEY = "sk-fake-qwencloud-key-" + "Q" * 24  # what the fake service accepts; not a real key
 FAKE_QWEN_PLAN_KEY = "sk-fake-token-plan-key-" + "P" * 24  # likewise, on the Token Plan base only
 QWEN_BASE = "https://maas.qwencloudapi.com/compatible-mode/v1"
@@ -246,6 +320,13 @@ SERVICES = {
     "https://api.x.ai/v1": (FAKE_XAI_KEY, "bearer",
         {"data": [{"id": "grok-4.7"}, {"id": "grok-4.5"}, {"id": "grok-2-image-1212"}]},
         (400, {"code": "invalid-argument", "error": "Incorrect API key provided. You can obtain an API key from https://console.x.ai."})),
+    "https://generativelanguage.googleapis.com/v1beta": (FAKE_GEMINI_KEY, "x-goog-api-key",
+        {"models": [{"name": "models/gemini-4-carbon", "displayName": "Gemini 4 Carbon", "supportedGenerationMethods": ["generateContent", "countTokens"]},
+                    {"name": "models/gemini-4-hydrogen", "supportedGenerationMethods": ["generateContent", "countTokens"]}, {"name": "models/gemini-3.1-pro-image", "supportedGenerationMethods": ["generateContent", "countTokens"]},
+                    {"name": "models/gemini-3.1-pro", "supportedGenerationMethods": ["embedContent"]},
+                    {"name": "models/text-embedding-005", "supportedGenerationMethods": ["embedContent"]}]},
+        (400, {"error": {"code": 400, "message": "API key not valid. Please pass a valid API key.", "status": "INVALID_ARGUMENT",
+                         "details": [{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "API_KEY_INVALID"}]}})),
     QWEN_BASE: (FAKE_QWEN_KEY, "bearer", QWEN_MODELS_BODY, (401, {"error": {"message": "Incorrect API key provided.", "code": "invalid_api_key"}})),
     QWEN_PLAN_BASE: (FAKE_QWEN_PLAN_KEY, "bearer", QWEN_MODELS_BODY, (401, {"request_id": "x", "code": "InvalidApiKey", "message": "Invalid API-key provided."})),
 }
@@ -264,13 +345,13 @@ def fake_qwencloud(test):
         base = url.rsplit("/models", 1)[0]
         good, where, listing, refused = SERVICES[base]
         # The key as the service reads it: x-api-key (Anthropic) or a Bearer header.
-        key = headers.get("x-api-key") if where == "x-api-key" else headers.get("Authorization", "").split(" ", 1)[-1]
+        key = headers.get(where) if where in ("x-api-key", "x-goog-api-key") else headers.get("Authorization", "").split(" ", 1)[-1]
         if where == "x-api-key": assert headers.get("anthropic-version"), "Anthropic needs anthropic-version"
         test.http_calls.append((url, key))
         if key.startswith("sk-offline"): return None, None
         if key.startswith("sk-broken"): return 500, {"error": "upstream"}
         if key.startswith("xai-odd"): return 400, {"error": "bad request"}
-        if key == good and not (test.home / "qwen-revoked.txt").exists() and url.endswith("/models"):
+        if key == good and not (test.home / "qwen-revoked.txt").exists() and (url.endswith("/models") or "/models?pageSize=" in url):
             return 200, listing
         return refused
     return get
@@ -441,13 +522,14 @@ class Requests(Base):
 
 
 class MachineStatus(Base):
-    def test_reports_five_harnesses_and_claude_signed_out(self):
+    def test_reports_six_harnesses_and_claude_signed_out(self):
         r = self.req(op="machine.status")
         self.assertTrue(r["ok"])
         self.assertIsInstance(r["machine"], str)
         rows = {h["id"]: h for h in r["harnesses"]}
-        self.assertEqual(list(rows), ["claude", "codex", "grok", "qwen", "goose"])
+        self.assertEqual(list(rows), ["claude", "codex", "grok", "qwen", "antigravity", "goose"])
         self.assertEqual(rows["qwen"]["signIn"], "device", "the Qwen membership signs in like Codex and Grok")
+        self.assertEqual((rows["antigravity"]["label"], rows["antigravity"]["signIn"]), ("Antigravity", "code"), "a Google link and a pasted code, like Claude")
         self.assertEqual(rows["qwen"]["label"], "Qwen Code")
         self.assertFalse(rows["qwen"]["installed"])
         self.assertEqual(rows["qwen"]["key"], {"signIn": "key", "signedIn": None, "account": None, "plan": None}, "and takes an API key beside it")
@@ -1068,6 +1150,7 @@ class DeviceBase(Base):
         write_exe(self.a.BIN / "codex-acp", "#!/bin/sh\nexit 0\n")
         write_exe(self.a.BIN / "grok", FAKE_GROK)
         write_exe(self.a.BIN / "qwen", FAKE_QWEN)
+        write_exe(self.a.BIN / "agy", FAKE_AGY)
         write_exe(self.a.BIN / "node", FAKE_NODE)
         (self.a.BIN / "qwen-account.mjs").write_text("// the real script is machine/qwen-account.mjs; the fake node above answers for it\n")
         self.a.http_get_json = fake_qwencloud(self)
@@ -2068,9 +2151,264 @@ def install_pinned(a, home):
     if (a.BIN / "grok").exists():
         (a.BIN / "grok").rename(grok / "grok")
         (a.BIN / "grok").symlink_to(grok / "grok")
+    agy = a.VENDOR / f"antigravity-{pins['clis']['antigravity']['version']}"
+    agy.mkdir()
+    if (a.BIN / "agy").exists():
+        (a.BIN / "agy").rename(agy / "agy")
+        (a.BIN / "agy").symlink_to(agy / "agy")
     (a.ROOT / "mcp").mkdir()
     write_exe(a.ROOT / "mcp" / "black4", "#!/bin/sh\nexit 0\n")
     return pins
+
+
+class Antigravity(DeviceBase):
+    """Google's Antigravity CLI on a Gemini subscription (a Google link and a
+    pasted code) or a Gemini API key, each in its own private folder."""
+
+    def start_code(self):
+        r = self.req(op="login.start", harness="antigravity", flows=["code", "device", "key"])
+        self.assertTrue(r["ok"], r)
+        return r
+
+    def sign_in_google(self, code=GOOD_CODE):
+        r = self.start_code()
+        return self.req(op="login.finish", loginId=r["loginId"], code=code)
+
+    def test_the_subscription_signs_in_with_a_google_link_and_the_pasted_code(self):
+        r = self.start_code()
+        self.assertTrue(r["needsCode"])
+        self.assertTrue(r["url"].startswith("https://accounts.google.com/o/oauth2/auth?"), r["url"])
+        self.assertIn("redirect_uri=https%3A%2F%2Fantigravity.google%2Foauth-callback", r["url"])
+        done = self.req(op="login.finish", loginId=r["loginId"], code=GOOD_CODE)
+        self.assertEqual(done, {"ok": True, "signedIn": True, "account": "owner@example.com"})
+        cred = self.a.HOMES / "antigravity" / "antigravity-cli" / "antigravity-oauth-token"
+        self.assertEqual(json.loads(cred.read_text())["token"]["refresh_token"], FAKE_CRED)
+        self.assertEqual(stat.S_IMODE(cred.stat().st_mode), 0o600)
+        state = self.a.HOMES / "antigravity" / "antigravity-cli" / "cache" / "acp-auth-state.json"
+        self.assertEqual(json.loads(state.read_text()), {"methodId": "oauth-personal"}, "how agy signs in goes with the sign-in")
+        self.assertFalse((self.a.LOGINS / r["loginId"]).exists(), "the sign-in's own folder goes")
+        self.assertFalse((self.home / ".gemini").exists())
+        row = {h["id"]: h for h in self.req(op="machine.status")["harnesses"]}["antigravity"]
+        self.assertEqual((row["signIn"], row["signedIn"], row["account"]), ("code", True, "owner@example.com"))
+        self.assertEqual(row["key"]["signedIn"], False)
+
+    def test_agys_own_token_refresh_keeps_the_fingerprint(self):
+        self.assertTrue(self.sign_in_google()["ok"])
+        before = self.a.credential("antigravity")
+        path = self.a.HOMES / "antigravity" / "antigravity-cli" / "antigravity-oauth-token"
+        data = json.loads(path.read_text())
+        data["token"].update({"access_token": "a-refreshed", "expiry": "2026-11-28T00:35:00Z"})
+        path.write_text(json.dumps(data))
+        self.assertEqual(self.a.credential("antigravity"), before, "a refresh is the same sign-in")
+        data["token"]["refresh_token"] = "another-sign-in"
+        path.write_text(json.dumps(data))
+        self.assertNotEqual(self.a.credential("antigravity"), before)
+        path.write_text("{")
+        self.assertIsNone(self.a.credential("antigravity"), "unreadable: not signed in")
+
+    def test_a_new_sign_in_google_refuses_never_replaces_the_working_one(self):
+        self.assertTrue(self.sign_in_google()["ok"])
+        path = self.a.HOMES / "antigravity" / "antigravity-cli" / "antigravity-oauth-token"
+        before = path.read_text()
+        agent = self.make_agent("antigravity")
+        self.assertTrue(self.req(op="start", pubkey=agent.name)["ok"])
+        bad = self.sign_in_google("refused-code-123456")
+        self.assertEqual(bad["error"], "Antigravity signed in, but Google refused the sign-in. Check the account and start the sign-in again.")
+        self.assertEqual(path.read_text(), before, "the working sign-in stays")
+        self.assertTrue(self.a.running(agent), "and its agents keep running")
+        self.assertIs({h["id"]: h for h in self.req(op="machine.status")["harnesses"]}["antigravity"]["signedIn"], True)
+
+    def test_every_start_checks_the_model_against_what_agy_offers_now(self):
+        self.assertTrue(self.sign_in_google()["ok"])
+        agent = self.make_agent("antigravity")
+        self.assertTrue(self.req(op="settings.set", pubkey=agent.name, model="gemini-4-neon", effort="xhigh")["ok"])
+        self.assertEqual(self.wait_env(agent)["BUZZ_ACP_MODEL"], "gemini-4-neon-xhigh")
+        # The plan changes: agy no longer lists Neon (a key-only listing has none).
+        cache = self.a.CRED_RUN / "antigravity-models.json"
+        listed = json.loads(cache.read_text())
+        listed["models"] = [m for m in listed["models"] if m["id"] != "gemini-4-neon"]
+        cache.write_text(json.dumps(listed))
+        self.assertTrue(self.req(op="start", pubkey=agent.name)["ok"], "a fresh listing at start: Neon is still offered")
+        calls = (self.home / "listings.txt").read_text().count("agy ")
+        (self.home / "agy-no-neon.txt").write_text("x")
+        refused = self.req(op="start", pubkey=agent.name)
+        self.assertEqual(refused["error"], "Antigravity does not offer the model gemini-4-neon on this machine. Choose another model for this agent.")
+        self.assertGreater((self.home / "listings.txt").read_text().count("agy "), calls)
+
+    def test_a_key_google_lists_no_runnable_model_for_is_refused_at_start(self):
+        base = "https://generativelanguage.googleapis.com/v1beta"
+        saved = SERVICES[base]
+        SERVICES[base] = (saved[0], saved[1], {"models": [{"name": "models/gemini-4-carbon-image-only", "supportedGenerationMethods": ["embedContent"]}]}, saved[3])
+        try:
+            self.assertTrue(self.sign_in_key(FAKE_GEMINI_KEY, "antigravity")["ok"])
+            self.assertEqual(self.a.offered("antigravity-key"), [], "an answer: none, not unsure")
+            agent = self.make_agent("antigravity", pays="key")
+            self.assertEqual(self.req(op="start", pubkey=agent.name)["error"],
+                             f"Google lists no model Antigravity can run for {OWNER}'s API key.")
+        finally:
+            SERVICES[base] = saved
+
+    def test_a_key_agent_never_starts_unchecked_when_google_cannot_be_asked(self):
+        self.assertTrue(self.sign_in_key(FAKE_GEMINI_KEY, "antigravity")["ok"])
+        agent = self.make_agent("antigravity", pays="key")
+        self.assertTrue(self.req(op="start", pubkey=agent.name)["ok"])
+        get = self.a.http_get_json
+        self.a.http_get_json = lambda url, headers, timeout=20: (403, {"error": {"status": "PERMISSION_DENIED"}}) if "pageSize" in url else get(url, headers, timeout)
+        self.assertEqual(self.req(op="start", pubkey=agent.name)["error"],
+                         f"Antigravity could not check {OWNER}'s API key with Google just now. Try again in a moment, or add the key again.")
+
+    def test_the_sign_in_checked_in_its_own_folder_is_the_one_put_in_place(self):
+        self.assertTrue(self.sign_in_google()["ok"])
+        (self.home / "agy-refuse-live.txt").write_text("x")  # anything run after the move would now fail
+        done = self.sign_in_google()
+        self.assertTrue(done["ok"], done)
+        _, check = self.a.last_check("antigravity")
+        self.assertIs(check["ok"], True, "the staged check is the check")
+        self.assertTrue(self.a.cached_models("antigravity", spawn=False), "and the staged listing the listing")
+
+    def test_a_sign_out_wins_over_a_sign_in_under_way(self):
+        import threading
+        self.assertTrue(self.sign_in_google()["ok"])
+        path = self.a.HOMES / "antigravity" / "antigravity-cli" / "antigravity-oauth-token"
+        (self.home / "agy-hold.txt").write_text("x")
+        r = self.start_code()
+        out = {}
+        t = threading.Thread(target=lambda: out.update(self.req(op="login.finish", loginId=r["loginId"], code=GOOD_CODE)))
+        t.start()
+        for _ in range(200):
+            if (self.home / "agy-holding.txt").exists(): break
+            time.sleep(0.05)
+        self.assertTrue((self.home / "agy-holding.txt").exists(), "the staged check is under way")
+        self.assertEqual(self.req(op="logout", harness="antigravity"), {"ok": True})
+        (self.home / "agy-hold.txt").unlink()
+        t.join(30)
+        self.assertFalse(out.get("ok"), out)
+        time.sleep(1)
+        self.assertFalse(path.exists(), "the sign-in under way never came back")
+
+    def test_a_listing_that_fails_at_start_refuses_a_chosen_model_and_names_the_default_unchecked(self):
+        self.assertTrue(self.sign_in_google()["ok"])
+        chosen, default = self.make_agent("antigravity"), self.make_agent("antigravity")
+        self.assertTrue(self.req(op="settings.set", pubkey=chosen.name, model="gemini-4-neon", effort="xhigh")["ok"])
+        (self.home / "agy-list-fail.txt").write_text("x")
+        self.assertEqual(self.req(op="start", pubkey=chosen.name)["error"],
+                         "Antigravity could not list its models on this machine just now, so gemini-4-neon at xhigh cannot be checked. Try again in a moment.")
+        (self.home / "agy-list-fail.txt").unlink()
+        thinking = self.make_agent("antigravity")
+        self.assertTrue(self.req(op="settings.set", pubkey=thinking.name, effort="low")["ok"])
+        self.assertEqual(self.wait_env(thinking)["BUZZ_ACP_MODEL"], "gemini-4-carbon-low")
+        (self.home / "agy-list-fail.txt").write_text("x")
+        self.assertEqual(self.req(op="start", pubkey=thinking.name)["error"],
+                         "Antigravity could not list its models on this machine just now, so the default model at low cannot be checked. Try again in a moment.",
+                         "a Thinking choice alone is a choice")
+        self.assertTrue(self.req(op="start", pubkey=default.name)["ok"])
+        env = self.wait_env(default)
+        self.assertNotIn("BUZZ_ACP_MODEL", env, "agy's own default, not a stale pick")
+        launch = json.loads((default / "launch.json").read_text())
+        self.assertEqual((launch["model"], launch["checked"]), (None, False))
+
+    def test_a_code_google_refuses_keeps_nothing(self):
+        r = self.start_code()
+        bad = self.req(op="login.finish", loginId=r["loginId"], code="wrong-code-999999")
+        self.assertEqual(bad, {"ok": False, "error": "That code was not accepted. Start the sign-in again to get a new link."})
+        self.assertFalse((self.a.HOMES / "antigravity" / "antigravity-cli" / "antigravity-oauth-token").exists())
+        self.assertIn("antigravity.google", self.req(op="login.finish", loginId=self.start_code()["loginId"], code="no")["error"])
+
+    def test_the_models_are_agys_own_listing_with_each_ones_thinking_levels(self):
+        self.assertTrue(self.sign_in_google()["ok"])
+        self.a.refresh_models("antigravity", wait=True)
+        rows = self.a.offered("antigravity")
+        self.assertEqual([(m["id"], m["label"], m["efforts"]) for m in rows], [
+            ("gemini-4-neon", "Gemini 4 Neon", ["low", "medium", "high", "xhigh"]),
+            ("gemini-4-carbon", "Gemini 4 Carbon", ["low", "medium", "high"]),
+            ("gemini-4-hydrogen", "Gemini 4 Hydrogen", ["low", "medium", "high", "xhigh"]),
+            ("gemini-3.1-pro", "Gemini 3.1 Pro", ["low", "high"])])
+        listing = {h["id"]: h for h in self.req(op="models")["harnesses"]}["antigravity"]
+        self.assertEqual((listing["model"], listing["effort"], listing["checked"]), ("gemini-4-carbon", "high", True))
+        self.assertEqual(listing["compact"]["max"], 1_000_000)
+
+    def test_an_agent_runs_agy_in_its_folder_with_its_model_and_thinking_as_one_id(self):
+        self.assertTrue(self.sign_in_google()["ok"])
+        agent = self.make_agent("antigravity")
+        env = self.env_after_start(agent)
+        folder = self.a.HOMES / "antigravity"
+        self.assertEqual(env["BUZZ_ACP_AGENT_COMMAND"], "agy")
+        self.assertEqual(env["BUZZ_ACP_AGENT_ARGS"], f"acp,--dangerously-skip-permissions,--disable-telemetry,--gemini-dir,{folder}")
+        self.assertEqual(env["AGY_CLI_FORCE_FILE_TOKEN_STORAGE"], "1")
+        self.assertEqual(env["BUZZ_ACP_MODEL"], "gemini-4-carbon-high")
+        self.assertEqual(env["AGY_CLI_AUTO_COMPACT_OVERRIDE"], "150000")
+        self.assertNotIn("GEMINI_API_KEY", env)
+        self.assertIn("You are a Black 4 hardware agent", (folder / "GEMINI.md").read_text())
+        self.assertIn("running Antigravity", (folder / "GEMINI.md").read_text())
+        self.assertTrue(self.req(op="settings.set", pubkey=agent.name, model="gemini-4-neon", effort="xhigh")["ok"])
+        self.assertEqual(self.wait_env(agent)["BUZZ_ACP_MODEL"], "gemini-4-neon-xhigh")
+        refused = self.req(op="settings.set", pubkey=agent.name, model="gemini-4-carbon", effort="xhigh")
+        self.assertEqual(refused["error"], "Gemini 4 Carbon does not take the effort xhigh. Choose another effort for this agent.")
+
+    def test_an_agent_waits_for_its_creators_sign_in_and_logout_stops_it(self):
+        agent = self.make_agent("antigravity")
+        self.assertEqual(self.req(op="start", pubkey=agent.name)["error"],
+                         f"Antigravity is not signed in for {OWNER} on this machine. {OWNER} signs in to Antigravity from Buzz first.")
+        self.assertTrue(self.sign_in_google()["ok"])
+        self.assertTrue(self.wait_running(agent), "a sign-in restarts its agents")
+        self.assertEqual(self.req(op="logout", harness="antigravity"), {"ok": True})
+        self.assertFalse(self.a.running(agent))
+        self.assertFalse((self.a.HOMES / "antigravity" / "antigravity-cli" / "antigravity-oauth-token").exists())
+        self.assertFalse((self.a.SECRETS / "antigravity.json").exists())
+
+    def test_a_refresh_written_while_agents_stop_does_not_survive_logout(self):
+        self.assertTrue(self.sign_in_google()["ok"])
+        path = self.a.HOMES / "antigravity" / "antigravity-cli" / "antigravity-oauth-token"
+        saved, stop = path.read_text(), self.a.stop_harness_agents
+        def stopping(harness, pays=None):  # agy refreshes its file as it is stopped
+            path.write_text(saved)
+            return stop(harness, pays)
+        self.a.stop_harness_agents = stopping
+        self.assertEqual(self.req(op="logout", harness="antigravity"), {"ok": True})
+        self.assertFalse(path.exists())
+        self.assertIs(self.req(op="machine.status")["harnesses"][4]["signedIn"], False)
+
+    def test_a_new_sign_in_stops_the_old_ones_agents_before_it_replaces_the_file(self):
+        self.assertTrue(self.sign_in_google()["ok"])
+        agent = self.make_agent("antigravity")
+        self.assertTrue(self.req(op="start", pubkey=agent.name)["ok"])
+        path = self.a.HOMES / "antigravity" / "antigravity-cli" / "antigravity-oauth-token"
+        old = json.loads(path.read_text()); old["token"]["access_token"] = "old-sign-in"; path.write_text(json.dumps(old))
+        self.assertTrue(self.sign_in_google()["ok"])
+        self.assertTrue(self.wait_running(agent), "started again on the new one")
+        time.sleep(1.5)  # the sign-in's helper finishes that start (a detached process) before the test home goes
+        self.assertEqual((self.home / "term-token.txt").read_text().splitlines()[:1], ["old-sign-in"],
+                         "stopped while the old sign-in was still in place")
+
+    def test_a_sign_in_google_no_longer_takes_shows_in_the_check(self):
+        self.assertTrue(self.sign_in_google()["ok"])
+        (self.home / "agy-revoked.txt").write_text("x")
+        self.a.run_check("antigravity", wait=True)
+        row = {h["id"]: h for h in self.req(op="machine.status")["harnesses"]}["antigravity"]
+        self.assertIs(row["signedIn"], False)
+        agent = self.make_agent("antigravity")
+        self.assertIn("is not signed in", self.req(op="start", pubkey=agent.name)["error"])
+
+    def test_a_gemini_key_is_checked_with_google_and_runs_in_its_own_folder(self):
+        r, _ = self.start_key("antigravity")
+        self.assertEqual((r["url"], r["flow"]), ("https://aistudio.google.com/apikey", "key"))
+        refused = self.req(op="login.finish", loginId=r["loginId"], code="AIza-not-a-good-key-000000000000")
+        self.assertEqual(refused["error"], "Google AI Studio did not accept that key. Check it and paste it again.")
+        done = self.req(op="login.finish", loginId=r["loginId"], code=FAKE_GEMINI_KEY)
+        self.assertTrue(done["ok"], done)
+        self.assertIn(("https://generativelanguage.googleapis.com/v1beta/models", FAKE_GEMINI_KEY), self.http_calls)
+        folder = self.a.HOMES / "antigravity-key"
+        self.assertEqual(json.loads((folder / "antigravity-cli" / "settings.json").read_text()), {"modelProvider": "gemini"})
+        self.assertEqual([m["id"] for m in self.a.offered("antigravity-key")], ["gemini-4-carbon", "gemini-4-hydrogen"],
+                         "agy lists gemini-3.1-pro for any key; for this one Google has it only for embeddings and as a variant")
+        self.assertTrue(any("/models?pageSize=1000" in url for url, _ in self.http_calls))
+        agent = self.make_agent("antigravity")
+        self.assertEqual(self.a.read_settings(agent)["pays"], "key", "only the key works: the agent pays by key")
+        env = self.env_after_start(agent)
+        self.assertEqual(env["GEMINI_API_KEY"], FAKE_GEMINI_KEY)
+        self.assertTrue(env["BUZZ_ACP_AGENT_ARGS"].endswith(f"--gemini-dir,{folder}"))
+        self.assertNotIn(FAKE_GEMINI_KEY, env["BUZZ_ACP_AGENT_ARGS"])
+        self.assertEqual(env["BUZZ_ACP_MODEL"], "gemini-4-carbon-high")
 
 
 class Health(DeviceBase):
@@ -2136,9 +2474,21 @@ class Health(DeviceBase):
         self.assertTrue((self.a.HOMES / "qwen" / "settings.json").exists())
         self.assertFalse((self.home / ".qwen").exists())
 
+    def test_antigravity_off_its_pin_is_a_problem_and_its_handshake_runs_in_its_own_folder(self):
+        self.assertNotIn("problem", self.rows()["antigravity"])
+        args = (self.home / "handshake-args.txt").read_text().splitlines()
+        self.assertIn(f"acp,--dangerously-skip-permissions,--disable-telemetry,--gemini-dir,{self.a.HOMES / 'antigravity'}", args)
+        self.assertFalse((self.home / ".gemini").exists(), "never the machine user's own ~/.gemini")
+        (self.a.BIN / "agy").unlink()
+        moved = self.a.VENDOR / "antigravity-1.5.17"
+        moved.mkdir()
+        write_exe(moved / "agy", FAKE_AGY)
+        (self.a.BIN / "agy").symlink_to(moved / "agy")
+        self.assertEqual(self.rows()["antigravity"]["problem"], "antigravity is 1.5.17, pinned 1.5.18")
+
     def test_doctor_reports_each_harness_runs_with_full_access(self):
         rows = self.rows("doctor")
-        for harness in ("claude", "codex", "grok", "qwen", "goose"):
+        for harness in ("claude", "codex", "grok", "qwen", "antigravity", "goose"):
             self.assertTrue(rows[harness]["access"].startswith("full access"), rows[harness])
         out = io.StringIO()
         with contextlib.redirect_stdout(out): self.a.print_doctor()
@@ -2354,6 +2704,14 @@ class SetupPins(unittest.TestCase):
         self.assertNotIn("qwen", self.text[self.text.index('"name": "workforce-acp"'):self.text.index("npm install --prefix \"$ACP_DIR\"")],
                          "never in the adapters' package.json: that reinstalls them under running agents")
 
+    def test_antigravity_download_is_checked_and_its_folder_is_read_only(self):
+        self.assertEqual(self.pins["ANTIGRAVITY_VERSION"], "1.5.18")
+        self.assertRegex(self.pins["ANTIGRAVITY_SHA512"], r"^[0-9a-f]{128}$")
+        self.assertIn('[ "$got" = "$ANTIGRAVITY_SHA512" ]', self.text)
+        self.assertIn('AGY_DIR="$VENDOR/antigravity-$ANTIGRAVITY_VERSION"', self.text, "where agentctl reads the version")
+        self.assertIn('ln -sfn "$AGY_DIR/agy" "$BIN/agy"', self.text)
+        self.assertIn('chmod 555 "$tmp"', self.text, "agy cannot replace itself with a newer build")
+
     def test_grok_download_is_checked_and_never_updates_itself(self):
         self.assertRegex(self.pins["GROK_SHA256"], r"^[0-9a-f]{64}$")
         self.assertIn('[ "$got" = "$GROK_SHA256" ]', self.text)
@@ -2422,7 +2780,7 @@ class ModelAndEffort(DeviceBase):
     def test_each_harness_offers_what_its_own_listing_says(self):
         r = self.req(op="models")
         rows = {h["id"]: h for h in r["harnesses"]}
-        self.assertEqual(set(rows), {"claude", "codex", "grok", "qwen"}, "Goose takes no model")
+        self.assertEqual(set(rows), {"claude", "codex", "grok", "qwen", "antigravity"}, "Goose takes no model")
         self.assertEqual((rows["qwen"]["models"], rows["qwen"]["checked"]), ([], False), "no key yet: nothing to list")
         self.assertEqual([m["id"] for m in rows["claude"]["models"]], ["claude-fable-5-2", "sonnet", "fable", "opus", "haiku"])
         self.assertEqual(rows["claude"]["models"][0]["label"], "Fable 5.2")
@@ -2684,6 +3042,12 @@ class ModelLevers(unittest.TestCase):
         self.assertEqual(self.a.launch("grok", pick), ({}, "agent,--model,m,--reasoning-effort,high,--always-approve,stdio"))
         self.assertEqual(self.a.launch("grok", {"model": None, "effort": None}), ({}, "agent,--always-approve,stdio"))
         self.assertEqual(self.a.launch("goose", {"model": None, "effort": None}), ({}, "acp"))
+        self.a.set_root(tempfile.mkdtemp())
+        folder = self.a.HOMES / "antigravity"
+        self.assertEqual(self.a.launch("antigravity", {"model": "gemini-4-neon", "effort": "xhigh"}),
+                         ({"BUZZ_ACP_MODEL": "gemini-4-neon-xhigh"}, f"acp,--dangerously-skip-permissions,--disable-telemetry,--gemini-dir,{folder}"))
+        self.assertEqual(self.a.launch("antigravity", {"model": "gemini-4-neon", "effort": None})[0], {"BUZZ_ACP_MODEL": "gemini-4-neon"})
+        self.assertTrue(self.a.launch("antigravity", {"model": None, "effort": None}, "key")[1].endswith(f"--gemini-dir,{self.a.HOMES / 'antigravity-key'}"))
 
     def test_labels_and_effort_order(self):
         self.assertEqual(self.a.claude_label("claude-fable-5-2"), "Fable 5.2")

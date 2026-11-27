@@ -35,6 +35,14 @@ GROK_SHA256=9c83a2b8b28064574b65e1fa50e8342dd5d797d81c5c724c1d60bb0ad35e3199  # 
 # with a key agentctl keeps in secrets/qwen. It is installed in its own folder
 # (vendor/qwen-code) so moving this pin never reinstalls the adapters above.
 QWEN_CODE_VERSION=0.27.4   # @qwen-code/qwen-code
+# Antigravity is Google's CLI and ACP agent (agy acp), run on a Gemini
+# subscription or a Gemini API key. Google's installer fetches the newest build
+# from a manifest; this takes the exact build that was checked against buzz-acp
+# (Apple-signed, team EQHXZ8M8AV) and its SHA-512 from that manifest. Its
+# folder is read-only, so the CLI cannot replace itself with a newer build.
+ANTIGRAVITY_VERSION=1.5.18
+ANTIGRAVITY_BUILD=1.5.18-6386224290725888
+ANTIGRAVITY_SHA512=d10e124f5eb4da94ebb6c494cd2e7b38744f9f66e8e87145d2cbad1cbd3c4160fd88a79cd4220dfce7c9da0ddead652346bcc839914575f6447438ae8d1d5dcc  # cli_mac_arm64.tar.gz
 
 # BLACK4_WORKFORCE_ROOT puts a second runner beside the real one (for example
 # $HOME/workforce-dev), with its own agents, sign-ins and cron lines.
@@ -118,6 +126,27 @@ if [ ! -x "$GROK_DIR/grok" ]; then
   trap - EXIT
 fi
 ln -sfn "$GROK_DIR/grok" "$BIN/grok"
+
+# Antigravity, one signed binary per build, checked against the pinned hash.
+AGY_DIR="$VENDOR/antigravity-$ANTIGRAVITY_VERSION"
+if [ ! -x "$AGY_DIR/agy" ]; then
+  tmp=$(mktemp -d "$VENDOR/.antigravity.XXXXXX")
+  trap 'chmod -R u+w "$tmp" 2>/dev/null; rm -rf "$tmp"' EXIT
+  echo "downloading Antigravity $ANTIGRAVITY_VERSION"
+  /usr/bin/curl -fsSL -o "$tmp/agy.tar.gz" "https://storage.googleapis.com/antigravity-public/antigravity-cli/$ANTIGRAVITY_BUILD/darwin-arm/cli_mac_arm64.tar.gz"
+  got=$(/usr/bin/shasum -a 512 "$tmp/agy.tar.gz" | cut -d' ' -f1)
+  [ "$got" = "$ANTIGRAVITY_SHA512" ] || { echo "Antigravity download checksum mismatch: $got" >&2; exit 1; }
+  /usr/bin/tar -xzf "$tmp/agy.tar.gz" -C "$tmp" antigravity
+  mv "$tmp/antigravity" "$tmp/agy"
+  rm -f "$tmp/agy.tar.gz"
+  chmod 555 "$tmp/agy"
+  [ "$("$tmp/agy" --version </dev/null)" = "$ANTIGRAVITY_VERSION" ] || { echo "Antigravity is not $ANTIGRAVITY_VERSION" >&2; exit 1; }
+  chmod 555 "$tmp"
+  if [ -d "$AGY_DIR" ]; then chmod -R u+w "$AGY_DIR"; rm -rf "$AGY_DIR"; fi
+  mv "$tmp" "$AGY_DIR"
+  trap - EXIT
+fi
+ln -sfn "$AGY_DIR/agy" "$BIN/agy"
 
 # Qwen Code, from npm at its pinned version, in a folder of its own.
 QWEN_DIR="$VENDOR/qwen-code"
@@ -236,7 +265,7 @@ if [ -f "$SRC/machine/door.mjs" ] && [ "${RUNNER_PROFILE:-}" != platform ]; then
   fi
 fi
 
-echo "node $("$BIN/node" --version), $want, grok $GROK_VERSION, $want_qwen"
+echo "node $("$BIN/node" --version), $want, grok $GROK_VERSION, $want_qwen, antigravity $ANTIGRAVITY_VERSION"
 # The self-test: pinned versions, buzz-acp's ACP handshake with each adapter,
 # the connector, cron and disk. An install that cannot run an agent fails here.
 if [ -x "$BIN/agentctl" ]; then

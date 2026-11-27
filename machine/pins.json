@@ -43,6 +43,17 @@
       "dependencyOf": "workforce-qwen (vendor/qwen-code, its own package.json)",
       "command": "qwen --acp --approval-mode yolo, then --auth-type qwen-subscription -m <model> on the membership (bin/qwen-account.mjs signs it in through Qwen Code's own QwenSubscriptionSession) or --auth-type openai with OPENAI_API_KEY, OPENAI_BASE_URL and OPENAI_MODEL in the environment on a QwenCloud key",
       "handshake": "buzz-acp 0.5.30 initialize -> qwen-code 0.27.4 protocolVersion 1; session/new answers -32000 Authentication required with no key in the environment, and opens a session with any key there (Qwen Code does not check it; agentctl does, with GET /models). Checked on the Commerce Mac, 2026-11-16"
+    },
+    "antigravity": {
+      "version": "1.5.18",
+      "versionVar": "ANTIGRAVITY_VERSION",
+      "build": "1.5.18-6386224290725888",
+      "buildVar": "ANTIGRAVITY_BUILD",
+      "sha512": "d10e124f5eb4da94ebb6c494cd2e7b38744f9f66e8e87145d2cbad1cbd3c4160fd88a79cd4220dfce7c9da0ddead652346bcc839914575f6447438ae8d1d5dcc",
+      "sha512Var": "ANTIGRAVITY_SHA512",
+      "source": "https://storage.googleapis.com/antigravity-public/antigravity-cli/<build>/darwin-arm/cli_mac_arm64.tar.gz (hash from Google's darwin_arm64 manifest, the one its install.sh checks)",
+      "command": "agy acp --dangerously-skip-permissions --disable-telemetry --gemini-dir <private home>, with AGY_CLI_FORCE_FILE_TOKEN_STORAGE=1; the model (with its thinking level, e.g. gemini-4-neon-xhigh) through BUZZ_ACP_MODEL; on a key GEMINI_API_KEY and modelProvider gemini in the home's settings.json",
+      "handshake": "buzz-acp 0.5.30 initialize -> Antigravity ACP Server 1.5.18 protocolVersion 1; session/new answers -32000 Authentication required until signed in; session/set_model and set_config_option take gemini-4-neon and gemini-4-neon-xhigh and refuse an unknown id. Checked on the Commerce Mac, 2026-11-27"
     }
   }
 }

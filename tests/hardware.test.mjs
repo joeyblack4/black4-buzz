@@ -573,6 +573,49 @@ test("render: a harness that takes an API key gets Pays with, and the model list
   assert.ok(!pillsIn(old).some((entry) => entry.title === "Pays with"), "a machine from before keys: no choice");
 });
 
+const GEMINI = [
+  { id: "gemini-4-carbon", label: "Gemini 4 Carbon", efforts: ["low", "medium", "high"] },
+  { id: "gemini-4-neon", label: "Gemini 4 Neon", efforts: ["low", "medium", "high", "xhigh"] },
+  { id: "gemini-4-hydrogen", label: "Gemini 4 Hydrogen", efforts: ["low", "medium", "high", "xhigh"] },
+];
+const antigravityFleet = ({ signedIn = false } = {}) => (request) => {
+  if (request.op === "machine.status") return { ok: true, machine: "commerce", harnesses: deviceRows({ antigravity: signedIn }) };
+  if (request.op === "models") return { ok: true, harnesses: [
+    { id: "antigravity", label: "Antigravity", checked: signedIn, model: "gemini-4-carbon", effort: "high", models: signedIn ? GEMINI : [],
+      compact: { supported: true, min: 20000, max: 1000000, default: 150000 },
+      key: { checked: false, model: "gemini-4-carbon", effort: "high", models: [], compact: { supported: true, min: 20000, max: 1000000, default: 150000 } } },
+  ], controls: CONTROLS };
+  if (request.op === "list") return { ok: true, agents: [] };
+  return { ok: true };
+};
+
+test("render: Antigravity signs in with a pasted code and offers each Gemini model with its own thinking levels", async () => {
+  const out = hardwareOn(antigravityFleet());
+  const signedOut = await out.settle(out.React.createElement(out.type.CreateConfiguration, {
+    config: { ...hardwareDefaults(), harness: "antigravity" }, onChange: () => {}, disabled: false }));
+  assert.deepEqual(pillsIn(signedOut).slice(0, 3).map((entry) => entry.title), ["Runs on", "Runs", "Pays with"]);
+  assert.ok(pillsIn(signedOut).find((entry) => entry.title === "Runs").options.includes("antigravity"));
+  assert.match(textIn(signedOut), /Antigravity is not signed in/);
+  assert.ok(buttonsIn(signedOut).some((button) => button.label === "Sign in"));
+  assert.deepEqual(signInOf(deviceRows().find((row) => row.id === "antigravity")), { flow: "code", reason: null }, "a code to paste, like Claude");
+
+  const { type, React, settle } = hardwareOn(antigravityFleet({ signedIn: true }));
+  const changes = [];
+  const tree = await settle(React.createElement(type.CreateConfiguration, {
+    config: { ...hardwareDefaults(), harness: "antigravity" }, onChange: (next) => changes.push(next), disabled: false }));
+  const pills = pillsIn(tree);
+  const model = pills.find((entry) => entry.title === "Model");
+  assert.deepEqual([model.value, model.options], ["gemini-4-carbon", ["gemini-4-carbon", "gemini-4-neon", "gemini-4-hydrogen"]]);
+  assert.deepEqual(pills.find((entry) => entry.title === "Thinking").options, ["low", "medium", "high"]);
+  model.pick("gemini-4-neon");
+  assert.deepEqual([changes.at(-1).model, changes.at(-1).effort], ["gemini-4-neon", ""]);
+  const neon = await settle(React.createElement(type.CreateConfiguration, {
+    config: { ...hardwareDefaults(), harness: "antigravity", model: "gemini-4-neon", effort: "xhigh" }, onChange: () => {}, disabled: false }));
+  const thinking = pillsIn(neon).find((entry) => entry.title === "Thinking");
+  assert.deepEqual([thinking.value, thinking.options], ["xhigh", ["low", "medium", "high", "xhigh"]], "Neon's own levels");
+  assert.match(textIn(tree), /Signed in as owner@example.com/);
+});
+
 test("render: Settings splits into Identity and Settings, each a titled card of rows", async () => {
   const { type, React, settle } = hardwareOn(qwenFleet);
   const [tab] = type.tabs;
@@ -726,9 +769,9 @@ test("render: a sign-in under way is rows of the same card, with Buzz's input an
 test("harness choices follow what the machine has installed", () => {
   const ok = { kind: "ok", harnesses: harnesses() };
   assert.deepEqual(harnessOptions(ok).map((entry) => entry.id), ["claude", "codex", "goose"]);
-  assert.deepEqual(harnessOptions(undefined).map((entry) => entry.id), ["claude", "codex", "grok", "qwen", "goose"], "loading");
-  assert.equal(harnessOptions({ kind: "unsupported" }).length, 5);
-  assert.equal(harnessOptions({ kind: "unreachable", error: "x" }).length, 5);
+  assert.deepEqual(harnessOptions(undefined).map((entry) => entry.id), ["claude", "codex", "grok", "qwen", "antigravity", "goose"], "loading");
+  assert.equal(harnessOptions({ kind: "unsupported" }).length, 6);
+  assert.equal(harnessOptions({ kind: "unreachable", error: "x" }).length, 6);
   assert.deepEqual(harnessOptions({ kind: "ok", harnesses: [] }), []);
 });
 
@@ -752,14 +795,16 @@ test("readiness for each sign-in state", () => {
   assert.equal(signInState({ kind: "ok", harnesses: harnesses({ signedIn: true, account: null }) }, "claude").account, null);
 });
 
-// What a runner with Codex, Grok and Qwen Code sign-in reports (machine/agentctl machine.status).
+// What a runner with Codex, Grok, Qwen Code and Antigravity sign-in reports (machine/agentctl machine.status).
 const noKey = { signIn: "key", signedIn: false, account: null, plan: null };
-const deviceRows = ({ codex = false, grok = false, qwen = false, qwenKey = false } = {}) => [
+const deviceRows = ({ codex = false, grok = false, qwen = false, qwenKey = false, antigravity = false, antigravityKey = false } = {}) => [
   { id: "claude", label: "Claude Code", installed: true, signedIn: true, account: null, signIn: "code", key: noKey },
   { id: "codex", label: "Codex", installed: true, signedIn: codex, account: codex ? "owner@example.com" : null, signIn: "device", key: noKey },
   { id: "grok", label: "Grok Build", installed: true, signedIn: grok, account: null, signIn: "device", key: noKey },
   { id: "qwen", label: "Qwen Code", installed: true, signedIn: qwen, account: qwen ? "owner@example.com" : null, signIn: "device",
     key: { signIn: "key", signedIn: qwenKey, account: null, plan: qwenKey ? "pay-as-you-go" : null } },
+  { id: "antigravity", label: "Antigravity", installed: true, signedIn: antigravity, account: antigravity ? "owner@example.com" : null, signIn: "code",
+    key: { signIn: "key", signedIn: antigravityKey, account: null, plan: antigravityKey ? "api" : null } },
   { id: "goose", label: "Goose", installed: true, signedIn: null, account: null, signIn: null,
     note: "Goose takes its model settings from the machine itself; Buzz cannot sign it in." },
 ];
@@ -767,11 +812,11 @@ const deviceRows = ({ codex = false, grok = false, qwen = false, qwenKey = false
 test("Codex and Grok sign in from Buzz; an installed harness Buzz cannot sign in is shown unavailable", () => {
   const ok = { kind: "ok", harnesses: deviceRows() };
   const options = harnessOptions(ok);
-  assert.deepEqual(options.map((entry) => entry.id), ["claude", "codex", "grok", "qwen", "goose"]);
+  assert.deepEqual(options.map((entry) => entry.id), ["claude", "codex", "grok", "qwen", "antigravity", "goose"]);
   assert.equal(options.find((entry) => entry.id === "goose").label, "Goose (unavailable)");
   assert.match(options.find((entry) => entry.id === "goose").unavailable, /cannot sign it in/);
   assert.ok(!options.find((entry) => entry.id === "codex").unavailable);
-  for (const harness of ["codex", "grok", "qwen"]) {
+  for (const harness of ["codex", "grok", "qwen", "antigravity"]) {
     assert.equal(signInState(ok, harness).kind, "signed-out");
     assert.equal(readyToCreate(signInState(ok, harness)), false);
   }

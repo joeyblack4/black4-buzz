@@ -105,7 +105,7 @@ RESTART_MAX_DELAY = 300      # a crashing agent is retried at 5, 10, 20 ... 300 
 HEALTHY_AFTER = 300          # up this long after a restart: the count starts over
 KEEPS_STOPPING = 3           # restarts in a row before status says "keeps stopping"
 DISK_MIN_GB = 2              # doctor's floor for free disk
-PINNED = ("claude", "codex", "grok", "qwen")  # harnesses setup.sh installs at pins.json versions
+PINNED = ("claude", "codex", "grok", "qwen", "antigravity")  # harnesses setup.sh installs at pins.json versions
 
 
 def set_root(home, root=None):
@@ -360,9 +360,13 @@ HARNESS = {  # the model CLI each choice runs, as buzz-acp's agent command
     # qwen-subscription with -m, or --auth-type openai with the key in the
     # environment); this row alone serves the handshake.
     "qwen": ("qwen", "--acp,--approval-mode,yolo"),
+    # Google's Antigravity CLI, its own ACP server. agy_args() adds the private
+    # home (--gemini-dir) wherever it runs: without one it would use ~/.gemini.
+    "antigravity": ("agy", "acp,--dangerously-skip-permissions,--disable-telemetry"),
 }
-LABEL = {"claude": "Claude Code", "codex": "Codex", "grok": "Grok Build", "qwen": "Qwen Code", "goose": "Goose"}
-HARNESS_ORDER = ("claude", "codex", "grok", "qwen", "goose")  # as machine.status lists them
+LABEL = {"claude": "Claude Code", "codex": "Codex", "grok": "Grok Build", "qwen": "Qwen Code",
+         "antigravity": "Antigravity", "goose": "Goose"}
+HARNESS_ORDER = ("claude", "codex", "grok", "qwen", "antigravity", "goose")  # as machine.status lists them
 
 # Every agent is a full-access agent. It lives on its own computer, so no
 # harness asks permission or runs sandboxed; the one gate on customer changes
@@ -378,12 +382,17 @@ FULL_ACCESS = {
     "grok": {"GROK_SANDBOX": "off"},
     # With --approval-mode yolo in its arguments above; no sandbox unless asked.
     "qwen": {},
+    # With --dangerously-skip-permissions in its arguments above; its terminal
+    # sandbox is off unless asked for (--sandbox), and buzz-acp approves what
+    # it still asks (since 1.5.2 it asks for a few protected commands).
+    "antigravity": {},
     "goose": {"GOOSE_MODE": "auto"},
 }
 ACCESS = {"claude": "full access (permission mode bypassPermissions)",
           "codex": "full access (agent-full-access: no sandbox, network on, never asks)",
           "grok": "full access (--always-approve, sandbox off)",
           "qwen": "full access (--approval-mode yolo, no sandbox)",
+          "antigravity": "full access (--dangerously-skip-permissions, no sandbox)",
           "goose": "full access (GOOSE_MODE=auto)"}
 
 
@@ -477,7 +486,7 @@ def forget_claude_token():
 # keychain) and, for Grok, never to update itself. Agents get that home and
 # nothing else: no API key is ever set, so the subscription is what pays.
 
-SIGN_IN = {"claude": "code", "codex": "device", "grok": "device", "qwen": "device"}  # each harness's subscription sign-in
+SIGN_IN = {"claude": "code", "codex": "device", "grok": "device", "qwen": "device", "antigravity": "code"}  # each harness's subscription sign-in
 NO_SIGN_IN = {"goose": "Goose takes its model settings from the machine itself; Buzz cannot sign it in."}
 DEVICE = {
     "codex": {"cli": "codex", "home_env": "CODEX_HOME",
@@ -723,6 +732,171 @@ def forget_member(harness):
         (CRED_RUN / name).unlink(missing_ok=True)
 
 
+# ---------------------------------------------------------------- Antigravity
+# Google's Antigravity CLI (agy) runs as its own ACP server (`agy acp`). Its
+# state lives in one folder, ~/.gemini unless --gemini-dir names another, so
+# each slot gets a private one (homes/antigravity, homes/antigravity-key)
+# passed as --gemini-dir to everything agentctl runs, and HOME stays the
+# machine user's for the agent's own shell. AGY_CLI_FORCE_FILE_TOKEN_STORAGE
+# keeps the sign-in in that folder: otherwise agy puts it in the login
+# keychain whenever that is unlocked, one item shared by every slot and person.
+#
+# The subscription (a Google account with Gemini: Google AI Pro or Ultra, or
+# the free tier) signs in like Claude: `agy acp --login` prints a Google link,
+# the person approves it, antigravity.google shows a code, and the code is
+# pasted back. It runs in a fresh folder inside the login folder; on success
+# the sign-in file moves into homes/antigravity. agy refreshes it itself, so
+# its fingerprint is the refresh token's, which a refresh keeps. The account
+# is the email in the file, kept in secrets/antigravity.json.
+#
+# The check and the model listing are one ACP session (`buzz-acp models`): it
+# answers -32000 "Authentication required" when signed out and lists the
+# models and thinking levels this sign-in offers, calling no model. Each
+# listed id is <model>-<level> (gemini-4-neon-xhigh), and agy takes that id to
+# set both (session/set_model), so an agent's model and effort go to buzz-acp
+# as one BUZZ_ACP_MODEL. A key (GEMINI_API_KEY) works only with modelProvider
+# "gemini" in the home's settings.json; agy lists models for any key without
+# checking it, so a key is checked with Google's own model list.
+
+AGY = {"login": ["acp", "--login", "--disable-telemetry"], "service": "Google",
+       # The sign-in file in the home ({"token": {access_token, refresh_token, ...},
+       # "auth_method", "id_token_email"}, as 1.5.18 writes it), and the state that
+       # goes with it (which ACP auth method it is, onboarding done).
+       "cred": ("antigravity-cli", "antigravity-oauth-token"),
+       "with_cred": (("antigravity-cli", "cache", "acp-auth-state.json"), ("antigravity-cli", "cache", "onboarding.json")),
+       "env": {"AGY_CLI_FORCE_FILE_TOKEN_STORAGE": "1"},
+       "settings": ("antigravity-cli", "settings.json"),
+       "key_settings": {"modelProvider": "gemini"}}
+AGY_URL_RE = re.compile(r"https://accounts\.google\.com/o/oauth2/[^\s\"'<>]+")
+AGY_WINDOW = 1_048_576  # what agy 1.5.18 reports (usage_update size) for the Gemini models
+
+
+def agy_cli():
+    return shutil.which("agy", path=agent_path())
+
+
+def agy_home(base=None, key=False):
+    """A private Antigravity folder (its --gemini-dir): homes/antigravity, or
+    homes/antigravity-key whose settings.json says the key pays. Settings agy
+    wrote there are kept; written only when that changes it."""
+    home = private_dir(base or HOMES / "antigravity")
+    private_dir(home.parent)
+    if key:
+        path = home.joinpath(*AGY["settings"])
+        old = read_json(path, {})
+        new = {**(old if isinstance(old, dict) else {}), **AGY["key_settings"]}
+        if new != old: private_dir(path.parent); write_private(path, json.dumps(new, indent=2) + "\n")
+    return home
+
+
+def agy_args(home):
+    """buzz-acp's agent arguments for agy on this folder (comma-separated)."""
+    if "," in str(home): fail(f"Antigravity cannot run in a folder whose path has a comma: {home}")
+    return f"{HARNESS['antigravity'][1]},--gemini-dir,{home}"
+
+
+def agy_env(home):
+    env = base_env()
+    env.update(AGY["env"])
+    env["BROWSER"] = "/usr/bin/true"  # never try to open one
+    return env
+
+
+def agy_cred_path(home=None):
+    return (home or HOMES / "antigravity").joinpath(*AGY["cred"])
+
+
+def agy_token(home=None):
+    """The sign-in file as a dict when it holds a refresh token, else None. A
+    file agy is rewriting (not JSON for an instant) is read again."""
+    path = agy_cred_path(home)
+    for _ in range(3):
+        if not path.exists(): return None
+        data = read_json(path)
+        if isinstance(data, dict): break
+        time.sleep(0.05)
+    else:
+        return None
+    token = data.get("token")
+    return data if isinstance(token, dict) and isinstance(token.get("refresh_token"), str) and token["refresh_token"] else None
+
+
+def agy_cred():
+    """The stored subscription sign-in's fingerprint: its refresh token's (a
+    refresh keeps it), never the token itself. None when there is none."""
+    data = agy_token()
+    return token_hash("refresh:" + data["token"]["refresh_token"]) if data else None
+
+
+def agy_listing(slot):
+    """One ACP session on this slot (`buzz-acp models`): (True, rows) with the
+    models and thinking levels it offers, (False, None) when agy says the
+    sign-in is missing or refused, (None, None) when it cannot tell."""
+    agy = agy_cli()
+    if not agy or not (BIN / "buzz-acp").exists(): return None, None
+    env = slot_env(slot)
+    if slot.endswith("-key"):
+        key = stored_key("antigravity")
+        if not key: return False, None
+        env.update(KEYS["antigravity"]["env"](key, None))
+    try:
+        done = subprocess.run([str(BIN / "buzz-acp"), "models", "--json", "--agent-command", "agy", f"--agent-args={agy_args(slot_home(slot))}"],
+                              cwd=private_dir(RUN / "check"), env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+    except (subprocess.TimeoutExpired, OSError):
+        return None, None
+    try: listing = json.loads(done.stdout)
+    except ValueError: listing = None
+    if not isinstance(listing, dict):
+        said = f"{done.stdout}\n{done.stderr}"
+        if re.search(r"Authentication required|-32000|not (signed|logged) in|unauthenticated|invalid_grant", said, re.I): return False, None
+        return None, None
+    rows = agy_models(listing)
+    return (True, rows) if rows else (None, None)
+
+
+def agy_models(listing):
+    """[{id, label, efforts}] from agy's ACP listing: the model option's
+    values in its order, labelled as agy names them, each with the thinking
+    levels that its <model>-<level> ids offer."""
+    stable = listing.get("stable") if isinstance(listing.get("stable"), dict) else {}
+    options = []
+    for option in stable.get("configOptions") or []:
+        if isinstance(option, dict) and option.get("category") == "model":
+            options = [o for o in option.get("options") or [] if isinstance(o, dict) and isinstance(o.get("value"), str)]
+    unstable = listing.get("unstable") if isinstance(listing.get("unstable"), dict) else {}
+    ids = [m.get("modelId") for m in unstable.get("availableModels") or [] if isinstance(m, dict) and isinstance(m.get("modelId"), str)]
+    rows = []
+    for o in options:
+        model = o["value"]
+        if not MODEL_ID.match(model): continue
+        levels = [i[len(model) + 1:] for i in ids if i.startswith(model + "-")]
+        rows.append({"id": model, "label": str(o.get("name") or model), "efforts": effort_sorted(l for l in levels if l in EFFORT_ORDER)})
+    return rows
+
+
+def run_agy_check(slot):
+    ok, _ = agy_listing(slot)
+    return ok, None
+
+
+def list_agy_models(slot):
+    ok, rows = agy_listing(slot)
+    return rows if ok else None
+
+
+def save_agy_account(account):
+    private_dir(SECRETS)
+    write_private(SECRETS / "antigravity.json", json.dumps({"account": account, "savedAt": int(time.time())}))
+
+
+def forget_agy():
+    agy_cred_path().unlink(missing_ok=True)
+    for parts in AGY["with_cred"]: (HOMES / "antigravity").joinpath(*parts).unlink(missing_ok=True)
+    (SECRETS / "antigravity.json").unlink(missing_ok=True)
+    for name in ("antigravity-check.json", "antigravity-models.json"):
+        (CRED_RUN / name).unlink(missing_ok=True)
+
+
 # ---------------------------------------------------------------- API keys
 # An API key is pasted into Buzz (login.start with pays "key" gives the link to
 # the page that makes one; login.finish takes the key). It is checked with one
@@ -789,6 +963,13 @@ KEYS = {
              # Qwen Code's --auth-type openai reads these (and the model as OPENAI_MODEL).
              "env": lambda key, base: {"OPENAI_API_KEY": key, "OPENAI_BASE_URL": base},
              "chat": lambda i: i.lower().startswith("qwen") and not NOT_CHAT.search(i)},
+    "antigravity": {"service": "Google AI Studio", "keyUrl": "https://aistudio.google.com/apikey",
+                    "bases": (("api", "https://generativelanguage.googleapis.com/v1beta"),),
+                    "headers": lambda key: {"x-goog-api-key": key},
+                    # Google answers 400 API_KEY_INVALID to a bad key, not 401.
+                    "rejected": lambda status, body: status in (401, 403) or (status == 400 and re.search(r"API_KEY_INVALID|api key not valid", json.dumps(body or ""), re.I) is not None),
+                    # agy reads GEMINI_API_KEY only with modelProvider "gemini" in its settings (agy_home).
+                    "env": lambda key, base: {"GEMINI_API_KEY": key}},
 }
 KEY_RE = re.compile(r"^[\x21-\x7e]{16,512}$")  # printable ASCII, no spaces: it goes in a header and the environment
 
@@ -842,8 +1023,9 @@ DEFERRED_MCP_NOTE = {
 # applies after its current turn, and that job schedules live in Platform
 # Control. The files: Claude Code's CLAUDE.md in CLAUDE_CONFIG_DIR, Codex's
 # AGENTS.md in CODEX_HOME, grok's AGENTS.md in GROK_HOME ("global rules"),
-# Qwen Code's QWEN.md in QWEN_HOME (with its note on deferred tools first).
-NOTE_FILE = {"claude": "CLAUDE.md", "codex": "AGENTS.md", "grok": "AGENTS.md", "qwen": "QWEN.md"}
+# Qwen Code's QWEN.md in QWEN_HOME (with its note on deferred tools first),
+# Antigravity's GEMINI.md in its --gemini-dir (its ~/.gemini/GEMINI.md).
+NOTE_FILE = {"claude": "CLAUDE.md", "codex": "AGENTS.md", "grok": "AGENTS.md", "qwen": "QWEN.md", "antigravity": "GEMINI.md"}
 
 
 def agentctl_command():
@@ -937,7 +1119,9 @@ def slot_home(slot):
     homes hold only that note and the state Claude Code keeps (CLAUDE_CONFIG_DIR)."""
     harness = harness_of(slot)
     if harness == "qwen": return qwen_home(HOMES / slot)
-    if harness in DEVICE:
+    if harness == "antigravity":
+        home = agy_home(HOMES / slot, key=slot.endswith("-key"))
+    elif harness in DEVICE:
         home = cli_home(harness, HOMES / slot, KEYS.get(harness, {}).get("settings", ()) if slot.endswith("-key") else ())
     elif harness == "claude":
         home = private_dir(private_dir(HOMES) / slot)
@@ -951,6 +1135,7 @@ def slot_env(slot):
     """The environment a slot's own programs run in (its home when it has one)."""
     harness = harness_of(slot)
     if harness == "qwen": return qwen_env(slot_home(slot))
+    if harness == "antigravity": return agy_env(slot_home(slot))
     if harness in DEVICE: return device_env(harness, slot_home(slot))
     env = base_env()
     if harness == "claude": env[KEYS["claude"]["home_env"]] = str(slot_home(slot))
@@ -1071,6 +1256,7 @@ def credential(slot):
         return token_hash(token) if token else None
     if harness in MEMBER: return member_cred(harness)
     if harness in DEVICE: return device_cred(harness)
+    if harness == "antigravity": return agy_cred()
     return None
 
 
@@ -1087,6 +1273,7 @@ def check_slot(slot):
     if slot.endswith("-key"): return run_key_check(harness)
     if harness == "claude": return run_claude_check(claude_token()), None
     if harness in MEMBER: return run_member_check(harness)
+    if harness == "antigravity": return run_agy_check(slot)
     return DEVICE_CHECK[harness]()
 
 
@@ -1135,7 +1322,8 @@ def signed_in(slot, wait=None):
                 cache = new
                 break
             time.sleep(0.2)
-    account = (read_json(SECRETS / "claude.json", {}) or {}).get("account") if slot == "claude" else cache.get("account")
+    # Claude Code and Antigravity print the account only when signing in.
+    account = (read_json(SECRETS / f"{slot}.json", {}) or {}).get("account") if slot in ("claude", "antigravity") else cache.get("account")
     return cache.get("ok"), account
 
 
@@ -1257,6 +1445,8 @@ def version_problems(harness):
         if adapter.exists() and f'"{FULL_ACCESS["codex"]["INITIAL_AGENT_MODE"]}"' not in adapter.read_text(errors="replace"):
             out.append(f"{ADAPTER_PACKAGE['codex']} has no {FULL_ACCESS['codex']['INITIAL_AGENT_MODE']} mode")
     if harness == "grok": want("grok", vendored_version(BIN / "grok", "grok"), pins["clis"]["grok"]["version"])
+    if harness == "antigravity":
+        want("antigravity", vendored_version(BIN / "agy", "antigravity"), pins["clis"]["antigravity"]["version"])
     if harness == "qwen":
         want("@qwen-code/qwen-code", npm_version("@qwen-code", "qwen-code", folder="qwen-code"), pins["clis"]["@qwen-code/qwen-code"]["version"])
         if not account_script().exists(): out.append(f"bin/{ACCOUNT_SCRIPT} is missing")
@@ -1291,6 +1481,7 @@ def handshake(harness):
     else one line why. A success is remembered until buzz-acp or the adapter
     changes; a failure is checked again next time."""
     command, args = HARNESS[harness]
+    if harness == "antigravity": args = agy_args(slot_home("antigravity"))
     found = shutil.which(command, path=agent_path())
     if not (BIN / "buzz-acp").exists(): return "buzz-acp is not installed"
     if not found: return f"{command} is not installed"
@@ -1987,6 +2178,7 @@ COMPACT = {
     "codex": {},
     "grok": {},
     "qwen": {},
+    "antigravity": {"max": 1_000_000},
 }
 QWEN_WINDOW = 1_000_000  # every model Qwen Code 0.27.4 lists for QwenCloud and the membership
 
@@ -2003,6 +2195,7 @@ def context_window(harness, model):
             cache = read_json(HOMES / slot / "models_cache.json")
             info = ((cache or {}).get("models") or {}).get(model, {}).get("info") if isinstance(cache, dict) else None
             if isinstance(info, dict) and isinstance(info.get("context_window"), int): return info["context_window"]
+    if harness == "antigravity": return AGY_WINDOW
     return None
 
 
@@ -2058,6 +2251,7 @@ def compact_levers(harness, model, compact_at, work):
     elif harness == "grok":
         window = context_window("grok", model)
         if window: env["GROK_AUTO_COMPACT_THRESHOLD_PERCENT"] = str(min(100, max(1, round(100 * compact_at / window))))
+    elif harness == "antigravity": env["AGY_CLI_AUTO_COMPACT_OVERRIDE"] = str(compact_at)  # tokens, up to the window
     return env
 
 
@@ -2075,6 +2269,8 @@ def compact_levers(harness, model, compact_at, work):
 #   Codex        CODEX_CONFIG (codex-acp's JSON config for every thread it
 #                starts): model and model_reasoning_effort.
 #   Grok Build   `grok agent --model M --reasoning-effort E ... stdio`.
+#   Antigravity  BUZZ_ACP_MODEL as <model>-<effort> (gemini-4-neon-xhigh), an
+#                id agy lists itself and sets both from (session/set_model).
 #   Qwen Code    `-m M` on the membership; OPENAI_MODEL on a key. No effort:
 #                Qwen Code 0.27.4 sends no reasoning_effort for a model it is
 #                given this way, whatever its settings say, so the service's
@@ -2097,6 +2293,9 @@ DEFAULTS = {  # harness -> (models to try, most capable first; effort, None for 
     "grok": (("grok-4.7", "grok-4.6"), "high"),
     # Never qwen4-max-preview: it retires on 2026-11-25.
     "qwen": (("qwen4-max", "qwen3.8-max", "qwen3.8-flash"), None),
+    # Carbon is what Gemini offers for "Code & complex work"; Neon and
+    # Hydrogen stand in on a plan without it.
+    "antigravity": (("gemini-4-carbon", "gemini-4-neon", "gemini-4-hydrogen"), "high"),
 }
 EFFORT_ORDER = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\[\]/-]{0,79}$")
@@ -2244,6 +2443,8 @@ def model_source(slot):
     machine makes itself (Codex and Grok cache their own), else None. Each
     listing lives in run/<slot>-models.json, per sign-in."""
     harness = harness_of(slot)
+    if harness == "antigravity":  # agy's own listing, on either way of paying
+        return (lambda: stored_key(harness)) if slot.endswith("-key") else agy_cred, lambda: list_agy_models(slot)
     if slot.endswith("-key"):
         return (lambda: stored_key(harness), lambda: list_key_models(harness)) if harness in KEYS else None
     if harness == "claude": return claude_token, list_claude_models
@@ -2403,6 +2604,9 @@ def launch(harness, picked, pays="subscription", compact_at=None):
         extra = (["--model", model] if model else []) + (["--reasoning-effort", effort] if effort else [])
         parts = args.split(",")
         args = ",".join(parts[:1] + extra + parts[1:])  # grok agent <options> stdio
+    elif harness == "antigravity":
+        args = agy_args(slot_home(slot_of(harness, pays)))
+        if model: env["BUZZ_ACP_MODEL"] = f"{model}-{effort}" if effort else model
     elif harness == "qwen":
         # Always named: with either auth type Qwen Code has no model of its own.
         model = model or DEFAULTS["qwen"][0][0]
@@ -2504,7 +2708,7 @@ def _start(d):
             fail(f"Claude Code is not signed in for {ACCOUNT} on this machine. {ACCOUNT} signs in to Claude from Buzz first.")
         env = slot_env("claude")
         env["CLAUDE_CODE_OAUTH_TOKEN"] = token
-    elif harness in DEVICE or harness in MEMBER:
+    elif harness in DEVICE or harness in MEMBER or harness == "antigravity":
         if known_bad(harness):
             fail(f"{label} is not signed in for {ACCOUNT} on this machine. {ACCOUNT} signs in to {label} from Buzz first.")
         env = slot_env(harness)
@@ -2580,7 +2784,7 @@ def _start(d):
     if (s.get("instructions") or "").strip():
         (d / "instructions.md").write_text(s["instructions"])
         env["BUZZ_ACP_SYSTEM_PROMPT_FILE"] = str(d / "instructions.md")
-    # Never BUZZ_ACP_MODEL: see "model and effort" above.
+    # BUZZ_ACP_MODEL only for Antigravity: see "model and effort" above.
     env.update(model_env)
     write_private(d / "launch.json", json.dumps({**{k: picked.get(k) for k in ("model", "effort", "note", "checked")}, "compactAt": compact_at,
                                                  "audience": gate["fingerprint"], "gate": {"respondTo": gate["respondTo"], "keys": len(gate["keys"])}}))
@@ -3123,6 +3327,7 @@ def login_start(harness, flows=None, pays="subscription"):
             fail("Buzz cannot sign in that harness on this machine.")
         if harness == "claude" and not claude_cli():
             fail("Claude Code is not installed on this machine.")
+        if harness == "antigravity" and not agy_cli(): fail(f"{label} is not installed on this machine.")
         if harness in DEVICE and not device_cli(harness): fail(f"{label} is not installed on this machine.")
         if harness in MEMBER and not (installed(harness) and node_cli() and account_script().exists()):
             fail(f"{label} is not installed on this machine.")
@@ -3150,7 +3355,7 @@ def login_start(harness, flows=None, pays="subscription"):
     while time.time() < deadline:
         state = read_json(d / "state.json")
         if state and state.get("url"):
-            if harness == "claude":
+            if SIGN_IN.get(harness) == "code":
                 return {"ok": True, "loginId": login_id, "url": state["url"], "needsCode": True}
             return {"ok": True, "loginId": login_id, "url": state["url"], "needsCode": False,
                     "userCode": state.get("userCode"), "expiresAt": int(state.get("expiresAt") or 0) or None}
@@ -3170,8 +3375,9 @@ def login_finish(login_id, code):
     if info.get("kind") == "key": return key_finish(d, harness, code)
     if harness in DEVICE or harness in MEMBER: return device_finish(d, harness)
     code = (code or "").strip() if isinstance(code, str) else ""
+    page = "antigravity.google" if harness == "antigravity" else "the Anthropic page"
     if not CODE_RE.match(code):
-        fail("That does not look like a sign-in code. Copy the whole code from the Anthropic page and paste it again.")
+        fail(f"That does not look like a sign-in code. Copy the whole code from {page} and paste it again.")
     if (d / "result.json").exists() or (d / "code").exists():
         fail("This sign-in is already finishing.")
     write_private(d / "code", code)
@@ -3184,7 +3390,7 @@ def login_finish(login_id, code):
             fail("This sign-in has expired or was cancelled. Start the sign-in again.")
         time.sleep(0.2)
     kill_login(d)
-    fail("Claude Code did not answer after the code was entered. Start the sign-in again.")
+    fail(f"{LABEL.get(harness, 'Claude Code')} did not answer after the code was entered. Start the sign-in again.")
 
 
 def finished(d, result):
@@ -3452,6 +3658,7 @@ def login_helper(login_id):
     try:
         if info.get("harness") in DEVICE: return device_helper(login_id, d, info)
         if info.get("harness") in MEMBER: return member_helper(login_id, d, info)
+        if info.get("harness") == "antigravity": return agy_helper(login_id, d, info)
         return claude_helper(login_id, d, info)
     except Exception as e:
         log_line("login", f"sign-in helper failed: {type(e).__name__}")
@@ -3550,6 +3757,115 @@ def claude_helper(login_id, d, info):
         except OSError: pass
 
 
+def agy_helper(login_id, d, info):
+    """Runs detached. Drives `agy acp --login` in a pty, in a fresh folder
+    inside the login folder, so a sign-in that is abandoned or refused never
+    touches the one agents use: it prints a Google link, then takes the code
+    antigravity.google shows. Once agy exits signed in, its sign-in file moves
+    into homes/antigravity and is checked for real."""
+    import select
+    label = LABEL["antigravity"]
+    started = info.get("startedAt") or time.time()
+    ttl = info.get("ttl") or LOGIN_TTL
+    home = agy_home(d / "home")
+    env = agy_env(home)
+    env.update({"TERM": "xterm-256color", "COLUMNS": "4000", "LINES": "50"})
+    pid, fd = run_in_pty([agy_cli(), *AGY["login"], "--gemini-dir", str(home)], env, d)
+    info.update({"pid": os.getpid(), "child": pid})
+    write_private(d / "helper.json", json.dumps(info))
+    raw = b""  # held in memory only: it echoes the code
+    code = None
+
+    def pump(seconds):
+        nonlocal raw
+        end = time.time() + seconds
+        while time.time() < end:
+            r, _, _ = select.select([fd], [], [], 0.2)
+            if r:
+                try: chunk = os.read(fd, 65536)
+                except OSError: return False
+                if not chunk: return False
+                raw += chunk
+        return True
+
+    def exit_code():
+        try:
+            done, status = os.waitpid(pid, os.WNOHANG)
+            return os.waitstatus_to_exitcode(status) if done else None
+        except ChildProcessError:
+            return -1
+
+    def finish(result):
+        if d.exists(): write_private(d / "result.json", json.dumps(result))
+        try: os.kill(pid, signal.SIGKILL)
+        except OSError: pass
+
+    try:
+        url = None
+        while url is None:
+            alive = pump(0.5)
+            m = AGY_URL_RE.search(screen_text(raw).replace("\n", " "))
+            if m: url = m.group(0); break
+            if not alive or exit_code() is not None or time.time() - started > 45:
+                write_private(d / "state.json", json.dumps({"error": f"{label} did not give a sign-in link. Try again."}))
+                return finish({"ok": False, "error": "no link"})
+        write_private(d / "state.json", json.dumps({"url": url}))
+        while not (d / "code").exists():
+            if not d.exists() or time.time() - started > ttl:
+                return finish({"ok": False, "error": "This sign-in expired. Start the sign-in again."})
+            if not pump(0.5) or exit_code() is not None:
+                return finish({"ok": False, "error": f"{label} stopped waiting for the code. Start the sign-in again."})
+        code = (d / "code").read_text().strip()
+        (d / "code").unlink(missing_ok=True)
+        raw = b""
+        os.write(fd, code.encode())
+        time.sleep(0.3)
+        os.write(fd, b"\r")
+        deadline = time.time() + 75
+        status = None
+        while time.time() < deadline:
+            alive = pump(0.5)
+            status = exit_code()
+            if status is not None or not alive: break
+        if status is None:
+            for _ in range(20):
+                status = exit_code()
+                if status is not None: break
+                time.sleep(0.25)
+        text = screen_text(raw).replace(code, "")
+        signed = agy_token(home)
+        if status == 0 and signed:
+            account = signed.get("id_token_email") if isinstance(signed.get("id_token_email"), str) else None
+            if not account:
+                emails = EMAIL_RE.findall(text)
+                account = emails[-1].rstrip(".") if emails else None
+            agents = agy_home()
+            for parts in AGY["with_cred"] + (AGY["cred"],):  # the sign-in file last
+                source = home.joinpath(*parts)
+                if not source.exists(): continue
+                target = agents.joinpath(*parts)
+                private_dir(target.parent)
+                write_private(target, source.read_text())
+                source.unlink(missing_ok=True)
+            save_agy_account(account)
+            run_check("antigravity", wait=True)
+            _, check = last_check("antigravity")
+            if check.get("ok") is False:
+                return finish({"ok": False, "error": f"{label} signed in, but Google refused the sign-in. Check the account and start the sign-in again."})
+            finish({"ok": True, "account": account})
+            refresh_models("antigravity", wait=True)  # what this account offers, before its agents start
+            return restart_harness_agents("antigravity", "subscription")  # after the reply is free to go
+        if re.search(r"invalid_grant|invalid.{0,20}code|malformed|bad request", text, re.I):
+            return finish({"ok": False, "error": "That code was not accepted. Start the sign-in again to get a new link."})
+        return finish({"ok": False, "error": f"{label} did not finish the sign-in. Start the sign-in again."})
+    finally:
+        raw = b""
+        code = None
+        try: os.close(fd)
+        except OSError: pass
+        shutil.rmtree(d / "home", ignore_errors=True)
+
+
 def logout(harness, pays="subscription"):
     """Forgets one sign-in of a harness and stops the agents paying with it."""
     if pays not in PAYS: fail('pays is "subscription" or "key"')
@@ -3561,6 +3877,7 @@ def logout(harness, pays="subscription"):
         sync_platform_signin()  # this person's agents there stop too
     elif harness in DEVICE: forget_device(harness)
     elif harness in MEMBER: forget_member(harness)
+    elif harness == "antigravity": forget_agy()
     else: fail("Buzz cannot sign that harness out on this machine.")
     stop_harness_agents(harness, pays)
     return {"ok": True}

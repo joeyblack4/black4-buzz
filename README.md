@@ -172,7 +172,17 @@ lists for that sign-in, each with its own thinking levels (Gemini 4 Neon and
 Hydrogen go to XHigh, Carbon to High), and the plan decides which: the
 Claude and GPT-OSS models Antigravity carries show up too when the account
 has them. New agents run Gemini 4 Carbon at high thinking, or Neon, then
-Hydrogen, when the plan lacks it.
+Hydrogen, when the plan lacks it. On a key, only the models Google's own
+model list has for that key are offered.
+
+**Whose sign-ins agents can read.** Every agent on a machine runs as that
+machine's one macOS user, with full access. Each person's sign-ins sit in
+their own folders, and an agent is started with only its creator's, but a
+private file does not stop another agent on the same machine from reading it
+if it goes looking: the machine is shared trust among Black 4 staff, for every
+harness's sign-ins (Claude tokens, ChatGPT, Grok, Qwen and Google sign-ins,
+API keys). Keeping people's sign-ins apart from each other's agents would take
+an OS user per person; that is not built.
 
 A harness that the machine has installed but Buzz can't sign in (Goose) is
 listed as unavailable, with the reason.

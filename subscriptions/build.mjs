@@ -1,4 +1,4 @@
-// Builds the two subscription plugins Buzz installs. Each is one
+// Builds the subscription plugins Buzz installs. Each is one
 // self-contained plugin.js (the shared runtime plus its provider) and a
 // manifest.json. Buzz never runs a build, so the output is committed;
 // `--check` refuses a committed copy that no longer matches its source.
@@ -9,11 +9,16 @@ const read = (path) => readFileSync(new URL(path, here), "utf8");
 const PROVIDERS = [
   { provider: "claude", title: "Claude Sub Plugin", defaultModel: "opus", cli: "@anthropic-ai/claude-code" },
   { provider: "grok", title: "Grok Sub Plugin", defaultModel: "grok-4.6", cli: "@xai-official/grok" },
+  // Google's Antigravity CLI is not on npm: Google's own installer fetches it
+  // and checks its SHA-512 (into ~/.local/bin/agy, on Buzz's PATH).
+  { provider: "gemini", title: "Gemini Sub Plugin", defaultModel: "gemini-4-neon", program: "agy",
+    install: { program: "/bin/sh", args: ["-c", "/usr/bin/curl -fsSL https://antigravity.google/cli/install.sh | /bin/bash"] },
+    description: "Gemini subscription agents on Google's Antigravity, with personal sign-in, models, thinking, coding and Buzz tools. Runs on your computer." },
 ];
 const check = process.argv.includes("--check");
 const common = read("src/common.js");
 let stale = false;
-for (const { provider, title, defaultModel, cli } of PROVIDERS) {
+for (const { provider, title, defaultModel, cli, program = provider, install, description } of PROVIDERS) {
   const name = provider[0].toUpperCase() + provider.slice(1);
   const spec = JSON.stringify({ provider, title, defaultModel }).replace(/":/g, '": ').replace(/,"/g, ', "');
   const plugin = `export const inject = ["agents", "host", "react"];\nexport function apply(ctx) {\nconst spec = ${spec};\n${common}\n${read(`src/${provider}.js`)}\n}\n`;
@@ -21,12 +26,12 @@ for (const { provider, title, defaultModel, cli } of PROVIDERS) {
     id: `black4.${provider}-subscription`,
     name: title,
     apiVersion: 1,
-    description: `${name} subscription agents with personal sign-in, models, reasoning effort, coding and Buzz tools. Runs on your computer.`,
+    description: description ?? `${name} subscription agents with personal sign-in, models, reasoning effort, coding and Buzz tools. Runs on your computer.`,
     updates: { defaultEnabled: true },
     host: {
       processes: [
-        { id: provider, program: provider },
-        { id: "install", program: "npm", args: ["install", "-g", cli] },
+        { id: provider, program },
+        { id: "install", ...(install ?? { program: "npm", args: ["install", "-g", cli] }) },
       ],
       mcp: true,
       files: true,

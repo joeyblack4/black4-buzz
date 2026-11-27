@@ -311,6 +311,24 @@
         "agents.register(0).tabs[].role": "settings"
       }
     },
+    "black4.gemini-subscription": {
+      "title": "Gemini Sub Plugin",
+      "dir": "plugins/gemini-subscription",
+      "sameAs": "black4.claude-subscription",
+      "$comment": "Built from the same subscriptions/src/common.js as the Claude plugin; only the provider file differs, and that file uses no further Buzz API.",
+      "manifest": [
+        "id",
+        "name",
+        "apiVersion",
+        "description",
+        "updates.defaultEnabled",
+        "host.processes[].id",
+        "host.processes[].program",
+        "host.processes[].args",
+        "host.mcp",
+        "host.files"
+      ]
+    },
     "black4.grok-subscription": {
       "title": "Grok Sub Plugin",
       "dir": "plugins/grok-subscription",

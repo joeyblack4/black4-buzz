@@ -4,10 +4,17 @@ const spec = {"provider": "grok", "title": "Grok Sub Plugin", "defaultModel": "g
 const {agents, host, react: R} = ctx, h = R.createElement, kit = agents.harness;
 if (!kit || !host.spawn || !host.serveMcp) throw new Error('Update Buzz desktop to use subscription agents.');
 const processes = new Set(), sessions = new Map(), queues = new Map(), listeners = new Set();
-let disposed = false, checking = null, loginProcess = null;
+let disposed = false, checking = null, loginProcess = null, loginOutput = '';
+const providerName={claude:'Claude',grok:'Grok',gemini:'Gemini'}[spec.provider];
 let account = {state:'unchecked', message:'Check your subscription account on this computer.'};
 let choices = spec.provider === 'claude' ? ['opus','sonnet','fable'].map(id=>({id,label:id,efforts:['low','medium','high','xhigh','max']})) : [];
-const env = spec.provider === 'claude' ? {ANTHROPIC_API_KEY:null,ANTHROPIC_AUTH_TOKEN:null,ANTHROPIC_BASE_URL:null,CLAUDE_CODE_OAUTH_TOKEN:null,CLAUDE_CODE_USE_BEDROCK:null,CLAUDE_CODE_USE_VERTEX:null,CLAUDE_CODE_USE_FOUNDRY:null} : {XAI_API_KEY:null,GROK_API_KEY:null};
+// The subscription pays, never a key or a cloud project that happens to be in the environment.
+const env = {claude:{ANTHROPIC_API_KEY:null,ANTHROPIC_AUTH_TOKEN:null,ANTHROPIC_BASE_URL:null,CLAUDE_CODE_OAUTH_TOKEN:null,CLAUDE_CODE_USE_BEDROCK:null,CLAUDE_CODE_USE_VERTEX:null,CLAUDE_CODE_USE_FOUNDRY:null},
+ grok:{XAI_API_KEY:null,GROK_API_KEY:null},
+ gemini:{GEMINI_API_KEY:null,GOOGLE_API_KEY:null,AGY_ADC_AUTH:null,GOOGLE_GEMINI_BASE_URL:null,AGY_LLM_GATEWAY_URL:null}}[spec.provider];
+// How each ACP CLI is started as an agent: Grok's `agent stdio`, Antigravity's
+// own ACP server (every tool allowed: the agent works on this computer for its owner).
+const acpArgs = args => spec.provider==='gemini' ? ['acp','--dangerously-skip-permissions','--disable-telemetry',...args] : [...args,'agent','stdio'];
 function publish(next) { if(disposed) return; account=next; for(const f of listeners) f(account); }
 ctx.effect(()=>()=>{disposed=true; for(const p of processes) void p.kill(); listeners.clear();sessions.clear();});
 async function spawn(args, options={}) {
@@ -32,15 +39,25 @@ async function rpc(args=[], options={}) {
   }else if(m.method==='session/update'){options.onUpdate?.(m.params?.update);}
   else if(pending.has(m.id)){const p=pending.get(m.id);pending.delete(m.id);clearTimeout(p.timer);m.error?p.reject(new Error(m.error.message)):p.resolve(m.result);}
  }
- proc=await spawn([...args,'agent','stdio'],{cwd:options.cwd,onStdout:s=>{
-  buffer+=s; if(buffer.length>8000000){fail(new Error('Grok output exceeded limit'));void proc?.kill();return;}
-  let i;while((i=buffer.indexOf('\n'))>=0){const line=buffer.slice(0,i);buffer=buffer.slice(i+1);if(line.trim())try{void message(JSON.parse(line)).catch(fail);}catch{fail(new Error('Invalid Grok protocol response'));}}
+ proc=await spawn(acpArgs(args),{cwd:options.cwd,onStdout:s=>{
+  buffer+=s; if(buffer.length>8000000){fail(new Error(providerName+' output exceeded limit'));void proc?.kill();return;}
+  let i;while((i=buffer.indexOf('\n'))>=0){const line=buffer.slice(0,i);buffer=buffer.slice(i+1);if(line.trim())try{void message(JSON.parse(line)).catch(fail);}catch{fail(new Error('Invalid '+providerName+' protocol response'));}}
  }});
- proc.exited.then(()=>{closed=true;fail(new Error('Grok process ended'));},fail);
+ proc.exited.then(()=>{closed=true;fail(new Error(providerName+' process ended'));},fail);
  return {process:proc, async request(method,params,timeout=30000){
-  if(closed)throw new Error('Grok process ended');const id=++sequence;
+  if(closed)throw new Error(providerName+' process ended');const id=++sequence;
   return new Promise((resolve,reject)=>{const timer=setTimeout(()=>{pending.delete(id);reject(new Error(method+' timed out'));},timeout);pending.set(id,{resolve,reject,timer});proc.write(JSON.stringify({jsonrpc:'2.0',id,method,params})+'\n').catch(error=>{clearTimeout(timer);pending.delete(id);reject(error);});});
- },async close(){closed=true;fail(new Error('Grok connection closed'));await proc.kill();}};
+ },async close(){closed=true;fail(new Error(providerName+' connection closed'));await proc.kill();}};
+}
+/** The models Antigravity offers this account, from a session it opened:
+ * its Model options in its order, each with the Thinking levels that its
+ * <model>-<level> ids list. */
+function geminiChoices(session){
+ const option=(session?.configOptions||[]).find(o=>o?.category==='model'||o?.id==='model');
+ const ids=(session?.models?.availableModels||[]).map(m=>m?.modelId).filter(i=>typeof i==='string');
+ const order=['minimal','low','medium','high','xhigh','max'];
+ return (option?.options||[]).filter(o=>typeof o?.value==='string').map(o=>({id:o.value,label:o.name||o.value,
+  efforts:ids.filter(i=>i.startsWith(o.value+'-')).map(i=>i.slice(o.value.length+1)).filter(e=>order.includes(e)).sort((a,b)=>order.indexOf(a)-order.indexOf(b))}));
 }
 async function checkAccount(){
  if(checking)return checking;
@@ -50,6 +67,18 @@ async function checkAccount(){
    const result=JSON.parse(await command(['auth','status','--json']));
    if(!result.loggedIn || result.authMethod!=='claude.ai')throw new Error('Sign in with your Claude subscription.');
    publish({state:'ready',message:'Connected to your Claude subscription'+(result.email?' · '+result.email:'')});
+  }else if(spec.provider==='gemini'){
+   const client=await rpc();try{
+    await client.request('initialize',{protocolVersion:1,clientCapabilities:{}});
+    let probe;
+    try{probe=await client.request('session/new',{cwd:await host.resolveDirectory('~/.buzz/SUB_AGENTS/gemini/setup'),mcpServers:[]});}
+    catch(error){if(/authentication required|not logged in/i.test(String(error.message||error)))throw new Error('Sign in with your Google account.');throw error;}
+    choices=geminiChoices(probe);
+    if(!choices.length)throw new Error('Antigravity listed no models for this account.');
+    if(probe.sessionId)await client.request('session/close',{sessionId:probe.sessionId}).catch(()=>{});
+    const tier=probe._meta?.antigravity?.tier?.name;
+    publish({state:'ready',message:'Connected to Antigravity'+(tier?' · '+tier:'')});
+   }finally{await client.close();}
   }else{
    const client=await rpc();try{
     const init=await client.request('initialize',{protocolVersion:1,clientCapabilities:{}});
@@ -64,17 +93,33 @@ async function checkAccount(){
   }
  }catch(error){publish({state:'required',message:String(error.message||error)});}finally{checking=null;}})();return checking;
 }
+/** Antigravity signs in with a Google link whose page shows a code to paste
+ * back (`agy acp --login`), the way it signs in over SSH. The link is shown
+ * here; the code goes to the CLI's input once and is not kept. */
+function geminiLogin(output){
+ loginOutput+=output;if(loginOutput.length>100000)loginOutput=loginOutput.slice(-100000);
+ const url=(loginOutput.match(/https:\/\/accounts\.google\.com\/o\/oauth2\/[^\s"'<>]+/)||[])[0];
+ if(url&&account.state==='signing-in'&&!account.url)publish({state:'signing-in',url,message:'Sign in with Google on the page that opens, then paste the code it shows.'});
+}
+async function submitCode(code){
+ code=String(code||'').trim();
+ if(!loginProcess||!account.url||!code)return;
+ publish({state:'signing-in',url:account.url,submitted:true,message:'Signing in…'});
+ await loginProcess.write(code+'\n').catch(()=>{});
+}
 async function login(){
  if(loginProcess||account.state==='signing-in')return;
- publish({state:'signing-in',message:'Finish signing in in your browser, then return here.'});
- let timer;
+ publish({state:'signing-in',message:spec.provider==='gemini'?'Getting a Google sign-in link…':'Finish signing in in your browser, then return here.'});
+ let timer;loginOutput='';
  try{
-  loginProcess=await spawn(spec.provider==='claude'?['auth','login','--claudeai']:['login','--oauth']);
+  loginProcess=spec.provider==='gemini'
+   ? await spawn(['acp','--login','--disable-telemetry'],{onStdout:geminiLogin})
+   : await spawn(spec.provider==='claude'?['auth','login','--claudeai']:['login','--oauth']);
   timer=setTimeout(()=>void loginProcess?.kill(),300000);
   const code=await loginProcess.exited;
-  if(code!==0)throw new Error('Sign-in was cancelled or did not finish. Try again.');
+  if(code!==0)throw new Error(/invalid_grant|malformed/i.test(loginOutput)?'That code was not accepted. Sign in again to get a new link.':'Sign-in was cancelled or did not finish. Try again.');
   sessions.clear();await checkAccount();
- }catch(error){publish({state:'required',message:String(error.message||error)});}finally{clearTimeout(timer);loginProcess=null;}
+ }catch(error){publish({state:'required',message:String(error.message||error)});}finally{clearTimeout(timer);loginProcess=null;loginOutput='';}
 }
 async function install(){
  if(['installing','checking','signing-in'].includes(account.state))return;
@@ -1162,9 +1207,11 @@ function buzzUi(React, { nativeSelect = false } = {}) {
 // The screens, drawn in Buzz's own primitives and laid out as Buzz's Claude
 // Code agent: the host's Harness row, then Sign-in, Model and Thinking in one
 // card, then Instructions.
-const {Group,Row,Button,Pill,TextField,Stack,Actions,Note,ErrorLine,Status}=buzzUi(R);
-const providerName=spec.provider==='claude'?'Claude':'Grok';
-const setupGuide=spec.provider==='claude'?'https://code.claude.com/docs/en/setup':'https://docs.x.ai/build/overview';
+const {Group,Row,Button,Input,Pill,TextField,Stack,Actions,Note,ErrorLine,Status}=buzzUi(R);
+const setupGuide={claude:'https://code.claude.com/docs/en/setup',grok:'https://docs.x.ai/build/overview',gemini:'https://antigravity.google/docs/install?tab=cli'}[spec.provider];
+const signInLabel=spec.provider==='gemini'?'Sign in with Google':'Sign in with '+providerName;
+const cliName=spec.provider==='gemini'?'Antigravity CLI':providerName+' CLI';
+const installNeeds=spec.provider==='gemini'?'Installs Google\u2019s official Antigravity CLI (agy).':'Installing needs Node.js and npm on this computer.';
 function useAccount(){
  const [state,setState]=R.useState(account);
  R.useEffect(()=>{listeners.add(setState);setState(account);if(account.state==='unchecked')void checkAccount();return()=>listeners.delete(setState);},[]);
@@ -1180,11 +1227,23 @@ function SignInRow({disabled}){
  const actions=state.state==='signing-in'
   ? [h(Button,{key:'cancel',size:'sm',onClick:()=>void loginProcess?.kill()},'Cancel')]
   : [h(Button,{key:'check',size:'sm',disabled:disabled||busy,onClick:()=>void checkAccount()},'Check'),
-     h(Button,{key:'sign',size:'sm',variant:ready?'subtle':'prominent',disabled:disabled||busy,onClick:()=>void login()},ready?'Switch account':'Sign in with '+providerName)];
+     h(Button,{key:'sign',size:'sm',variant:ready?'subtle':'prominent',disabled:disabled||busy,onClick:()=>void login()},ready?'Switch account':signInLabel)];
  return h(R.Fragment,null,
-  h(Row,{title:'Sign-in',description:busy?Status(state.message):state.state==='required'?h('span',{role:'alert'},state.message):state.message,trailing:h(Actions,null,...actions)}),
-  state.state==='required'&&h(Row,{title:providerName+' CLI',description:'Installing needs Node.js and npm on this computer.',
+  h(Row,{title:'Sign-in',description:busy&&!state.url?Status(state.message):state.state==='required'?h('span',{role:'alert'},state.message):state.message,trailing:h(Actions,null,...actions)}),
+  state.state==='signing-in'&&state.url&&h(CodeRows,{url:state.url,submitted:state.submitted,disabled}),
+  state.state==='required'&&h(Row,{title:cliName,description:installNeeds,
    trailing:h(Actions,null,h(Button,{size:'sm',href:setupGuide},'Setup guide'),h(Button,{size:'sm',variant:'prominent',disabled:disabled||busy,onClick:()=>void install()},'Install'))}));
+}
+/** Antigravity's sign-in link, and the field its code is pasted into. */
+function CodeRows({url,submitted,disabled}){
+ const [code,setCode]=R.useState('');
+ const submit=()=>{const c=code;setCode('');void submitCode(c);};
+ return h(R.Fragment,null,
+  h(Row,{title:'Google sign-in',trailing:h(Button,{size:'sm',href:url},'Open')}),
+  h(Row,{title:'Paste the code',trailing:h(Actions,null,
+   h(Input,{type:'password',autoComplete:'off',spellCheck:false,controlSize:'sm',width:'11rem',placeholder:'Code',value:code,disabled:disabled||submitted,
+    onChange:event=>setCode(event.target.value),onKeyDown:event=>{if(event.key==='Enter'){event.preventDefault();event.stopPropagation();if(code.trim())submit();}}}),
+   h(Button,{size:'sm',variant:'prominent',disabled:disabled||submitted||!code.trim(),loading:submitted,onClick:submit},'Finish'))}));
 }
 /** The Model control (Buzz puts it in its own Model row). Reports readiness. */
 function Model({config,onChange,disabled,onReadyChange}){
@@ -1207,7 +1266,7 @@ function Configuration(props){
   h(Group,null,harnessControl,h(SignInRow,props),
    h(Row,{title:'Model',trailing:h(Model,props)}),
    showEffort!==false&&h(Row,{title:'Thinking',trailing:h(Thinking,props)})),
-  Note('Uses your own '+providerName+' subscription on this computer. Your sign-in stays in the official '+providerName+' app and is not shared with your community.'));
+  Note('Uses your own '+(spec.provider==='gemini'?'Google AI':providerName)+' subscription on this computer. Your sign-in stays in the official '+(spec.provider==='gemini'?'Antigravity':providerName)+' app and is not shared with your community.'));
 }
 function Create({config,onChange,disabled}){
  return h(TextField,{label:'Instructions',optional:true,rows:4,maxLength:20000,value:config?.instructions||'',disabled,onChange:instructions=>onChange({...config,instructions})});

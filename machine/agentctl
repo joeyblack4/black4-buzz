@@ -2761,15 +2761,20 @@ def _start(d):
     # runs agy's default without a word when the chosen id is not in it (a
     # plan changed): so it is made again at every start, and the choice is
     # checked against that listing only. When it cannot be made, a chosen
-    # model is refused (the last listing proves nothing now) and an agent on
-    # the default runs agy's own, named as unchecked.
+    # model or thinking level, and any agent on a key, is refused (the last
+    # listing proves nothing now); a subscription agent on both defaults runs
+    # agy's own default, named as unchecked.
     if harness == "antigravity":
         if refresh_models(slot, wait=True, force=True):
             if offered(slot) == []:
                 fail(f"Google lists no model Antigravity can run for {ACCOUNT}'s {'API key' if pays == 'key' else 'sign-in'}.")
             picked = choice(harness, s)
-        elif (s.get("model") or "").strip():
-            fail(f"Antigravity could not list its models on this machine just now, so {s['model'].strip()} cannot be checked. Try again in a moment.")
+        elif pays == "key":
+            # A key is offered only what Google lists for it: nothing unchecked.
+            fail(f"Antigravity could not check {ACCOUNT}'s API key with Google just now. Try again in a moment, or add the key again.")
+        elif (s.get("model") or "").strip() or (s.get("effort") or "").strip():
+            chosen = " at ".join(x for x in ((s.get("model") or "").strip() or "the default model", (s.get("effort") or "").strip()) if x)
+            fail(f"Antigravity could not list its models on this machine just now, so {chosen} cannot be checked. Try again in a moment.")
         else:
             picked = {"model": None, "effort": None, "checked": False,
                       "note": "Antigravity could not list its models at start; it runs its own default."}

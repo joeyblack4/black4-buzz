@@ -2248,6 +2248,15 @@ class Antigravity(DeviceBase):
         finally:
             SERVICES[base] = saved
 
+    def test_a_key_agent_never_starts_unchecked_when_google_cannot_be_asked(self):
+        self.assertTrue(self.sign_in_key(FAKE_GEMINI_KEY, "antigravity")["ok"])
+        agent = self.make_agent("antigravity", pays="key")
+        self.assertTrue(self.req(op="start", pubkey=agent.name)["ok"])
+        get = self.a.http_get_json
+        self.a.http_get_json = lambda url, headers, timeout=20: (403, {"error": {"status": "PERMISSION_DENIED"}}) if "pageSize" in url else get(url, headers, timeout)
+        self.assertEqual(self.req(op="start", pubkey=agent.name)["error"],
+                         f"Antigravity could not check {OWNER}'s API key with Google just now. Try again in a moment, or add the key again.")
+
     def test_the_sign_in_checked_in_its_own_folder_is_the_one_put_in_place(self):
         self.assertTrue(self.sign_in_google()["ok"])
         (self.home / "agy-refuse-live.txt").write_text("x")  # anything run after the move would now fail
@@ -2283,7 +2292,15 @@ class Antigravity(DeviceBase):
         self.assertTrue(self.req(op="settings.set", pubkey=chosen.name, model="gemini-4-neon", effort="xhigh")["ok"])
         (self.home / "agy-list-fail.txt").write_text("x")
         self.assertEqual(self.req(op="start", pubkey=chosen.name)["error"],
-                         "Antigravity could not list its models on this machine just now, so gemini-4-neon cannot be checked. Try again in a moment.")
+                         "Antigravity could not list its models on this machine just now, so gemini-4-neon at xhigh cannot be checked. Try again in a moment.")
+        (self.home / "agy-list-fail.txt").unlink()
+        thinking = self.make_agent("antigravity")
+        self.assertTrue(self.req(op="settings.set", pubkey=thinking.name, effort="low")["ok"])
+        self.assertEqual(self.wait_env(thinking)["BUZZ_ACP_MODEL"], "gemini-4-carbon-low")
+        (self.home / "agy-list-fail.txt").write_text("x")
+        self.assertEqual(self.req(op="start", pubkey=thinking.name)["error"],
+                         "Antigravity could not list its models on this machine just now, so the default model at low cannot be checked. Try again in a moment.",
+                         "a Thinking choice alone is a choice")
         self.assertTrue(self.req(op="start", pubkey=default.name)["ok"])
         env = self.wait_env(default)
         self.assertNotIn("BUZZ_ACP_MODEL", env, "agy's own default, not a stale pick")

@@ -8,8 +8,9 @@ Tells us whether a new Buzz breaks a Black 4 plugin, or changes how its
 screens look, before anyone clicks **Update** in Buzz. The [buzz-canary workflow](../.github/workflows/buzz-canary.yml)
 runs every day, and on demand, against three versions of
 [block/buzz-app](https://github.com/block/buzz-app): the latest release, the
-newest preview and `main`. It also runs on pull requests that touch `plugins/`
-or `canary/`.
+newest preview and `main`. CI also runs it against the latest release only,
+on every pull request and every commit on `main`, and the release workflow runs
+it on the exact commit it releases.
 
 ## What is checked
 

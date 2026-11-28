@@ -299,10 +299,8 @@ agent's to change here: they live in Platform Control.
 
 The [Buzz canary](canary/README.md) checks every day that the latest Buzz still
 offers everything these plugins use; red on the release means do not update
-Buzz yet. Work lands on `main`. People install from `stable`, which only Joey
-moves, to a tested commit on `main`; installed plugins then offer **Update and
-reload**. Until a release, try `main` by installing from GitHub with ref
-`main`.
+Buzz yet. Releasing the plugins, the `preview` channel and rollback are in
+[Releasing](#releasing).
 
 ### Legacy: direct SSH to a machine's agentctl
 
@@ -363,8 +361,69 @@ Each plugin's manifest declares `"updates": { "defaultEnabled": true }`, so Buzz
 checks a plugin installed from this repository against the branch it was
 installed from (at startup, then hourly) and offers **Update and reload**. An
 update that asks for more computer access needs a review first. A plugin loaded
-from a folder gets no such check. `stable` is what people run; `main` is where
-work lands. Releasing is moving `stable` to a tested commit on `main`.
+from a folder gets no such check. Buzz compares the plugin's contents, not Git
+history, so a commit that leaves a plugin's folder alone offers no update, and
+moving a branch back offers the older plugin like any other update.
+
+## Releasing
+
+Three branches, one direction:
+
+| Branch | Who runs it | How it moves |
+| --- | --- | --- |
+| `main` | Nobody's Buzz. | Pull requests, after the `required` check passes. |
+| `preview` | Black 4 staff who opt in. | CI moves it to every commit on `main` whose checks pass ([preview.yml](.github/workflows/preview.yml)). |
+| `stable` | Everyone else. | Only the release and rollback workflows. |
+
+**Put a Mac on preview (or back on stable)** without removing the plugin:
+
+```bash
+node scripts/release/channel-link.mjs preview
+```
+
+It prints a `buzz://plugin-install` link pinned to preview's current commit
+and the plugin's folder. Open it on that Mac: Buzz shows an **Update** review
+that names the new branch, and later updates follow it. A link without the
+commit, or **Install from GitHub**, only says *Already installed*. If Buzz says
+the plugin is up to date, both branches hold the same plugin right now and the
+link changes nothing; run it again after the next change reaches preview. Use
+`stable` in place of `preview` to go back.
+
+**Release** an exact commit that has run on preview:
+
+```bash
+gh workflow run release -f commit=<sha>
+```
+
+The workflow runs the Buzz canary on that commit against the Buzz release
+Update installs now. Then [promote.mjs](scripts/release/promote.mjs) refuses,
+in one sentence, unless the commit is on `main`, has reached `preview`, is
+newer than `stable`, has a green `required` check, and its built folders match
+their source. It also refuses when a manifest asks for more host access than
+`stable` has, unless `-f ack_permissions=true` says everyone will be asked to
+review permissions. It tags the commit `release-YYYYMMDD-N` and writes notes
+from the merged pull requests, naming each plugin's Buzz revision and whether
+people are offered an update. Then it moves `stable`. Buzz offers the update
+within the hour, or at once with **Check again**. Try it first with
+`-f dry_run=true`, or locally with
+`node scripts/release/promote.mjs <sha> --dry-run`.
+
+**Roll back** the current release:
+
+```bash
+gh workflow run rollback
+```
+
+[rollback.mjs](scripts/release/rollback.mjs) moves `stable` back to the
+previous release tag (or `-f to=release-…`) and records a `rollback-…` tag
+naming the commit it undid, which promote then refuses to release again.
+Because Buzz compares contents, every install on `stable` is offered the older
+plugin as an ordinary update within the hour. `main` and `preview` still hold
+the bad commit, so land a fix on `main`. A Mac whose `managed-plugins.json`
+pins the undone commit stops matching `stable` until the pin is updated. One
+person who cannot wait can use **Roll back** in the plugin's menu in Buzz.
+
+How to test before any of this: [docs/testing.md](docs/testing.md).
 
 A Mac managed for Black 4 can list the plugin in Buzz's
 `managed-plugins.json` so Settings shows it as recommended, pinned to an exact
@@ -384,6 +443,7 @@ yet.
 | `subscriptions/` | Source, build and tests for the two subscription plugins. `npm run build --prefix subscriptions` writes their folders under `plugins/`; the check refuses a stale copy. |
 | `bridge/black4-agent-mcp/` | The Black 4 MCP for agents that run on a Black 4 machine. `buzz-acp` starts it as the agent's MCP server; it signs every request with the agent's own Buzz key and owner attestation (`Authorization: Nostr`), so there is no sign-in. One pinned dependency, `@noble/curves`. |
 | `machine/` | The machine side: `agentctl` (what Black 4 hardware in the plugin calls through the machine's door), `setup.sh` and `deploy.sh <ssh-host>`, which installs it on a machine, and `teammates.sh`, legacy forced-command keys. |
+| `scripts/release/` | Releasing: `promote.mjs`, `rollback.mjs`, `preview.mjs` and `channel-link.mjs` ([Releasing](#releasing)). `scripts/pr-gates.mjs` and `scripts/tool-surface.mjs` say what a pull request does to people's Buzz. |
 | `install.sh` | Optional: opens Buzz's install review for the plugin, and with `--hardware` / `--check-hardware` sets up legacy direct SSH access for admins. |
 | `tests/` | Unit tests against the plugin file: fake AuthKit, MCP and door servers behind `host.request` (`tests/fakes.mjs`), and fictional data. No real sign-in or network. |
 | `scripts/check-build-folder.mjs` | Refuses anything in a plugin folder that Buzz would not read. |
@@ -616,9 +676,10 @@ npm run check
 That checks the plugin parses, each plugin folder holds only what Buzz reads,
 the subscription plugins and the UI kit's copies match their source, and the
 tests pass. Screens are drawn only with the [Buzz UI kit](kit/README.md).
-`npm run test:subscriptions` runs the subscription plugins' own tests. To try a change in your own Buzz, install from
-your branch (or install the folder again: a folder install is a copy), then use Buzz's `plugin_reload` tool and confirm with
-`plugin_status` that it is active and its tools are registered. Unit tests do
+`npm run test:subscriptions` runs the subscription plugins' own tests. To try a change in Buzz, use a Buzz profile of its
+own, never your everyday install: install the folder with **Browse**, then use Buzz's `plugin_reload` tool and confirm with
+`plugin_status` that it is active and its tools are registered
+([docs/testing.md](docs/testing.md)). Unit tests do
 not prove the live connection, the embedded sign-in or a relayed mention: check
 those in the app.
 

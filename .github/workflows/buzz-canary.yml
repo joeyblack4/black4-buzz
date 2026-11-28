@@ -1,7 +1,8 @@
 # Does a new Buzz break Black 4's plugins, or change how they look? Checks
 # the latest Buzz release, the newest Buzz preview and Buzz's main branch
 # every day, before anyone clicks Update. A red run is the signal; see
-# canary/README.md for what to do.
+# canary/README.md for what to do. CI and the release workflow also call it
+# for the release Buzz only, on the commit they test.
 name: buzz-canary
 on:
   schedule:
@@ -11,12 +12,22 @@ on:
       ref:
         description: "Also check this block/buzz-app tag, branch or commit (optional)"
         required: false
-  pull_request:
-    paths: ["plugins/**", "canary/**", "kit/**", ".github/workflows/buzz-canary.yml"]
+  # ci.yml calls it on every pull request and commit on main (release Buzz
+  # only), and release.yml calls it on the exact commit being released.
+  workflow_call:
+    inputs:
+      which:
+        description: "all: release, preview and main Buzz; release: only the Buzz that Update installs now"
+        type: string
+        default: all
+      plugin_ref:
+        description: "Commit of this repository to check (default: the triggering commit)"
+        type: string
+        default: ""
 permissions:
   contents: read
 concurrency:
-  group: buzz-canary-${{ github.ref }}
+  group: buzz-canary-${{ github.workflow }}-${{ github.ref }}-${{ inputs.plugin_ref || github.sha }}
   cancel-in-progress: true
 jobs:
   refs:
@@ -28,6 +39,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           EXTRA: ${{ inputs.ref }}
+          WHICH: ${{ inputs.which || 'all' }}
         run: |
           release=$(gh api repos/block/buzz-app/releases/latest --jq .tag_name)
           released=$(gh api repos/block/buzz-app/releases/latest --jq .published_at)
@@ -38,6 +50,7 @@ jobs:
             + (if $p != "" then [{name: "preview \($p)", ref: $p}] else [] end)
             + [{name: "main", ref: "main"}]
             + (if $x != "" then [{name: "requested \($x)", ref: $x}] else [] end)')
+          if [ "$WHICH" = release ]; then refs=$(echo "$refs" | jq -c '[.[0]]'); fi
           echo "Checking: $refs"
           echo "matrix=$refs" >> "$GITHUB_OUTPUT"
   check:
@@ -51,6 +64,8 @@ jobs:
         buzz: ${{ fromJson(needs.refs.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.plugin_ref }}
       - uses: actions/checkout@v4
         with:
           repository: block/buzz-app

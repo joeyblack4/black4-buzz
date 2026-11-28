@@ -577,3 +577,17 @@ test("a re-read that is behind too (the queue moved again meanwhile) is refused,
   assert.equal(fresh.items[0].version, 3);
   assert.equal(calls.filter((call) => call.name === "open_review").length, 3);
 });
+
+test("the community's one business: matched by host, none or several is no business", async () => {
+  const { reviewCommunityBusiness, communityHost } = await import("../plugins/black4/plugin.js");
+  const answer = (rows) => ({ content: [{ type: "text", text: JSON.stringify({ data: { businesses: rows } }) }] });
+  const row = (id, host, status = "active") => ({ businessId: id, name: id.toUpperCase(), status, buzzCommunity: { communityId: `relay:wss://${host}/`, name: host } });
+  assert.equal(communityHost("wss://Crumb.Example.test"), "crumb.example.test");
+  assert.equal(communityHost("relay:wss://crumb.example.test/"), "crumb.example.test");
+  assert.equal(communityHost("not a url"), "");
+  assert.deepEqual(reviewCommunityBusiness(answer([row("a", "one.test"), row("b", "two.test")]), "one.test"), { id: "a", name: "A" });
+  assert.equal(reviewCommunityBusiness(answer([row("a", "two.test"), row("b", "two.test")]), "two.test"), null, "several share it");
+  assert.equal(reviewCommunityBusiness(answer([row("a", "one.test")]), "black4.test"), null, "none recorded here");
+  assert.equal(reviewCommunityBusiness(answer([row("a", "one.test", "retired")]), "one.test"), null, "a retired business is not one");
+  assert.equal(reviewCommunityBusiness(answer([row("a", "one.test")]), ""), null, "no community open");
+});

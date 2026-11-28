@@ -13,7 +13,8 @@ async function app(t, options = {}) {
   const reviews = fakeReviews(options.reviews);
   const authkit = fakeAuthKit();
   const mcp = fakeMcp(authkit, { answer: reviews.answer((message) => message.params?.name === "whoami"
-    ? { result: { content: [{ type: "text", text: '{"kind":"staff","email":"operator@example.test"}' }] } } : { result: {} }) });
+    ? { result: { content: [{ type: "text", text: '{"kind":"staff","email":"operator@example.test"}' }] } }
+    : options.tool?.(message) ?? { result: {} }) });
   const net = https({ authkit, mcp });
   await signInStore.save(authkit.issue().refresh_token);
   const registered = {};
@@ -30,6 +31,7 @@ async function app(t, options = {}) {
     settingsCards: { register() {} }, pages: { register: (value) => { if (value.id === "reviews") registered.page = value; } }, panels: { register: (value) => { registered.panel = value; } },
     conversation: { registerLink() {}, registerAccessory: (value) => { registered.accessory = value; } },
     browser: options.browser ?? { available: false },
+    ...(options.relay ? { relay: options.relay } : {}),
     effect: (fn) => { const off = fn(); if (off) cleanups.push(off); },
     host: { request: net.request },
   });
@@ -310,4 +312,29 @@ test("every Reviews header names the account and signs out in one click, as Sett
   view = a.page();
   assert.equal(a.button(view, "Sign out"), null, "gone once signed out");
   assert.ok(a.button(view, "Sign in to Black 4"), "Sign in in its place");
+});
+
+test("in a community recorded for one business, Reviews opens on that business; elsewhere it narrows nothing", async (t) => {
+  const listeners = new Set();
+  let origin = "wss://crumb.communities.example.test";
+  const relay = { snapshot: () => ({ status: "ready", origin }), subscribe: (fn) => { listeners.add(fn); return () => listeners.delete(fn); } };
+  const businesses = { businesses: [
+    { businessId: "business-crumb", name: "Crumb & Co", status: "active", buzzCommunity: { communityId: "relay:wss://crumb.communities.example.test/", name: "Crumb" } },
+    { businessId: "business-a", name: "A", status: "active", buzzCommunity: { communityId: "relay:wss://shared.communities.example.test/", name: "Shared" } },
+    { businessId: "business-b", name: "B", status: "active", buzzCommunity: { communityId: "relay:wss://shared.communities.example.test/", name: "Shared" } },
+  ] };
+  const tool = (message) => message.params?.name === "list_businesses" ? { result: { content: [{ type: "text", text: JSON.stringify({ data: businesses }) }] } } : null;
+  const a = await app(t, { relay, tool });
+  await settle(); await settle();
+  const scoped = () => a.reviews.calls.filter((call) => call.name === "review_queue" && call.args?.businessId);
+  a.page(); await settle();
+  assert.deepEqual(scoped().map((call) => call.args.businessId), ["business-crumb"], "opens on the community's one business");
+
+  // A community several businesses share narrows nothing: the filter goes back to every business.
+  const before = scoped().length;
+  origin = "wss://shared.communities.example.test";
+  for (const fn of listeners) fn();
+  await settle(); await settle();
+  a.page(); await settle();
+  assert.equal(scoped().length, before, "no business-scoped read in a shared community");
 });

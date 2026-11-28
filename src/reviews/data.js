@@ -59,6 +59,24 @@ const reviewAssetKey = (businessId, assetId) => `${businessId}/${assetId}`;
  * each review's capture (the desktop picture of the page its first listed item
  * opens on) from `_meta["ai.black4/review-card"].captures[assetId]`, which the
  * server keeps out of what a model reads. Never handed to an agent. */
+/** The host of a Buzz community, from a relay URL or Platform Control's
+ * `relay:wss://host/` community id; "" when it is not one. */
+function communityHost(value) {
+  try { return new URL(String(value ?? "").replace(/^relay:/, "")).host.toLowerCase(); } catch { return ""; }
+}
+
+/** The one business recorded for the Buzz community at `host`, from a
+ * `list_businesses` answer: { id, name }, or null when the community holds
+ * none or several (several businesses may share one community). */
+function reviewCommunityBusiness(result, host) {
+  if (!host) return null;
+  const value = readAnswer(result);
+  const rows = (value?.data ?? value)?.businesses;
+  if (!Array.isArray(rows)) return null;
+  const here = rows.filter((row) => typeof row?.businessId === "string" && row.status !== "retired" && communityHost(row.buzzCommunity?.communityId) === host);
+  return here.length === 1 ? { id: here[0].businessId, name: typeof here[0].name === "string" ? here[0].name : here[0].businessId } : null;
+}
+
 function reviewQueueOf(result) {
   const value = readAnswer(result);
   const queue = value?.data && !value.kind ? value.data : value;

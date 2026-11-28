@@ -421,15 +421,37 @@ function reviewsPart(ctx, bridge) {
     blockedNotes = notifications?.register?.({ id: "decisions-blocked", label: "Black 4 approved work blocked" }) ?? null;
   } catch (error) { bridge.report?.(error); }
   own(bridge.queue.subscribe((queue) => { store.noteQueue(queue); notify(queue); }));
-  // Signed out, reconnecting or another account: nothing of the last one stays.
+  // ---- the open community: its one business is what Reviews shows first ------
+  // The plugin adapts to the community it is used in (Joey, 2026-11-27): in a
+  // community recorded for exactly one business, Reviews opens on that
+  // business; the Customer menu still shows the rest. Elsewhere (Black 4's own
+  // community, or one several businesses share) nothing is narrowed. Opening
+  // another community follows it; within one, the person's choice stays.
   let lastStatus = null;
+  let placed = { host: null, filter: null };
+  let placing = 0;
+  const placeCommunity = async () => {
+    const host = bridge.community?.host?.() ?? "";
+    if (lastStatus !== "connected" || host === placed.host) return;
+    const ticket = ++placing;
+    let business = null;
+    try { business = reviewCommunityBusiness(await bridge.call("list_businesses", {}), host); } catch { return; }
+    if (ticket !== placing || lastStatus !== "connected") return;
+    placed = { host, filter: business?.id ?? null };
+    if (view.filter !== placed.filter) setView({ filter: placed.filter, entry: null });
+  };
+  own(bridge.community?.subscribe?.(() => { void placeCommunity(); }));
+
+  // Signed out, reconnecting or another account: nothing of the last one stays.
   own(bridge.status?.subscribe?.((status) => {
     if (status !== "connected" && lastStatus === "connected") {
       store.reset();
       seen.started = false; seen.waiting.clear(); seen.blocked.clear();
       setView({ entry: null, filter: null });
+      placed = { host: null, filter: null };
     }
     lastStatus = status;
+    if (status === "connected") void placeCommunity();
   }));
 
   return {

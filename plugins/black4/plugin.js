@@ -1690,6 +1690,11 @@ export function apply(ctx) {
       return result;
     },
     queue: { subscribe: (listener) => { queueListeners.add(listener); return () => queueListeners.delete(listener); }, refresh: () => { clearTimeout(queueTimer); void pollQueue(); } },
+    // The community open in Buzz (its relay's host), and word when it changes.
+    community: {
+      host: () => { try { return communityHost(ctx.relay?.snapshot?.()?.origin); } catch { return ""; } },
+      subscribe: (listener) => (ctx.relay?.subscribe ? ctx.relay.subscribe(() => { try { listener(); } catch {} }) : () => {}),
+    },
     // Every status change: Reviews forgets the last connection's data when it ends.
     status: { subscribe: (listener) => { const each = () => listener(state.status); listeners.add(each); each(); return () => listeners.delete(each); } },
     SignInPrompt,
@@ -3871,6 +3876,24 @@ const reviewAssetKey = (businessId, assetId) => `${businessId}/${assetId}`;
  * each review's capture (the desktop picture of the page its first listed item
  * opens on) from `_meta["ai.black4/review-card"].captures[assetId]`, which the
  * server keeps out of what a model reads. Never handed to an agent. */
+/** The host of a Buzz community, from a relay URL or Platform Control's
+ * `relay:wss://host/` community id; "" when it is not one. */
+function communityHost(value) {
+  try { return new URL(String(value ?? "").replace(/^relay:/, "")).host.toLowerCase(); } catch { return ""; }
+}
+
+/** The one business recorded for the Buzz community at `host`, from a
+ * `list_businesses` answer: { id, name }, or null when the community holds
+ * none or several (several businesses may share one community). */
+function reviewCommunityBusiness(result, host) {
+  if (!host) return null;
+  const value = readAnswer(result);
+  const rows = (value?.data ?? value)?.businesses;
+  if (!Array.isArray(rows)) return null;
+  const here = rows.filter((row) => typeof row?.businessId === "string" && row.status !== "retired" && communityHost(row.buzzCommunity?.communityId) === host);
+  return here.length === 1 ? { id: here[0].businessId, name: typeof here[0].name === "string" ? here[0].name : here[0].businessId } : null;
+}
+
 function reviewQueueOf(result) {
   const value = readAnswer(result);
   const queue = value?.data && !value.kind ? value.data : value;
@@ -5543,15 +5566,37 @@ function reviewsPart(ctx, bridge) {
     blockedNotes = notifications?.register?.({ id: "decisions-blocked", label: "Black 4 approved work blocked" }) ?? null;
   } catch (error) { bridge.report?.(error); }
   own(bridge.queue.subscribe((queue) => { store.noteQueue(queue); notify(queue); }));
-  // Signed out, reconnecting or another account: nothing of the last one stays.
+  // ---- the open community: its one business is what Reviews shows first ------
+  // The plugin adapts to the community it is used in (Joey, 2026-11-27): in a
+  // community recorded for exactly one business, Reviews opens on that
+  // business; the Customer menu still shows the rest. Elsewhere (Black 4's own
+  // community, or one several businesses share) nothing is narrowed. Opening
+  // another community follows it; within one, the person's choice stays.
   let lastStatus = null;
+  let placed = { host: null, filter: null };
+  let placing = 0;
+  const placeCommunity = async () => {
+    const host = bridge.community?.host?.() ?? "";
+    if (lastStatus !== "connected" || host === placed.host) return;
+    const ticket = ++placing;
+    let business = null;
+    try { business = reviewCommunityBusiness(await bridge.call("list_businesses", {}), host); } catch { return; }
+    if (ticket !== placing || lastStatus !== "connected") return;
+    placed = { host, filter: business?.id ?? null };
+    if (view.filter !== placed.filter) setView({ filter: placed.filter, entry: null });
+  };
+  own(bridge.community?.subscribe?.(() => { void placeCommunity(); }));
+
+  // Signed out, reconnecting or another account: nothing of the last one stays.
   own(bridge.status?.subscribe?.((status) => {
     if (status !== "connected" && lastStatus === "connected") {
       store.reset();
       seen.started = false; seen.waiting.clear(); seen.blocked.clear();
       setView({ entry: null, filter: null });
+      placed = { host: null, filter: null };
     }
     lastStatus = status;
+    if (status === "connected") void placeCommunity();
   }));
 
   return {
@@ -5603,7 +5648,7 @@ function reviewsSlot(ctx, bridge) {
   };
 }
 // ---- end reviews ----
-export { reviewScreens, reviewReplaces, reviewByline, reviewQueueOf, reviewBusinessCounts, reviewHeadline, reviewDestination, reviewGoalChoices, reviewGoalNow, reviewShown, REVIEW_ALL_GOALS, REVIEW_NO_GOAL, reviewLocator, reviewLink, reviewOrder, reviewGroups, reviewState, reviewData, wordDiff, reviewsPart, reviewsSlot, REVIEW_UNDO_MS };
+export { reviewScreens, reviewReplaces, reviewByline, reviewQueueOf, reviewCommunityBusiness, communityHost, reviewBusinessCounts, reviewHeadline, reviewDestination, reviewGoalChoices, reviewGoalNow, reviewShown, REVIEW_ALL_GOALS, REVIEW_NO_GOAL, reviewLocator, reviewLink, reviewOrder, reviewGroups, reviewState, reviewData, wordDiff, reviewsPart, reviewsSlot, REVIEW_UNDO_MS };
 
 /** buzz-acp's own conversation levers, by the names the machine lists them
  * under (`controls` in its models reply: the bounds or values of each, and

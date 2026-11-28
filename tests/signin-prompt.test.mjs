@@ -18,7 +18,7 @@ const whoami = (message) => message.method === "tools/list"
 
 /** The plugin on a test host. `module` reuses a plugin module (one Buzz run)
  * across harnesses; `opens` scripts what navigation.open answers. */
-async function harness(t, { signedIn = false, polls = ["authorization_pending", "authorization_pending", "authorization_pending", "ok"], module, browser = true, opens = () => ({ status: "opened" }), owner, revision = "test", relay = true, navigation, authkit: sharedAuthkit } = {}) {
+async function harness(t, { signedIn = false, polls = ["authorization_pending", "authorization_pending", "authorization_pending", "ok"], module, browser = true, opens = () => ({ status: "opened" }), owner, revision = "test", relay = true, navigation, authkit: sharedAuthkit, services = {} } = {}) {
   if (!globalThis.__b4device) deviceStorage(t);
   const plugin = module ?? await freshPlugin();
   const opened = [];
@@ -42,7 +42,7 @@ async function harness(t, { signedIn = false, polls = ["authorization_pending", 
     panels: { register: (value) => { regs.panel = value; } },
     conversation: { registerLink() {}, registerLinkPreview: (value) => { regs.preview = value; } },
     browser: { available: browser, View: "browser-view" },
-    reflect: { get: (name) => (name === "navigation" ? nav ?? undefined : undefined) },
+    reflect: { get: (name) => (name === "navigation" ? nav ?? undefined : services[name]) },
     effect: (fn) => { const off = fn(); if (off) cleanups.push(off); },
     host: { request: net.request },
     ...(owner || revision ? { pluginOwner: { id: owner ?? "ai.black4", ...(revision ? { revision } : {}) } } : {}),
@@ -875,4 +875,51 @@ test("nothing token-like reaches the state, the rendered surfaces or the hardwar
   app.mcp.approvalRequired = true;
   await assert.rejects(app.regs.hardware.remote.instructions.get({ pubkey: "a".repeat(64) }));
   assert.doesNotMatch(JSON.stringify(expand({ type: app.regs.hardware.CreateConfiguration, props: { config: {}, onChange() {} }, children: [] })), tokenText);
+});
+
+// ---- updates nobody can miss (src/updates/watch.js), in the running plugin ----------
+/** Buzz's update checker for this plugin, with one candidate or none. */
+function fakeUpdates(candidate) {
+  const listeners = new Set();
+  const queued = [];
+  let current = candidate;
+  return {
+    queued,
+    set(next) { current = next; for (const listener of listeners) listener(); },
+    getSnapshot: () => ({ status: "fresh", checkedAt: 1, candidates: current ? [current] : [], errors: [] }),
+    subscribe: (listener) => { listeners.add(listener); return () => listeners.delete(listener); },
+    refresh: async () => ({ status: "fresh", checkedAt: 1, candidates: current ? [current] : [], errors: [] }),
+    queueUpdates: (tokens) => { queued.push(tokens); return { id: "q1", status: "reviewing", items: [] }; },
+  };
+}
+const candidate = { token: "tok-1", id: "ai.black4", name: "Black 4", installedRevision: "rev-old", candidateRevision: "rev-new" };
+
+test("an update waiting on this device: a notice with Update now, first on the Settings card, and tools keep working within the day", async (t) => {
+  deviceStorage(t);
+  const updates = fakeUpdates(candidate);
+  const shown = [];
+  const notices = { show: (content) => { shown.push(content); return new Promise(() => {}); } };
+  const app = await harness(t, { signedIn: true, services: { pluginInstaller: { updates }, notices } });
+  await app.connected();
+  assert.equal(shown[0]?.title, "Update Black 4");
+  assert.deepEqual(shown[0].actions.map((action) => action.label), ["Update now", "Later"]);
+  assert.match(texts(app.settings()).join(" "), /Update ready/);
+  app.click("Update now");
+  await settle();
+  assert.deepEqual(updates.queued, [["tok-1"]], "Update now opens Buzz's own Update review");
+  assert.ok(await app.tools.get("black4_whoami").call({}, {}, {}), "tools still answer");
+});
+
+test("an update first seen over a day ago on this device: Black 4's agent tools refuse until it is installed", async (t) => {
+  const values = deviceStorage(t);
+  values.set("ai.black4.update-seen", JSON.stringify({ installed: "rev-old", since: Date.now() - 25 * 60 * 60 * 1000 }));
+  const updates = fakeUpdates(candidate);
+  const notices = { show: () => new Promise(() => {}) };
+  const app = await harness(t, { signedIn: true, services: { pluginInstaller: { updates }, notices } });
+  await app.connected();
+  await assert.rejects(app.tools.get("black4_whoami").call({}, {}, {}), /out of date.*Update now/s);
+  assert.match(texts(app.settings()).join(" "), /Update required/);
+  // Installed (no candidate any more): the tools answer again.
+  updates.set(null);
+  assert.ok(await app.tools.get("black4_whoami").call({}, {}, {}));
 });

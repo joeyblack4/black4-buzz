@@ -3,6 +3,8 @@
 // committed; `--check` refuses one that no longer matches the kit.
 //   node kit/build.mjs [--check]
 import { readFileSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 export const BEGIN = "// ---- buzz-ui kit: stamped from kit/buzz-ui.js by `npm run kit`; edit it there ----";
 export const END = "// ---- end buzz-ui kit ----";
@@ -21,7 +23,7 @@ export function stamp(text, kit) {
   return `${text.slice(0, begin)}${BEGIN}\n${kit.trimEnd()}\n${text.slice(end)}`;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const check = process.argv.includes("--check");
   const kit = read("kit/buzz-ui.js");
   let stale = false;

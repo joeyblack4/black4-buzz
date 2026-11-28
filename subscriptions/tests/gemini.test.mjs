@@ -3,11 +3,15 @@ import test from 'node:test';import assert from 'node:assert/strict';import {app
 const session={sessionId:'session',_meta:{antigravity:{tier:{name:'Google AI Ultra'}}},
  configOptions:[{id:'model',category:'model',currentValue:'gemini-4-neon',options:[{value:'gemini-4-neon',name:'Gemini 4 Neon'},{value:'gemini-4-carbon',name:'Gemini 4 Carbon'}]}],
  models:{availableModels:['gemini-4-neon-high','gemini-4-neon-xhigh','gemini-4-neon-low','gemini-4-carbon-medium','gemini-4-carbon-low'].map(modelId=>({modelId}))}};
-function fake({signedIn=true,confirm=true}={}){
+// What a free or Plus account's session lists (no Carbon or Neon), and the model agy picks for it.
+const plus={sessionId:'session',_meta:{antigravity:{tier:{name:'Google AI Plus'}}},
+ configOptions:[{id:'model',category:'model',currentValue:'gemini-4-flash',options:[{value:'gemini-4-hydrogen',name:'Gemini 4 Hydrogen'},{value:'gemini-4-flash',name:'Gemini 4 Flash'}]}],
+ models:{availableModels:['gemini-4-hydrogen-high','gemini-4-hydrogen-low','gemini-4-flash-low'].map(modelId=>({modelId}))}};
+function fake({signedIn=true,confirm=true,answers=session}={}){
  const calls=[],launches=[];
  const spawn=async(id,o)=>{launches.push({id,...o});let resolve;const exited=new Promise(r=>resolve=r);
   return {exited,kill:async()=>resolve(0),end:async()=>resolve(0),write:async s=>{const m=JSON.parse(s);calls.push(m);let result={},error;
-   if(m.method==='session/new'||m.method==='session/load'){if(signedIn)result=session;else error={code:-32000,message:'Authentication required'};}
+   if(m.method==='session/new'||m.method==='session/load'){if(signedIn)result=answers;else error={code:-32000,message:'Authentication required'};}
    if(m.method==='session/set_config_option')result={configOptions:[{id:m.params.configId,currentValue:confirm?m.params.value:'other'}]};
    if(m.method==='session/prompt'){o.onStdout(JSON.stringify({jsonrpc:'2.0',method:'session/update',params:{update:{sessionUpdate:'agent_message_chunk',content:{text:'hello'}}}})+'\n');result={stopReason:'end_turn'};}
    o.onStdout(JSON.stringify(error?{jsonrpc:'2.0',id:m.id,error}:{jsonrpc:'2.0',id:m.id,result})+'\n');}};};
@@ -88,6 +92,66 @@ test('Gemini signs in with a Google link and the pasted code, which goes to agy 
  assert.match(text(ui.toJSON()),/Connected to Antigravity · Google AI Ultra/);
  assert(!JSON.stringify(ui.toJSON()).includes('good-code'),'the code is not kept on screen');
  await act(async()=>ui.unmount());cleanup();void base;
+});
+test('a new Gemini agent names no model and runs the one Antigravity picks for its account; a Thinking level alone is still set',async()=>{
+ const f=fake(),p=load(f);
+ assert.equal(p.type.defaults().config.model,'','no model of its own: plans list different ones');
+ await p.type.run(delivery({}));
+ assert.deepEqual(f.calls.map(m=>m.method),['initialize','session/new','session/prompt'],'nothing set, nothing to confirm');
+ assert.deepEqual(p.replies,['hello']);
+ await p.type.run({...delivery({effort:'low'}),agent:{key:'other'}});
+ assert.deepEqual(f.calls.filter(m=>m.method==='session/set_config_option').map(m=>[m.params.configId,m.params.value]),[['thought_level','low']]);
+ p.cleanup();
+});
+test('Create is ready on a Plus account, on the model Antigravity picks for it, not a model the plan lacks',async()=>{
+ const f=fake({answers:plus});
+ const React=(await import('react')).default;const {create,act}=await import('react-test-renderer');globalThis.IS_REACT_ACT_ENVIRONMENT=true;
+ let type,cleanup;apply({react:React,effect:fn=>cleanup=fn(),agents:{harness:{},register:t=>type=t},host:{resolveDirectory:async x=>x,serveMcp(){},spawn:f.spawn}});
+ const config=type.defaults().config;
+ assert.equal(type.summary({config}),'Default model','before the account is checked, no model is named');
+ let ui,ready=false;await act(async()=>{ui=create(React.createElement(type.CreateConfiguration,{config,onChange(){},onReadyChange:v=>ready=v}));});
+ assert.equal(ready,true,'Create is enabled on a plan without Neon');
+ assert.equal(type.models({config}).current,'gemini-4-flash','the account’s own pick');
+ assert.equal(type.summary({config}),'gemini-4-flash');
+ const model=ui.root.findAll(x=>x.props.role==='combobox')[0];
+ assert.match(JSON.stringify(ui.toJSON()),/Gemini 4 Flash/);
+ assert.deepEqual(ui.root.findAll(x=>x.props.role==='option').map(x=>x.props['data-value']).slice(0,2),['gemini-4-hydrogen','gemini-4-flash']);
+ void model;
+ // A model the person names is kept as named, and Create waits for one the plan lists.
+ assert.equal(type.models({config:{model:'gemini-4-neon'}}).current,'gemini-4-neon');
+ let readyNeon=true;await act(async()=>ui.unmount());
+ await act(async()=>{ui=create(React.createElement(type.CreateConfiguration,{config:{model:'gemini-4-neon'},onChange(){},onReadyChange:v=>readyNeon=v}));});
+ assert.equal(readyNeon,false);
+ await act(async()=>ui.unmount());cleanup();
+});
+test('a Google sign-in that fails says why, from what agy wrote on stderr',async()=>{
+ const React=(await import('react')).default;const {create,act}=await import('react-test-renderer');globalThis.IS_REACT_ACT_ENVIRONMENT=true;
+ let type,cleanup,said='';const base=fake({signedIn:false});
+ const spawn=async(id,o)=>{
+  if(!o.args.includes('--login'))return base.spawn(id,o);
+  let resolve;const exited=new Promise(r=>resolve=r);
+  queueMicrotask(()=>o.onStdout('Open this link in a browser to log in with Google:\n\n  https://accounts.google.com/o/oauth2/auth?client_id=x&state=s\n\nThen paste the authorization code, or the full URL of the page you land on, and press Enter:\n'));
+  return {exited,kill:async()=>resolve(1),write:async s=>{o.onStderr?.(said+'\n');resolve(1);}};
+ };
+ apply({react:React,effect:fn=>cleanup=fn(),agents:{harness:{},register:t=>type=t},host:{resolveDirectory:async x=>x,serveMcp(){},spawn}});
+ const text=node=>typeof node==='string'?node:(node?.children||[]).map(text).join('');
+ let ui;await act(async()=>{ui=create(React.createElement(type.CreateConfiguration,{config:{},onChange(){},onReadyChange(){}}));});
+ const signIn=async code=>{
+  await act(async()=>{ui.root.findAllByType('button').find(b=>text(b)==='Sign in with Google').props.onClick();});
+  await act(async()=>{await new Promise(r=>setTimeout(r,10));});
+  const input=ui.root.findAllByType('input')[0];
+  await act(async()=>{input.props.onChange({target:{value:code}});});
+  await act(async()=>{ui.root.findAllByType('button').find(b=>text(b)==='Finish').props.onClick();});
+  await act(async()=>{await new Promise(r=>setTimeout(r,20));});
+ };
+ said='error: couldn’t log in: token exchange failed: Post "https://oauth2.googleapis.com/token": dial tcp: lookup oauth2.googleapis.com: no such host';
+ await signIn('some-code');
+ assert.match(text(ui.toJSON()),/Sign-in did not finish: couldn.t log in: token exchange failed: Post "https:\/\/oauth2\.googleapis\.com\/token": dial tcp/);
+ assert(!text(ui.toJSON()).includes('some-code'),'never the code');
+ said='couldn’t log in: token exchange failed: oauth2: "invalid_grant" "Malformed auth code."';
+ await signIn('bad-code');
+ assert.match(text(ui.toJSON()),/That code was not accepted/,'a refused code on stderr is recognised too');
+ await act(async()=>ui.unmount());cleanup();
 });
 test('every subscription manifest declares processes the way Buzz accepts them',async()=>{
  const {readFileSync}=await import('node:fs');

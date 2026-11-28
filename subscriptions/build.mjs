@@ -10,8 +10,12 @@ const PROVIDERS = [
   { provider: "claude", title: "Claude Sub Plugin", defaultModel: "opus", cli: "@anthropic-ai/claude-code" },
   { provider: "grok", title: "Grok Sub Plugin", defaultModel: "grok-4.6", cli: "@xai-official/grok" },
   // Google's Antigravity CLI is not on npm: Google's own installer fetches it
-  // and checks its SHA-512 (into ~/.local/bin/agy, on Buzz's PATH).
-  { provider: "gemini", title: "Gemini Sub Plugin", defaultModel: "gemini-4-neon", program: "agy",
+  // and checks its SHA-512 (into ~/.local/bin/agy, on Buzz's PATH). Plans
+  // differ in what they list (Carbon and Neon on Pro and Ultra; Hydrogen and
+  // Flash on a free or Plus account), so a new Gemini agent runs the model
+  // Antigravity picks for its account; this one stands in only while that
+  // is unknown, and it is the one every plan lists.
+  { provider: "gemini", title: "Gemini Sub Plugin", defaultModel: "gemini-4-hydrogen", program: "agy",
     install: { program: "bash", args: ["-c", "curl -fsSL https://antigravity.google/cli/install.sh | bash"] },
     description: "Gemini subscription agents on Google's Antigravity, with personal sign-in, models, thinking, coding and Buzz tools. Runs on your computer." },
 ];

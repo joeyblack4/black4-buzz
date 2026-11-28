@@ -2174,6 +2174,16 @@ class Antigravity(DeviceBase):
         r = self.start_code()
         return self.req(op="login.finish", loginId=r["loginId"], code=code)
 
+    def age_listing(self, slot="antigravity"):
+        """The slot's listing is now older than AGY_MODELS_TTL: the next start makes it again."""
+        cache = self.a.CRED_RUN / f"{slot}-models.json"
+        listed = json.loads(cache.read_text())
+        listed["at"] = time.time() - self.a.AGY_MODELS_TTL - 1
+        cache.write_text(json.dumps(listed))
+
+    def listings(self):
+        return (self.home / "listings.txt").read_text().count("agy ")
+
     def test_the_subscription_signs_in_with_a_google_link_and_the_pasted_code(self):
         r = self.start_code()
         self.assertTrue(r["needsCode"])
@@ -2218,22 +2228,48 @@ class Antigravity(DeviceBase):
         self.assertTrue(self.a.running(agent), "and its agents keep running")
         self.assertIs({h["id"]: h for h in self.req(op="machine.status")["harnesses"]}["antigravity"]["signedIn"], True)
 
-    def test_every_start_checks_the_model_against_what_agy_offers_now(self):
+    def test_a_start_checks_the_model_against_what_agy_offers_now_once_its_listing_is_old(self):
         self.assertTrue(self.sign_in_google()["ok"])
         agent = self.make_agent("antigravity")
         self.assertTrue(self.req(op="settings.set", pubkey=agent.name, model="gemini-4-neon", effort="xhigh")["ok"])
         self.assertEqual(self.wait_env(agent)["BUZZ_ACP_MODEL"], "gemini-4-neon-xhigh")
-        # The plan changes: agy no longer lists Neon (a key-only listing has none).
+        # An old listing without Neon is not the answer: a fresh one is made, and agy still lists it.
         cache = self.a.CRED_RUN / "antigravity-models.json"
         listed = json.loads(cache.read_text())
         listed["models"] = [m for m in listed["models"] if m["id"] != "gemini-4-neon"]
         cache.write_text(json.dumps(listed))
+        self.age_listing()
         self.assertTrue(self.req(op="start", pubkey=agent.name)["ok"], "a fresh listing at start: Neon is still offered")
-        calls = (self.home / "listings.txt").read_text().count("agy ")
+        # The plan changes: agy no longer lists Neon (a key-only listing has none).
+        calls = self.listings()
         (self.home / "agy-no-neon.txt").write_text("x")
+        self.age_listing()
         refused = self.req(op="start", pubkey=agent.name)
         self.assertEqual(refused["error"], "Antigravity does not offer the model gemini-4-neon on this machine. Choose another model for this agent.")
-        self.assertGreater((self.home / "listings.txt").read_text().count("agy "), calls)
+        self.assertGreater(self.listings(), calls)
+
+    def test_agents_starting_within_the_listings_ttl_share_it_and_an_old_or_failed_one_is_made_again(self):
+        self.assertTrue(self.sign_in_google()["ok"])
+        first, second = self.make_agent("antigravity"), self.make_agent("antigravity")
+        self.assertTrue(self.req(op="settings.set", pubkey=first.name, model="gemini-4-neon", effort="xhigh")["ok"])
+        made = self.listings()
+        self.assertTrue(self.req(op="start", pubkey=first.name)["ok"])
+        self.assertTrue(self.req(op="start", pubkey=second.name)["ok"])
+        self.assertEqual(self.listings(), made, "a listing minutes old serves every start: no ACP session each, none waiting on the other's")
+        launch = json.loads((first / "launch.json").read_text())
+        self.assertEqual((launch["model"], launch["checked"]), ("gemini-4-neon", True), "checked against it, not run unchecked")
+        self.age_listing()
+        self.assertTrue(self.req(op="start", pubkey=first.name)["ok"])
+        self.assertEqual(self.listings(), made + 1, "older than AGY_MODELS_TTL: made again, once")
+        self.assertTrue(self.req(op="start", pubkey=second.name)["ok"])
+        self.assertEqual(self.listings(), made + 1)
+        # A listing that could not be remade is not stood in for by the rows it kept.
+        self.age_listing()
+        (self.home / "agy-list-fail.txt").write_text("x")
+        self.assertIn("cannot be checked", self.req(op="start", pubkey=first.name)["error"])
+        (self.home / "agy-list-fail.txt").unlink()
+        self.assertTrue(self.req(op="start", pubkey=first.name)["ok"])
+        self.assertEqual(self.listings(), made + 3, "tried at the failure, and again after it")
 
     def test_a_key_google_lists_no_runnable_model_for_is_refused_at_start(self):
         base = "https://generativelanguage.googleapis.com/v1beta"
@@ -2254,6 +2290,7 @@ class Antigravity(DeviceBase):
         self.assertTrue(self.req(op="start", pubkey=agent.name)["ok"])
         get = self.a.http_get_json
         self.a.http_get_json = lambda url, headers, timeout=20: (403, {"error": {"status": "PERMISSION_DENIED"}}) if "pageSize" in url else get(url, headers, timeout)
+        self.age_listing("antigravity-key")
         self.assertEqual(self.req(op="start", pubkey=agent.name)["error"],
                          f"Antigravity could not check {OWNER}'s API key with Google just now. Try again in a moment, or add the key again.")
 
@@ -2291,6 +2328,7 @@ class Antigravity(DeviceBase):
         chosen, default = self.make_agent("antigravity"), self.make_agent("antigravity")
         self.assertTrue(self.req(op="settings.set", pubkey=chosen.name, model="gemini-4-neon", effort="xhigh")["ok"])
         (self.home / "agy-list-fail.txt").write_text("x")
+        self.age_listing()
         self.assertEqual(self.req(op="start", pubkey=chosen.name)["error"],
                          "Antigravity could not list its models on this machine just now, so gemini-4-neon at xhigh cannot be checked. Try again in a moment.")
         (self.home / "agy-list-fail.txt").unlink()
@@ -2298,6 +2336,7 @@ class Antigravity(DeviceBase):
         self.assertTrue(self.req(op="settings.set", pubkey=thinking.name, effort="low")["ok"])
         self.assertEqual(self.wait_env(thinking)["BUZZ_ACP_MODEL"], "gemini-4-carbon-low")
         (self.home / "agy-list-fail.txt").write_text("x")
+        self.age_listing()
         self.assertEqual(self.req(op="start", pubkey=thinking.name)["error"],
                          "Antigravity could not list its models on this machine just now, so the default model at low cannot be checked. Try again in a moment.",
                          "a Thinking choice alone is a choice")

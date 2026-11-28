@@ -269,6 +269,7 @@
         "host.spawn(1).args",
         "host.spawn(1).cwd",
         "host.spawn(1).onStdout",
+        "host.spawn(1).onStderr",
         "host.spawn=>.write",
         "host.spawn=>.end",
         "host.spawn=>.kill",

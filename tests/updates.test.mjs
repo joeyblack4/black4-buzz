@@ -25,10 +25,12 @@ function world({ candidate = { token: "t1", id: "ai.black4", installedRevision: 
     queueUpdates: (tokens) => { queued.push(tokens); return { id: "q" }; },
   };
   const notices = { show: (content) => { shown.push(content); return new Promise((resolve) => { close = resolve; }); } };
+  const changes = []; // what Settings would draw after each onChange
   const watch = createUpdateWatch({
     pluginId: "ai.black4", updates, notices,
     storage: { getItem: (key) => values.get(key) ?? null, setItem: (key, value) => values.set(key, value) },
     now: () => clock,
+    onChange: () => changes.push(watch.status()),
     timers: {
       setTimeout: (fn, ms) => { const id = nextTimer++; timers.set(id, { fn, at: clock + ms }); return id; },
       clearTimeout: (id) => timers.delete(id),
@@ -36,7 +38,7 @@ function world({ candidate = { token: "t1", id: "ai.black4", installedRevision: 
     },
   });
   return {
-    watch, shown, queued, values,
+    watch, shown, queued, values, changes,
     close: async (action) => { close(action); await settle(); },
     later: (ms) => { clock += ms; for (const [id, timer] of [...timers]) if (timer.at <= clock) { timers.delete(id); timer.fn(); } },
     publish: (next) => { current = next; for (const listener of listeners) listener(); },
@@ -96,6 +98,44 @@ test("no candidate for this plugin: nothing shown, nothing refused; another plug
   assert.equal(w.shown.length, 0);
   assert.equal(w.watch.status(), null);
   assert.equal(w.watch.refusal(), null);
+});
+
+test("the day runs out while Buzz is open: Settings flips to Update required and the notice says the tools are paused, without a restart", async () => {
+  const w = world();
+  w.watch.start();
+  assert.equal(w.shown[0].title, "Update Black 4");
+  assert.deepEqual(w.changes.map((status) => status.overdue), [false], "Settings drew Update ready when the update appeared");
+  w.later(23 * HOUR);
+  assert.equal(w.watch.refusal(), null, "still within the day");
+  assert.equal(w.watch.status().overdue, false);
+  assert.equal(w.shown.length, 1);
+  w.later(HOUR + 1);
+  assert.equal(w.watch.refusal(), UPDATE_REQUIRED_TEXT, "the tools pause");
+  assert.deepEqual(w.changes.map((status) => status.overdue), [false, true], "and Settings is told to draw Update required at that moment");
+  assert.equal(w.shown.length, 2, "the notice on screen is replaced");
+  assert.equal(w.shown[1].title, "Update Black 4 now");
+  assert.match(w.shown[1].description, /tools are paused/);
+  // Closed earlier, waiting for its hourly return: the flip still redraws Settings.
+  const closed = world();
+  closed.watch.start();
+  await closed.close("later");
+  closed.later(24 * HOUR + 1);
+  assert.equal(closed.watch.refusal(), UPDATE_REQUIRED_TEXT);
+  assert.deepEqual(closed.changes.map((status) => status.overdue), [false, true]);
+  assert.equal(closed.shown.at(-1).title, "Update Black 4 now");
+  // Updated in time: the clock is dropped with the candidate, nothing flips later.
+  const current = world();
+  current.watch.start();
+  current.publish(null);
+  assert.equal(current.changes.length, 2);
+  current.later(25 * HOUR);
+  assert.equal(current.changes.length, 2);
+  assert.equal(current.watch.refusal(), null);
+  current.watch.stop();
+});
+
+test("the refusal tells the agent exactly where the person updates", () => {
+  for (const place of ["Update now", "Settings → Black 4", "Settings → Plugins", "Update Black 4 now"]) assert.ok(UPDATE_REQUIRED_TEXT.includes(place), place);
 });
 
 test("an older Buzz without the update or notice services: the watch does nothing", () => {

@@ -305,3 +305,57 @@ test("the native screens draw in Buzz's own parts: no stylesheet or colours of t
   assert.doesNotMatch(text, /text-danger/, "loading is not a fault");
   assert.match(text, /aria-busy/, "a skeleton in the real layout while it loads");
 });
+
+test("large catalogs register only direct entry tools plus black4_find_tools and black4_call_tool", async (t) => {
+  const large = [
+    { name: "whoami", description: "Identity", inputSchema: { type: "object" } },
+    { name: "list_businesses", description: "Businesses", inputSchema: { type: "object" } },
+    { name: "resolve_channel_business", description: "Resolve channel", inputSchema: { type: "object", required: ["channelId"] } },
+    { name: "start_review", description: "Start a review", inputSchema: { type: "object", properties: { threadId: { type: "string" } } } },
+    { name: "search_shopify_products", description: "Search live Shopify products", inputSchema: { type: "object", properties: { query: { type: "string" } } }, annotations: { readOnlyHint: true } },
+    { name: "sign_hardware_request", description: "Sign hardware", inputSchema: { type: "object" } },
+    { name: "renew_signin", description: "Renew sign-in", inputSchema: { type: "object" } },
+    { name: "decide_review_item", description: "Decide item", inputSchema: { type: "object" }, _meta: { ui: { visibility: ["app"] } } },
+    ...Array.from({ length: 18 }, (_, i) => ({ name: `extra_tool_${i}`, description: `Extra tool ${i}`, inputSchema: { type: "object" } })),
+  ];
+  const h = await harness(t, { tools: large });
+  await settle();
+  assert.deepEqual(
+    [...h.registered.keys()].sort(),
+    ["black4_call_tool", "black4_find_tools", "black4_list_businesses", "black4_resolve_channel_business", "black4_whoami"],
+  );
+  assert.match(h.registered.get("black4_whoami").description, /black4_find_tools/);
+
+  // find_tools discovers deferred tools and excludes pass/renew/app-only tools
+  const found = JSON.parse(await h.registered.get("black4_find_tools").call({}, {}, { query: "shopify" }));
+  assert.equal(found.total, 1);
+  assert.equal(found.tools[0].name, "search_shopify_products");
+  assert.equal(found.tools[0].readOnly, true);
+
+  const allFound = JSON.parse(await h.registered.get("black4_find_tools").call({}, {}, { limit: 50 }));
+  const allNames = allFound.tools.map((tool) => tool.name);
+  assert.equal(allNames.includes("sign_hardware_request"), false);
+  assert.equal(allNames.includes("renew_signin"), false);
+  assert.equal(allNames.includes("decide_review_item"), false);
+
+  // call_tool invokes deferred tools (with or without prefix) and preserves guardrails + defaults
+  const res = await h.registered.get("black4_call_tool").call({ key: "agent" }, {}, { name: "black4_search_shopify_products", arguments: { query: "tree" } });
+  assert.equal(res, "readable result");
+  assert.deepEqual(h.mcp.calls.at(-1).params, { name: "search_shopify_products", arguments: { query: "tree" } });
+
+  await h.registered.get("black4_call_tool").call({ key: "agent" }, { channel: "ch-1", root: "thread-1" }, { name: "start_review", arguments: { title: "Check" } });
+  assert.deepEqual(h.mcp.calls.at(-1).params, { name: "start_review", arguments: { title: "Check", threadId: "thread-1" } });
+
+  await assert.rejects(
+    h.registered.get("black4_call_tool").call({ key: "agent" }, {}, { name: "sign_hardware_request", arguments: {} }),
+    /Agents cannot mint Black 4 hardware passes/,
+  );
+  await assert.rejects(
+    h.registered.get("black4_call_tool").call({ key: "agent" }, {}, { name: "renew_signin", arguments: {} }),
+    /Agents cannot renew/,
+  );
+  await assert.rejects(
+    h.registered.get("black4_call_tool").call({ key: "agent" }, {}, { name: "decide_review_item", arguments: {} }),
+    /Agents cannot decide/,
+  );
+});

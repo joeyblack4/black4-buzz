@@ -21,6 +21,23 @@
 export const inject = ["react", "host", "agents", "settingsCards", "panels", "browser", "conversation", "pages", "relay"];
 
 const PREFIX = "black4_";
+/** When Black 4 lists more than AGENT_DIRECT_LIMIT agent-eligible tools,
+ * register only AGENT_DIRECT_TOOLS directly in Buzz plus `black4_find_tools`
+ * and `black4_call_tool`. Keeps Buzz's total MCP tool count well under host
+ * caps (e.g. Antigravity / OpenAI 128-tool limits) so core Buzz tools like
+ * `send` and `read` are never crowded out, while keeping every Black 4 tool
+ * reachable through the gateway. */
+export const AGENT_DIRECT_LIMIT = 16;
+export const AGENT_DIRECT_TOOLS = Object.freeze([
+  "whoami",
+  "list_businesses",
+  "get_business",
+  "get_business_context",
+  "get_goals_and_jobs",
+  "resolve_channel_business",
+  "list_skills",
+  "get_skill",
+]);
 const CALL_TIMEOUT_MS = 5 * 60 * 1000;
 const START_TIMEOUT_MS = 10 * 60 * 1000; // a first browser sign-in can take a while
 const RETRY_DELAYS_MS = [5000, 15000, 60000, 300000];
@@ -697,6 +714,10 @@ export function apply(ctx) {
   const textOf = agentText;
   /** Tools the server listed as app-only: never offered, refused by name. */
   let appOnlyNames = new Set();
+  /** Agent-eligible tools omitted from direct Buzz registration when the
+   * server catalog exceeds AGENT_DIRECT_LIMIT; searched by black4_find_tools
+   * and invoked by black4_call_tool. */
+  let deferredTools = new Map();
 
   const toolCall = (name) => async (client, context, args) => {
     // Only this plugin's own hardware provider mints door passes. An agent's
@@ -749,40 +770,143 @@ export function apply(ctx) {
     return text;
   };
 
+  const registerOne = (tool, instructions, { compact = false } = {}) => {
+    const name = PREFIX + tool.name;
+    if (registered.has(name)) return;
+    let description = `Black 4: ${tool.description ?? tool.title ?? tool.name}`;
+    if (tool.name === "whoami") {
+      if (instructions) description = `${description}\n\n${instructions}`;
+      if (compact) description += "\n\nUse black4_find_tools and black4_call_tool to discover and run any other Black 4 tool.";
+    }
+    if (tool.name === "resolve_channel_business") {
+      description +=
+        "\n\nIn Buzz, channelId and communityId default to the channel you are working in.";
+    }
+    const inputSchema =
+      tool.inputSchema && tool.inputSchema.type === "object" ? tool.inputSchema : { type: "object", properties: {} };
+    const schema =
+      tool.name === "resolve_channel_business"
+        ? { ...inputSchema, required: (inputSchema.required ?? []).filter((key) => key !== "channelId") }
+        : inputSchema;
+    try {
+      const handle = ctx.agents.addTool({
+        name,
+        description: description.slice(0, 8000),
+        inputSchema: schema,
+        call: toolCall(tool.name),
+      });
+      registered.set(name, typeof handle === "function" ? handle : handle?.dispose?.bind(handle) ?? null);
+    } catch (error) {
+      note(`Buzz refused ${name}: ${error?.message ?? error}`);
+    }
+  };
+
+  const registerGateway = () => {
+    const findName = PREFIX + "find_tools";
+    if (!registered.has(findName)) {
+      try {
+        const handle = ctx.agents.addTool({
+          name: findName,
+          description: "Black 4: Search the rest of Black 4's tools by keyword (query) and return their descriptions and input schemas, then invoke any of them with black4_call_tool.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              query: { type: "string", description: "Keywords to search tool names and descriptions (omit to list tools)." },
+              limit: { type: "integer", description: "Maximum tools to return (default 15, max 50)." },
+            },
+          },
+          call: async (client, context, args) => {
+            const rawQuery = String(args?.query ?? "").toLowerCase();
+            const words = rawQuery.split(/\W+/).filter((word) => word.length > 1);
+            const limit = Math.max(1, Math.min(50, Math.trunc(Number(args?.limit) || 15)));
+            const scoreTool = (tool) => {
+              if (!words.length) return 1;
+              const n = String(tool.name ?? "").replace(/_/g, " ").toLowerCase();
+              const t = `${tool.title ?? ""} ${tool.description ?? ""}`.toLowerCase();
+              return words.reduce((sum, word) => sum + (n.includes(word) ? 3 : 0) + (t.includes(word) ? 1 : 0), 0);
+            };
+            const matched = [...deferredTools.values()]
+              .map((tool) => ({ tool, score: scoreTool(tool) }))
+              .filter((entry) => entry.score > 0)
+              .sort((a, b) => b.score - a.score || a.tool.name.localeCompare(b.tool.name));
+            const out = matched.slice(0, limit).map(({ tool }) => ({
+              name: tool.name,
+              description: tool.description ?? tool.title ?? tool.name,
+              readOnly: tool.annotations?.readOnlyHint === true,
+              inputSchema: tool.inputSchema && tool.inputSchema.type === "object" ? tool.inputSchema : { type: "object", properties: {} },
+            }));
+            return JSON.stringify({
+              tools: out,
+              total: matched.length,
+              hint: "Run any tool with black4_call_tool({ name, arguments }).",
+            });
+          },
+        });
+        registered.set(findName, typeof handle === "function" ? handle : handle?.dispose?.bind(handle) ?? null);
+      } catch (error) {
+        note(`Buzz refused ${findName}: ${error?.message ?? error}`);
+      }
+    }
+    const callName = PREFIX + "call_tool";
+    if (!registered.has(callName)) {
+      try {
+        const handle = ctx.agents.addTool({
+          name: callName,
+          description: "Black 4: Run any Black 4 tool discovered with black4_find_tools by its name and arguments.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              name: { type: "string", description: "Tool name from black4_find_tools (with or without the black4_ prefix)." },
+              arguments: { type: "object", description: "Arguments matching the tool's inputSchema." },
+            },
+            required: ["name"],
+          },
+          call: async (client, context, args) => {
+            const raw = String(args?.name ?? "").trim();
+            const target = raw.toLowerCase().startsWith(PREFIX) ? raw.slice(PREFIX.length) : raw;
+            const targetArgs = args?.arguments && typeof args.arguments === "object" ? args.arguments : {};
+            if (!target) throw new Error("black4_call_tool requires a tool name. Use black4_find_tools to search available tools.");
+            if (mintsPass(target, targetArgs)) throw new Error(PASS_REFUSED);
+            if (renews(target, targetArgs)) throw new Error(RENEW_REFUSED);
+            if (decides(target, targetArgs, appOnlyNames)) throw new Error(DECIDE_REFUSED);
+            if (listedNames.has(target)) return toolCall(target)(client, context, targetArgs);
+            if (listedNames.has("call_tool")) return toolCall("call_tool")(client, context, { name: target, arguments: targetArgs });
+            throw new Error(`Unknown Black 4 tool: ${target}. Use black4_find_tools to search available tools.`);
+          },
+        });
+        registered.set(callName, typeof handle === "function" ? handle : handle?.dispose?.bind(handle) ?? null);
+      } catch (error) {
+        note(`Buzz refused ${callName}: ${error?.message ?? error}`);
+      }
+    }
+  };
+
   const register = (tools, instructions) => {
+    const eligible = [];
     for (const tool of tools) {
-      const name = PREFIX + tool.name;
-      if (registered.has(name)) continue;
       if (mintsPass(tool.name) || renews(tool.name)) continue; // never offered to agents
       if (appOnly(tool)) { appOnlyNames.add(String(tool.name).trim().toLowerCase()); continue; } // the person's click only
+      const name = PREFIX + tool.name;
       if (!/^[a-z][a-z0-9_]{0,63}$/.test(name)) {
         note(`Skipped a tool whose name Buzz refuses: ${tool.name}`);
         continue;
       }
-      let description = `Black 4: ${tool.description ?? tool.title ?? tool.name}`;
-      if (tool.name === "whoami" && instructions) description = `${description}\n\n${instructions}`;
-      if (tool.name === "resolve_channel_business") {
-        description +=
-          "\n\nIn Buzz, channelId and communityId default to the channel you are working in.";
-      }
-      const inputSchema =
-        tool.inputSchema && tool.inputSchema.type === "object" ? tool.inputSchema : { type: "object", properties: {} };
-      const schema =
-        tool.name === "resolve_channel_business"
-          ? { ...inputSchema, required: (inputSchema.required ?? []).filter((key) => key !== "channelId") }
-          : inputSchema;
-      try {
-        const handle = ctx.agents.addTool({
-          name,
-          description: description.slice(0, 8000),
-          inputSchema: schema,
-          call: toolCall(tool.name),
-        });
-        registered.set(name, typeof handle === "function" ? handle : handle?.dispose?.bind(handle) ?? null);
-      } catch (error) {
-        note(`Buzz refused ${name}: ${error?.message ?? error}`);
-      }
+      eligible.push(tool);
     }
+    deferredTools = new Map();
+    const compact = eligible.length > AGENT_DIRECT_LIMIT;
+    if (!compact) {
+      for (const tool of eligible) registerOne(tool, instructions);
+      update({ tools: registered.size });
+      return;
+    }
+    const direct = new Set(AGENT_DIRECT_TOOLS);
+    for (const tool of eligible) {
+      if (tool.name === "find_tools" || tool.name === "call_tool") continue;
+      if (direct.has(tool.name)) registerOne(tool, instructions, { compact: true });
+      else deferredTools.set(tool.name, tool);
+    }
+    registerGateway();
     update({ tools: registered.size });
   };
 

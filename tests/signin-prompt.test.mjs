@@ -321,6 +321,8 @@ test("Sign in opens the browser at the link that carries the code, once, and sho
   assert.equal(link.props.href, `${AUTHKIT}/device?user_code=WDJB-MJHT`, "the page can be opened again");
   assert.equal(link.props.target, "_blank");
   assert.match(text(view), /Confirm it in your browser/);
+  // WorkOS asks someone in several companies to pick one; whichever they pick, they get every company.
+  assert.match(text(view), /choose any one: you get every company you belong to/);
   assert.ok(button(view, "Cancel"));
   assert.equal(find(view, (n) => n.type === "form"), null, "never a form");
   await app.connected();

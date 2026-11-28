@@ -57,6 +57,18 @@ function reviewsPart(ctx, bridge) {
   const disposers = [];
   const own = (dispose) => { if (typeof dispose === "function") disposers.push(dispose); else if (dispose?.dispose) disposers.push(() => dispose.dispose()); };
 
+  // ---- who is signed in, and Sign out, where Reviews shows ---------------------
+  // Signing out lived only in Settings → Black 4 (Joey, 2026-11-28: "extremely hard to sign out of"):
+  // every Reviews header names the account and carries Sign out. `wide`: the page, with room for the address.
+  function accountActions(link, wide) {
+    if (!bridge.signOut || link.status !== "connected") return [];
+    const email = link.account?.email ?? "";
+    return [
+      wide && email ? h(React.Fragment, { key: "account" }, ui.Value(email)) : null,
+      h(ui.Button, { key: "sign-out", size: "sm", variant: "outline", title: email ? `Sign out of Black 4 (${email})` : "Sign out of Black 4", onClick: () => bridge.signOut() }, "Sign out"),
+    ].filter(Boolean);
+  }
+
   // ---- what the page shows: shared with the sidebar and notifications ----------
   // `goals`: the goal chosen per business ("" for all of them), for the session.
   let view = { filter: null, entry: null, goals: {} };
@@ -222,7 +234,7 @@ function reviewsPart(ctx, bridge) {
     const detail = current.entry
       ? h(ReviewItem, { key: "item", entry: current.entry, step, onCommand, bar: bulkBar })
       : link.status === "connected" && queue ? (bulkBar ? h(ui.Subview, { header: null, footer: bulkBar }, h(ui.PanelBody, null, empty)) : empty) : null;
-    return h(ui.Page, { label: "Reviews", fill: true, header: h(ui.PanelHeader, { title: "Reviews", glyph: "decisions", actions: [h(ui.IconButton, { key: "refresh", label: "Refresh", glyph: "refresh", large: true, onClick: () => bridge.queue.refresh() })] }),
+    return h(ui.Page, { label: "Reviews", fill: true, header: h(ui.PanelHeader, { title: "Reviews", glyph: "decisions", actions: [...accountActions(link, true), h(ui.IconButton, { key: "refresh", label: "Refresh", glyph: "refresh", large: true, onClick: () => bridge.queue.refresh() })] }),
       onFocus: focusIn, onBlur: focusOut },
       h(ui.Split, { key: "split", label: "Decisions waiting", list, listHeader, detail }));
   }
@@ -252,7 +264,7 @@ function reviewsPart(ctx, bridge) {
       // The whole queue's total, else the server's total for what is shown.
       const waiting = work.exact ? work.queue?.total : work.order.length;
       body = h(ui.Subview, { header: h(ui.PanelHeader, { title: waiting ? `${waiting} waiting` : "Reviews",
-        actions: [h(ui.IconButton, { key: "refresh", label: "Refresh", glyph: "refresh", large: true, onClick: () => bridge.queue.refresh() })] }) }, h(ui.PanelBody, null, list));
+        actions: [...accountActions(link, false), h(ui.IconButton, { key: "refresh", label: "Refresh", glyph: "refresh", large: true, onClick: () => bridge.queue.refresh() })] }) }, h(ui.PanelBody, null, list));
     }
     surface = { next: step.next, previous: step.previous };
     React.useEffect(() => () => { surface = null; surfaceFocused = false; }, []);

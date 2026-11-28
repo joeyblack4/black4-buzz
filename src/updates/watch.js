@@ -20,7 +20,8 @@ export const UPDATE_OVERDUE_REMIND_MS = 15 * 60 * 1000;
 export const UPDATE_GRACE_MS = 24 * 60 * 60 * 1000;
 export const UPDATE_REQUIRED_TEXT =
   "The Black 4 plugin in this Buzz is out of date, so Black 4's tools are paused here until it is updated. " +
-  "Ask the person to choose Update now on the \"Update Black 4\" notice (or Settings → Plugins → Black 4 → Update), then try again.";
+  "Ask the person to update it in Buzz: choose Update now on the \"Update Black 4 now\" notice or in Settings → Black 4, " +
+  "or Update next to Black 4 in Settings → Plugins. Buzz installs it in a few seconds; then try again.";
 
 /**
  * The update watch for one activation. `updates` is Buzz's
@@ -33,6 +34,7 @@ export function createUpdateWatch({ pluginId, updates, notices, storage, now = (
   let showing = null; // AbortController of the notice on screen
   let closedAt = null;
   let remindTimer = null;
+  let graceTimer = null; // fires when the day is up, so the screen flips as the tools pause
   let checkTimer = null;
   let stopped = false;
 
@@ -53,7 +55,7 @@ export function createUpdateWatch({ pluginId, updates, notices, storage, now = (
     try { snapshot = updates?.getSnapshot?.(); } catch { return; }
     const candidate = snapshot?.candidates?.find?.((entry) => entry?.id === pluginId);
     if (!candidate) {
-      if (pending) { pending = null; hide(); onChange(); }
+      if (pending) { pending = null; hide(); disarmGrace(); onChange(); }
       return;
     }
     const seen = readSeen();
@@ -64,7 +66,27 @@ export function createUpdateWatch({ pluginId, updates, notices, storage, now = (
     const changed = !pending || pending.candidate !== candidate.candidateRevision || pending.token !== candidate.token;
     pending = { token: candidate.token, installed: candidate.installedRevision, candidate: candidate.candidateRevision, since };
     if (changed) onChange();
+    armGrace();
     schedule();
+  };
+
+  /** The moment the tools pause is the moment the screen says so: when the
+   * day runs out while Buzz is open, Settings flips to "Update required" and
+   * the notice on screen is replaced by the one that says the tools are
+   * paused, without a restart. Timed in hops of at most an hour, so a laptop
+   * asleep past the deadline catches up on its first hop. */
+  const disarmGrace = () => { if (graceTimer) { timers.clearTimeout(graceTimer); graceTimer = null; } };
+  const armGrace = () => {
+    disarmGrace();
+    if (stopped || !pending || overdue()) return;
+    const wait = pending.since + UPDATE_GRACE_MS - now();
+    graceTimer = timers.setTimeout(() => {
+      graceTimer = null;
+      if (stopped || !pending) return;
+      if (!overdue()) return armGrace();
+      onChange();
+      if (showing) { hide(); schedule(); }
+    }, Math.max(0, Math.min(wait, UPDATE_REMIND_MS)));
   };
 
   /** Opens Buzz's Update review for this plugin; a stale token is refreshed once. */
@@ -135,6 +157,7 @@ export function createUpdateWatch({ pluginId, updates, notices, storage, now = (
       hide();
       unsubscribe();
       if (remindTimer) timers.clearTimeout(remindTimer);
+      disarmGrace();
       if (checkTimer) timers.clearInterval(checkTimer);
     },
     /** null when current (or unknown); else the update and whether it is overdue. */

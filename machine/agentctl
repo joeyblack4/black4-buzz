@@ -2341,6 +2341,12 @@ EFFORT_ID = re.compile(r"^[a-z]{1,16}$")
 CLAUDE_MODELS_TTL = 24 * 3600  # the Claude listing is made again after this
 CLAUDE_MODELS_FAIL_TTL = 10 * 60  # a failed one is tried again after this, doubling
 CLAUDE_MODELS_FAIL_MAX = 6 * 3600  # up to this
+# Antigravity's listing proves the plan still offers the chosen model, so a
+# start trusts one only this long (as long as a good sign-in check, CHECK_OK_TTL)
+# and never one that a later attempt failed to remake. Within it, agents
+# restarting together (a deploy, a crash loop) share one listing instead of
+# each making its own ACP session in turn.
+AGY_MODELS_TTL = CHECK_OK_TTL
 MODELS_WAIT = 8.0  # the models op waits this long for a Claude listing under way
 
 
@@ -2493,10 +2499,13 @@ def model_source(slot):
 def refresh_models(harness, wait=False, force=False):
     """Makes this harness's listing again for the stored sign-in, at most one
     at a time (run/<harness>-models.lock); returns at once if one is running,
-    unless `wait`. A listing that fails (a usage limit, offline) keeps the last
-    good one, and is tried again after 10 minutes, then 20, 40 ... up to 6
-    hours, so Claude's paid one-line call is not repeated while it cannot
-    succeed."""
+    unless `wait`. One still fresh (listing_fresh) is kept unless `force`, so
+    waiting callers find the listing the first of them made. A listing that
+    fails (a usage limit, offline) keeps the last good one, and is tried again
+    after 10 minutes, then 20, 40 ... up to 6 hours, so Claude's paid one-line
+    call is not repeated while it cannot succeed. True: a listing stands
+    (made just now, or fresh); False: no sign-in, or it could not be made;
+    None: another is running."""
     signin, lister = model_source(harness)
     lock = open(private_dir(CRED_RUN) / f"{harness}-models.lock", "a")
     try:
@@ -2506,7 +2515,7 @@ def refresh_models(harness, wait=False, force=False):
         if not token: return False
         cache = read_json(CRED_RUN / f"{harness}-models.json", {}) or {}
         if cache.get("hash") != token_hash(token): cache = {}  # another sign-in: nothing of the last one holds
-        elif not force and not models_stale(cache): return True
+        elif not force and listing_fresh(harness, cache): return True
         models = lister()
         now = time.time()
         if models is not None:
@@ -2528,6 +2537,17 @@ def refresh_claude_models(wait=False):
 def models_stale(cache):
     if cache.get("retryAt"): return time.time() >= cache["retryAt"]
     return not cache.get("models") or time.time() - (cache.get("at") or 0) >= CLAUDE_MODELS_TTL
+
+
+def listing_fresh(harness, cache):
+    """Whether the last listing stands in for one made now. Claude's holds a
+    day (and a failed one waits out its backoff, so its paid call is not
+    repeated). Antigravity's, which a start checks the chosen model against,
+    holds AGY_MODELS_TTL from when it was made, and not past a failed
+    attempt to remake it: a failure, not the old rows, is then the answer."""
+    if harness_of(harness) != "antigravity": return not models_stale(cache)
+    at = cache.get("at") or 0
+    return cache.get("models") is not None and time.time() - at < AGY_MODELS_TTL and (cache.get("failedAt") or 0) <= at
 
 
 def cached_models(harness, spawn=True):
@@ -2759,13 +2779,14 @@ def _start(d):
     # failure is not retried here.
     # Antigravity's listing is one ACP session and calls no model, and buzz-acp
     # runs agy's default without a word when the chosen id is not in it (a
-    # plan changed): so it is made again at every start, and the choice is
-    # checked against that listing only. When it cannot be made, a chosen
-    # model or thinking level, and any agent on a key, is refused (the last
-    # listing proves nothing now); a subscription agent on both defaults runs
-    # agy's own default, named as unchecked.
+    # plan changed): so a start checks the choice against a listing made
+    # within AGY_MODELS_TTL only, making it again when the last is older than
+    # that (agents restarting together share one). When it cannot be made, a
+    # chosen model or thinking level, and any agent on a key, is refused (the
+    # last listing proves nothing now); a subscription agent on both defaults
+    # runs agy's own default, named as unchecked.
     if harness == "antigravity":
-        if refresh_models(slot, wait=True, force=True):
+        if refresh_models(slot, wait=True):
             if offered(slot) == []:
                 fail(f"Google lists no model Antigravity can run for {ACCOUNT}'s {'API key' if pays == 'key' else 'sign-in'}.")
             picked = choice(harness, s)

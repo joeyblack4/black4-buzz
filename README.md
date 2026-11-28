@@ -2,7 +2,7 @@
 
 Status: current  
 Owner: Black 4 platform  
-Updated: 2026-11-27
+Updated: 2026-11-28
 
 Black 4 runs its AI workforce in [Buzz](https://github.com/block/buzz-app).
 Buzz stays stock, so it can be updated at any time; everything Black 4 adds is
@@ -366,6 +366,16 @@ update that asks for more computer access needs a review first. A plugin loaded
 from a folder gets no such check. `stable` is what people run; `main` is where
 work lands. Releasing is moving `stable` to a tested commit on `main`.
 
+Everyone works on the released Black 4 plugin. Once Buzz finds a newer
+`stable`, the plugin keeps serving the update: an **Update Black 4** notice
+with **Update now** (back an hour after it is closed, and on every launch) and
+an **Update ready** row in Settings → Black 4. A day after the update was
+first seen on that computer, Black 4's agent tools answer "update first"
+until it is installed; at that moment, Buzz open or not, the notice becomes
+**Update Black 4 now** and the row **Update required**. The person updates
+with any of **Update now** (the notice or Settings → Black 4) or **Update**
+next to Black 4 in Settings → Plugins; Buzz installs it in a few seconds.
+
 A Mac managed for Black 4 can list the plugin in Buzz's
 `managed-plugins.json` so Settings shows it as recommended, pinned to an exact
 commit. Buzz never installs it without the person's click.
@@ -575,7 +585,10 @@ plan, then paste the code antigravity.google shows. A Google Workspace account
 gets only Antigravity's starter models (Gemini 4 Hydrogen and Flash); Gemini 4
 Neon, Carbon and Argon need Google AI Pro or Ultra on a personal Google
 account. Model and Thinking list exactly what Antigravity offers that account,
-and each turn stops before any model call unless Antigravity confirms both.
+and each turn stops before any model call unless Antigravity confirms both. A
+new agent names no model of its own and runs the one Antigravity picks for
+that account (shown in Model once the account is checked), so **Create** is
+ready on every plan; choose a model there to pin one.
 
 Then open **Agents → New agent**, choose the type, and use **Install CLI** and
 **Sign in** if the tool is not set up yet. Each person uses their own

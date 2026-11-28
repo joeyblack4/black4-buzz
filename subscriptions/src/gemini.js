@@ -5,7 +5,9 @@ register(async(delivery,conversation,key)=>{
  delivery.signal.addEventListener('abort',stop,{once:true});delivery.interruptible?.(stop);
  try{
   c=await context(delivery,conversation,key);
-  const model=delivery.model||delivery.config?.model||spec.defaultModel,effort=delivery.effort||delivery.config?.effort;
+  // No model of its own: the agent runs the one Antigravity picks for this
+  // account (plans list different models), so nothing is set or confirmed.
+  const model=delivery.model||delivery.config?.model||'',effort=delivery.effort||delivery.config?.effort;
   client=await rpc([],{cwd:c.cwd,allowTools:true,onUpdate:u=>{if(u?.sessionUpdate==='agent_message_chunk'&&u.content?.text){text+=u.content.text;if(text.length>8000000)void stop();}}});
   if(stopped||disposed||delivery.signal.aborted){await stop();return;}
   await client.request('initialize',{protocolVersion:1,clientCapabilities:{}});
@@ -17,8 +19,8 @@ register(async(delivery,conversation,key)=>{
   if(!id)throw new Error('Antigravity did not create a session.');
   // Antigravity confirms each choice in its answer; a model or Thinking level
   // it does not confirm stops the turn before anything is sent to a model.
-  const selected=await client.request('session/set_config_option',{sessionId:id,configId:'model',value:model});
-  if(!selected.configOptions?.some(o=>o.id==='model'&&o.currentValue===model))throw new Error('Antigravity did not confirm the model '+model+'.');
+  if(model){const selected=await client.request('session/set_config_option',{sessionId:id,configId:'model',value:model});
+   if(!selected.configOptions?.some(o=>o.id==='model'&&o.currentValue===model))throw new Error('Antigravity did not confirm the model '+model+'.');}
   if(effort){const thought=await client.request('session/set_config_option',{sessionId:id,configId:'thought_level',value:effort});
    if(!thought.configOptions?.some(o=>o.id==='thought_level'&&o.currentValue===effort))throw new Error('Antigravity did not confirm the Thinking level '+effort+'.');}
   delivery.acknowledged?.();consumed=true;

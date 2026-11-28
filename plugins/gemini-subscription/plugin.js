@@ -1,6 +1,6 @@
 export const inject = ["agents", "host", "react"];
 export function apply(ctx) {
-const spec = {"provider": "gemini", "title": "Gemini Sub Plugin", "defaultModel": "gemini-4-neon"};
+const spec = {"provider": "gemini", "title": "Gemini Sub Plugin", "defaultModel": "gemini-4-hydrogen"};
 const {agents, host, react: R} = ctx, h = R.createElement, kit = agents.harness;
 if (!kit || !host.spawn || !host.serveMcp) throw new Error('Update Buzz desktop to use subscription agents.');
 const processes = new Set(), sessions = new Map(), queues = new Map(), listeners = new Set();
@@ -8,6 +8,11 @@ let disposed = false, checking = null, loginProcess = null, loginOutput = '';
 const providerName={claude:'Claude',grok:'Grok',gemini:'Gemini'}[spec.provider];
 let account = {state:'unchecked', message:'Check your subscription account on this computer.'};
 let choices = spec.provider === 'claude' ? ['opus','sonnet','fable'].map(id=>({id,label:id,efforts:['low','medium','high','xhigh','max']})) : [];
+// The model the account runs when an agent names none: Antigravity's own pick
+// for it (its session's current model), known once the account is checked.
+// Plans list different models, so a new Gemini agent names none.
+let accountModel = '';
+const unnamedModel = () => spec.provider === 'gemini' ? '' : spec.defaultModel;
 // The subscription pays, never a key or a cloud project that happens to be in the environment.
 const env = {claude:{ANTHROPIC_API_KEY:null,ANTHROPIC_AUTH_TOKEN:null,ANTHROPIC_BASE_URL:null,CLAUDE_CODE_OAUTH_TOKEN:null,CLAUDE_CODE_USE_BEDROCK:null,CLAUDE_CODE_USE_VERTEX:null,CLAUDE_CODE_USE_FOUNDRY:null},
  grok:{XAI_API_KEY:null,GROK_API_KEY:null},
@@ -75,6 +80,8 @@ async function checkAccount(){
     catch(error){if(/authentication required|not logged in/i.test(String(error.message||error)))throw new Error('Sign in with your Google account.');throw error;}
     choices=geminiChoices(probe);
     if(!choices.length)throw new Error('Antigravity listed no models for this account.');
+    const current=(probe.configOptions||[]).find(o=>o?.category==='model'||o?.id==='model')?.currentValue;
+    accountModel=choices.some(m=>m.id===current)?current:choices[0].id;
     if(probe.sessionId)await client.request('session/close',{sessionId:probe.sessionId}).catch(()=>{});
     const tier=probe._meta?.antigravity?.tier?.name;
     publish({state:'ready',message:'Connected to Antigravity'+(tier?' · '+tier:'')});
@@ -101,6 +108,13 @@ function geminiLogin(output){
  const url=(loginOutput.match(/https:\/\/accounts\.google\.com\/o\/oauth2\/[^\s"'<>]+/)||[])[0];
  if(url&&account.state==='signing-in'&&!account.url)publish({state:'signing-in',url,message:'Sign in with Google on the page that opens, then paste the code it shows.'});
 }
+/** Why a sign-in ended, in agy's own last words (its error line, on either
+ * stream), so a person is not left guessing; never the code or the link. */
+function loginFailure(){
+ const lines=loginOutput.split('\n').map(l=>l.trim()).filter(l=>l&&!/^https?:\/\//.test(l)&&!/paste|press enter|open this link/i.test(l));
+ const said=(lines.at(-1)||'').replace(/^error:\s*/i,'').slice(0,200);
+ return said?'Sign-in did not finish: '+said:'Sign-in was cancelled or did not finish. Try again.';
+}
 async function submitCode(code){
  code=String(code||'').trim();
  if(!loginProcess||!account.url||!code)return;
@@ -112,12 +126,13 @@ async function login(){
  publish({state:'signing-in',message:spec.provider==='gemini'?'Getting a Google sign-in link…':'Finish signing in in your browser, then return here.'});
  let timer;loginOutput='';
  try{
+  // agy writes the link to one stream and its errors to the other: both are read.
   loginProcess=spec.provider==='gemini'
-   ? await spawn(['acp','--login','--disable-telemetry'],{onStdout:geminiLogin})
+   ? await spawn(['acp','--login','--disable-telemetry'],{onStdout:geminiLogin,onStderr:geminiLogin})
    : await spawn(spec.provider==='claude'?['auth','login','--claudeai']:['login','--oauth']);
   timer=setTimeout(()=>void loginProcess?.kill(),300000);
   const code=await loginProcess.exited;
-  if(code!==0)throw new Error(/invalid_grant|malformed/i.test(loginOutput)?'That code was not accepted. Sign in again to get a new link.':'Sign-in was cancelled or did not finish. Try again.');
+  if(code!==0)throw new Error(/invalid_grant|malformed/i.test(loginOutput)?'That code was not accepted. Sign in again to get a new link.':loginFailure());
   sessions.clear();await checkAccount();
  }catch(error){publish({state:'required',message:String(error.message||error)});}finally{clearTimeout(timer);loginProcess=null;loginOutput='';}
 }
@@ -1217,7 +1232,7 @@ function useAccount(){
  R.useEffect(()=>{listeners.add(setState);setState(account);if(account.state==='unchecked')void checkAccount();return()=>listeners.delete(setState);},[]);
  return state;
 }
-const modelOf=config=>config?.model||choices[0]?.id||spec.defaultModel;
+const modelOf=config=>config?.model||accountModel||choices[0]?.id||spec.defaultModel;
 const readyFor=(state,config)=>state.state==='ready'&&choices.some(m=>m.id===modelOf(config)&&(!config?.effort||m.efforts.includes(config.effort)));
 /** Sign-in, as a row: who is signed in (or why not) and the one next step. */
 function SignInRow({disabled}){
@@ -1290,9 +1305,9 @@ function Settings({agent,save,settingsContent,settingsHost,settingsSection}){
 }
 function register(run){agents.register({id:spec.provider,title:spec.title,description:'Personal subscription agent on this computer.',Create,CreateConfiguration:Configuration,CreateModel:Model,createModelReportsReadiness:true,CreateThinking:Thinking,
  tabs:[{id:'settings',title:'Settings',role:'settings',splitSettings:true,component:Settings}],
- defaults:()=>({config:{instructions:'',model:spec.defaultModel,effort:''}}),
- models:agent=>({current:agent.config?.model||spec.defaultModel,models:choices.map(m=>({id:m.id,label:m.label,efforts:m.efforts.map(id=>({id,label:id}))}))}),
- summary:agent=>[agent.config?.model||spec.defaultModel,agent.config?.effort].filter(Boolean).join(' · '),timeoutMs:600000,
+ defaults:()=>({config:{instructions:'',model:unnamedModel(),effort:''}}),
+ models:agent=>({current:modelOf(agent.config),models:choices.map(m=>({id:m.id,label:m.label,efforts:m.efforts.map(id=>({id,label:id}))}))}),
+ summary:agent=>[agent.config?.model||accountModel||choices[0]?.id||unnamedModel()||'Default model',agent.config?.effort].filter(Boolean).join(' · '),timeoutMs:600000,
  protectionUnavailable:'This plugin does not implement protected execution.',
  async run(delivery){const conversation=await kit.conversation(delivery,'thread');if(!conversation){delivery.ignored?.();return;}const key=delivery.agent.key+':'+conversation.key;const next=(queues.get(key)||Promise.resolve()).catch(()=>{}).then(()=>run(delivery,conversation,key));queues.set(key,next);try{await next;}finally{if(queues.get(key)===next)queues.delete(key);}}
 });}
@@ -1314,7 +1329,9 @@ register(async(delivery,conversation,key)=>{
  delivery.signal.addEventListener('abort',stop,{once:true});delivery.interruptible?.(stop);
  try{
   c=await context(delivery,conversation,key);
-  const model=delivery.model||delivery.config?.model||spec.defaultModel,effort=delivery.effort||delivery.config?.effort;
+  // No model of its own: the agent runs the one Antigravity picks for this
+  // account (plans list different models), so nothing is set or confirmed.
+  const model=delivery.model||delivery.config?.model||'',effort=delivery.effort||delivery.config?.effort;
   client=await rpc([],{cwd:c.cwd,allowTools:true,onUpdate:u=>{if(u?.sessionUpdate==='agent_message_chunk'&&u.content?.text){text+=u.content.text;if(text.length>8000000)void stop();}}});
   if(stopped||disposed||delivery.signal.aborted){await stop();return;}
   await client.request('initialize',{protocolVersion:1,clientCapabilities:{}});
@@ -1326,8 +1343,8 @@ register(async(delivery,conversation,key)=>{
   if(!id)throw new Error('Antigravity did not create a session.');
   // Antigravity confirms each choice in its answer; a model or Thinking level
   // it does not confirm stops the turn before anything is sent to a model.
-  const selected=await client.request('session/set_config_option',{sessionId:id,configId:'model',value:model});
-  if(!selected.configOptions?.some(o=>o.id==='model'&&o.currentValue===model))throw new Error('Antigravity did not confirm the model '+model+'.');
+  if(model){const selected=await client.request('session/set_config_option',{sessionId:id,configId:'model',value:model});
+   if(!selected.configOptions?.some(o=>o.id==='model'&&o.currentValue===model))throw new Error('Antigravity did not confirm the model '+model+'.');}
   if(effort){const thought=await client.request('session/set_config_option',{sessionId:id,configId:'thought_level',value:effort});
    if(!thought.configOptions?.some(o=>o.id==='thought_level'&&o.currentValue===effort))throw new Error('Antigravity did not confirm the Thinking level '+effort+'.');}
   delivery.acknowledged?.();consumed=true;

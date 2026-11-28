@@ -267,7 +267,7 @@ function reviewMadeBy(value) {
 
 /** Who made a review item and what set it off, for its byline:
  * `{ maker: { name, pubkey?, signed, app?, person?, personVerified, agent },
- * origin: { kind: job | request | proactive | unknown, text, threadId? } }`.
+ * origin: { kind: job | request | unknown, text, threadId? } }`.
  * Reads Platform Control's `producer` and `origin` (review-artifact slice A):
  * `pubkey` only when the agent's request was signed (`verified.agentKey`), and
  * `signed` only then; everything else is as the agent reported it. Without
@@ -299,10 +299,10 @@ function reviewByline(review, item) {
   if (kind === "job" || (!kind && job && (job.jobName || job.jobId))) {
     const run = kind === "job" ? said.job : job;
     origin = { kind: "job", text: `Scheduled job ${text(run?.jobName, 80) ?? text(run?.jobId, 80) ?? ""}`.trim() };
+  // An older item's requestedBy "proactive" said nobody asked (retired 2026-11-28): it names no one.
   } else if (kind === "request" || (!kind && requestedBy && !/^proactive$/i.test(requestedBy))) {
     origin = { kind: "request", text: `Asked by ${text(kind === "request" ? said.requestedBy : requestedBy, 120) ?? "someone"}` };
-  } else if (kind === "unknown") origin = { kind: "unknown", text: "What started it was not recorded" };
-  else origin = { kind: "proactive", text: "On the agent's own initiative" };
+  } else origin = { kind: "unknown", text: "What started it was not recorded" };
   if (threadId) origin.threadId = threadId;
   return { maker, origin };
 }

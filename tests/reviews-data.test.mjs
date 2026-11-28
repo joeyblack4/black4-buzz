@@ -212,7 +212,7 @@ test("the byline: who made it and what set it off; a signed agent only when Blac
   const { reviewByline } = await freshPlugin();
   // Older servers: madeBy whole, origin from job / requestedBy.
   assert.deepEqual(reviewByline(null, { madeBy: "copy-bot · Mira", requestedBy: "proactive" }),
-    { maker: { name: "copy-bot · Mira", agent: false, signed: false }, origin: { kind: "proactive", text: "On the agent's own initiative" } });
+    { maker: { name: "copy-bot · Mira", agent: false, signed: false }, origin: { kind: "unknown", text: "What started it was not recorded" } });
   assert.deepEqual(reviewByline(null, { madeBy: "x", requestedBy: "Pat Lee", threadId: "root-1" }).origin, { kind: "request", text: "Asked by Pat Lee", threadId: "root-1" });
   assert.deepEqual(reviewByline(null, { madeBy: "x", job: { jobId: "j1", jobName: "Competitor watch" } }).origin, { kind: "job", text: "Scheduled job Competitor watch" });
   // Platform Control's producer and origin (review-artifact slice A).

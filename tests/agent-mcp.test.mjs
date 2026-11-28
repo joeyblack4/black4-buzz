@@ -12,7 +12,7 @@ if (!existsSync(new URL("node_modules/@noble/curves/package.json", DIR))) {
   throw new Error("The connector's dependency is missing: run  npm ci --prefix bridge/black4-agent-mcp");
 }
 const CONNECTOR = new URL("black4-agent-mcp.mjs", DIR).pathname;
-const { schnorr, decodeNsec, secretKey, parseAuthTag, signRequest, signedUrl, eventId, STATUS_TOOL, agentLabel } = await import(CONNECTOR);
+const { schnorr, decodeNsec, secretKey, parseAuthTag, signRequest, signedUrl, eventId, STATUS_TOOL, agentLabel, createConnector } = await import(CONNECTOR);
 const { startFakeMcp, verifyRequest, authTagOwner } = await import(new URL("test/fake-black4-mcp.mjs", DIR).pathname);
 
 const hex = (b) => Buffer.from(b).toString("hex");
@@ -367,4 +367,35 @@ test("--call: an unseated agent's refusal carries Platform Control's code", asyn
   t.after(fake.close);
   const answer = await callOnce(envFor(id, fake.url));
   assert.deepEqual([answer.ok, answer.kind, answer.code], [false, "auth", "agent_unseated"]);
+});
+
+test("retries transient 503 on idempotent protocol reads (initialize / tools/list) during deploy cutovers, never tools/call", async (t) => {
+  const id = identity();
+  const fake = await startFakeMcp({ linked: new Set([id.owner]) });
+  t.after(fake.close);
+  let hits = 0;
+  let callHits = 0;
+  const fetchFn = async (url, init) => {
+    hits++;
+    const body = JSON.parse(Buffer.from(init.body).toString("utf8"));
+    if (body.method === "initialize" && hits === 1) {
+      return new Response("deploying", { status: 503, headers: { "content-type": "text/plain" } });
+    }
+    if (body.method === "tools/call") {
+      callHits++;
+      return new Response("deploying", { status: 503, headers: { "content-type": "text/plain" } });
+    }
+    return fetch(url, init);
+  };
+  const out = [];
+  const conn = createConnector({ env: envFor(id, fake.url), write: (m) => out.push(m), fetchFn });
+  await conn.handle({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "0" } } });
+  await conn.handle({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
+  await conn.handle({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "whoami", arguments: {} } });
+  const listed = out.find((m) => m.id === 2);
+  assert.ok(listed?.result?.tools?.some((tool) => tool.name === "whoami"), "initialize retried past 503 and tools/list succeeded");
+  const called = out.find((m) => m.id === 3);
+  assert.equal(called?.result?.isError, true, "tools/call surfaces 503 without retrying");
+  assert.equal(callHits, 1, "tools/call must never retry on 503");
+  assert.ok(hits >= 4, `expected retried initialize + tools/list + single tools/call, saw ${hits}`);
 });

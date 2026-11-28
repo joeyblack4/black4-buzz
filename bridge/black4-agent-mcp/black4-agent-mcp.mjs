@@ -211,19 +211,27 @@ export function createConnector({ env = process.env, write, fetchFn = fetch, log
     return `Black 4 answered with an error (HTTP ${result.status}${result.detail ? `: ${result.detail}` : ""}).`;
   }
 
+  const RETRYABLE_METHODS = new Set(["initialize", "notifications/initialized", "tools/list", "resources/list", "prompts/list", "ping"]);
+  const TRANSIENT_STATUSES = new Set([502, 503, 504]);
+  const RETRY_DELAYS_MS = [350, 750];
+
+  function sleep(ms, signal) {
+    return new Promise((resolve, reject) => {
+      if (signal.aborted) return reject(signal.reason || new Error("aborted"));
+      const onAbort = () => { clearTimeout(t); reject(signal.reason || new Error("aborted")); };
+      const t = setTimeout(() => { signal.removeEventListener("abort", onAbort); resolve(); }, ms);
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+
   /** POST one message. Messages in the reply are written straight through as
-   * they arrive (SSE progress included); failures come back as a result. */
+   * they arrive (SSE progress included); failures come back as a result.
+   * Idempotent protocol reads retry up to twice on transient 502/503/504 or
+   * socket reset so API revision cutovers do not derail active agent turns. */
   async function post(message, { passThrough = true } = {}) {
     if (setupProblem) return { kind: "setup" };
     const body = Buffer.from(JSON.stringify(message));
-    const headers = {
-      "content-type": "application/json",
-      accept: "application/json, text/event-stream",
-      authorization: signRequest({ secret, authTag, url: endpoint.href, body, now: now() }).header,
-    };
-    if (agentName) headers["x-black4-agent"] = agentName;
-    if (protocolVersion) headers["mcp-protocol-version"] = protocolVersion;
-    if (sessionId) headers["mcp-session-id"] = sessionId;
+    const canRetry = RETRYABLE_METHODS.has(message?.method);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(new Error("timeout")), timeoutMs);
     const id = message.method && message.id !== undefined ? message.id : undefined;
@@ -232,11 +240,32 @@ export function createConnector({ env = process.env, write, fetchFn = fetch, log
     const emit = (m) => { if (passThrough) write(m); collected.push(m); };
     try {
       let res;
-      try {
-        res = await fetchFn(endpoint.href, { method: "POST", headers, body, signal: controller.signal });
-      } catch (error) {
-        if (controller.signal.aborted) return { kind: controller.signal.reason?.message === "timeout" ? "timeout" : "cancelled" };
-        return { kind: "unreachable", detail: plain(error?.cause?.code || error?.message || "network error", 120) };
+      for (let attempt = 0; ; attempt++) {
+        const headers = {
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+          authorization: signRequest({ secret, authTag, url: endpoint.href, body, now: now() }).header,
+        };
+        if (agentName) headers["x-black4-agent"] = agentName;
+        if (protocolVersion) headers["mcp-protocol-version"] = protocolVersion;
+        if (sessionId) headers["mcp-session-id"] = sessionId;
+        try {
+          res = await fetchFn(endpoint.href, { method: "POST", headers, body, signal: controller.signal });
+        } catch (error) {
+          if (controller.signal.aborted) return { kind: controller.signal.reason?.message === "timeout" ? "timeout" : "cancelled" };
+          const code = error?.cause?.code;
+          if (canRetry && code !== "ECONNREFUSED" && attempt < RETRY_DELAYS_MS.length) {
+            await sleep(RETRY_DELAYS_MS[attempt], controller.signal);
+            continue;
+          }
+          return { kind: "unreachable", detail: plain(code || error?.message || "network error", 120) };
+        }
+        if (canRetry && TRANSIENT_STATUSES.has(res.status) && attempt < RETRY_DELAYS_MS.length) {
+          await res.arrayBuffer().catch(() => {});
+          await sleep(RETRY_DELAYS_MS[attempt], controller.signal);
+          continue;
+        }
+        break;
       }
       const sid = res.headers.get("mcp-session-id");
       if (sid) sessionId = sid;

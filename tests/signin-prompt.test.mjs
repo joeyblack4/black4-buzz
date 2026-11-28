@@ -321,6 +321,8 @@ test("Sign in opens the browser at the link that carries the code, once, and sho
   assert.equal(link.props.href, `${AUTHKIT}/device?user_code=WDJB-MJHT`, "the page can be opened again");
   assert.equal(link.props.target, "_blank");
   assert.match(text(view), /Confirm it in your browser/);
+  // WorkOS asks someone in several companies to pick one; whichever they pick, they get every company.
+  assert.match(text(view), /choose any one: you get every company you belong to/);
   assert.ok(button(view, "Cancel"));
   assert.equal(find(view, (n) => n.type === "form"), null, "never a form");
   await app.connected();
@@ -661,6 +663,7 @@ test("idle (HTTP 403 signin_idle): signed in still, every surface offers Approve
     assert.equal(button(view, "Sign in to Black 4"), null, "not signed out");
   }
   assert.ok(button(app.settings(), "Sign out"), "Sign out stays possible");
+  for (const view of [app.panel(), app.workspace()]) assert.ok(button(view, "Sign out"), "and from Reviews too, not only Settings");
   assert.match(app.badge().props["aria-label"], /Approve your Black 4 sign-in/);
   assert.equal(device.get(KEY), kept, "kept");
   assert.deepEqual(app.opened, []);
@@ -670,6 +673,7 @@ test("idle (HTTP 403 signin_idle): signed in still, every surface offers Approve
   await until(() => /RNEW-CODE/.test(text(app.preview())), { timeoutMs: 6000, what: "the code in the preview" });
   assert.match(text(app.preview()), /Confirm\s+RNEW-CODE\s+in your browser/, "compact: one line");
   assert.match(text(app.settings()), /RNEW-CODE/, "the same approval in Settings");
+  assert.doesNotMatch(text(app.settings()), /choose a company/, "the company note is for signing in, not approving");
   await app.connected();
   assert.equal(button(app.settings(), "Approve in browser"), null);
   assert.equal(device.get(KEY), kept);

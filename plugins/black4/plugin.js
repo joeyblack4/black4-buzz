@@ -1485,7 +1485,10 @@ export function apply(ctx) {
   const queueListeners = new Set();
   onQueue = (queue) => { for (const listener of [...queueListeners]) { try { listener(queue); } catch {} } };
   const reviews = reviewsSlot(ctx, {
-    use: () => { const current = useBridgeState(); return { status: current.status, detail: current.detail, waiting: current.waiting, connect: reconnect }; },
+    use: () => { const current = useBridgeState(); return { status: current.status, detail: current.detail, waiting: current.waiting, connect: reconnect,
+      account: current.account?.email ? { email: String(current.account.email) } : null }; },
+    // The person's own Sign out, the same one Settings → Black 4 runs: on every Reviews surface, not only there.
+    signOut: () => void signOut(),
     call: async (name, args, { timeoutMs = LINK_TIMEOUT_MS } = {}) => {
       if (state.status !== "connected") throw Object.assign(new Error("Black 4 is reconnecting. Try again once connected."), { code: "offline" });
       const attempt = generation;
@@ -1591,7 +1594,8 @@ export function apply(ctx) {
       ? h(ui.Actions, null, ui.Status(text), cancel(onCancel))
       : h(ui.Actions, null, h(ui.Button, { key: "busy", variant: "prominent", loading: true }, text), cancel(onCancel));
     // The code to confirm while the browser asks, with Copy; or one line.
-    const waiting = (code, onCancel) => {
+    // `signingIn`: a device sign-in, where WorkOS may ask for a company; never an approval renewal.
+    const waiting = (code, onCancel, signingIn = false) => {
       const open = h(ui.Button, { key: "open", size, variant: compact ? "subtle" : "outline", href: code.url }, "Open sign-in page");
       const words = code.userCode ? (compact ? `Confirm ${code.userCode} in your browser` : "Confirm it in your browser") : "Approve it in your browser";
       if (compact) return h(ui.Actions, null, ui.Status(words), open, cancel(onCancel));
@@ -1603,6 +1607,8 @@ export function apply(ctx) {
               .then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }, () => {});
           } }, copied ? "Copied" : "Copy code")) : null,
         ui.Status(words),
+        // WorkOS asks someone in several companies to choose one; Black 4 gives them all of theirs whichever they pick.
+        signingIn ? ui.Line("If the page asks you to choose a company, choose any one: you get every company you belong to.") : null,
         h(ui.Actions, null, open, cancel(onCancel)));
     };
     const renewing = current.status === "idle" || (renewal && current.status === "connected") ? current.renewal : null;
@@ -1618,7 +1624,7 @@ export function apply(ctx) {
               : renewing.reason === "link" ? "Linking your agents asks for a recent approval of this sign-in. You stay signed in."
                 : "Black 4 asks for a recent approval of this sign-in. You stay signed in." }, "Approve in browser"));
     }
-    if (current.status === "signing-in") return current.signIn ? waiting(current.signIn, cancelSignIn) : busy("Signing in…", cancelSignIn);
+    if (current.status === "signing-in") return current.signIn ? waiting(current.signIn, cancelSignIn, true) : busy("Signing in…", cancelSignIn);
     if (current.status !== "signed-out") return null;
     // Why the last sign-in ended is announced once, from Settings (which a
     // sign-in that ended opens, its button focused and described by it), not
@@ -4707,7 +4713,8 @@ function reviewScreens(React, store, bridge) {
    * `{ businessId?, assetId, itemKey? }`. `step`: { position, total, next,
    * previous } from the queue; `onBack`: to the queue. `onCommand` receives
    * this item's key commands while it is shown (shortcuts). */
-  function ReviewItem({ entry, step, onBack, onCommand, onSaved, bar = null }) {
+  /** `accountActions`: what the surface adds to the item's header (the side panel: Sign out). */
+  function ReviewItem({ entry, step, onBack, onCommand, onSaved, bar = null, accountActions = [] }) {
     const link = useConnection();
     useStore();
     const [state, setState] = React.useState({ review: null, error: null });
@@ -4781,6 +4788,7 @@ function reviewScreens(React, store, bridge) {
         step ? h(IconButton, { key: "prev", label: "Previous decision (K)", glyph: "up", large: true, disabled: !step.previous, onClick: () => step.previous?.() }) : null,
         step ? h(IconButton, { key: "next", label: "Next decision (J)", glyph: "down", large: true, disabled: !step.next, onClick: () => step.next?.() }) : null,
         h(IconButton, { key: "refresh", label: "Refresh", glyph: "refresh", large: true, onClick: () => setRevision((n) => n + 1) }),
+        ...accountActions,
       ].filter(Boolean) });
     const wrap = (title, body, bar = null, fit = false) =>
       h(Subview, { header: header(title), footer: bar }, h(PanelBody, { fit }, body));
@@ -4969,6 +4977,19 @@ function reviewsPart(ctx, bridge) {
   const disposers = [];
   const own = (dispose) => { if (typeof dispose === "function") disposers.push(dispose); else if (dispose?.dispose) disposers.push(() => dispose.dispose()); };
 
+  // ---- who is signed in, and Sign out, where Reviews shows ---------------------
+  // Signing out lived only in Settings → Black 4 (Joey, 2026-11-28: "extremely hard to sign out of"):
+  // every Reviews header names the account and carries Sign out. `wide`: the page, with room for the address.
+  function accountActions(link, wide) {
+    // Connected, or signed in but asked to approve again (idle): either way there is a sign-in to end.
+    if (!bridge.signOut || (link.status !== "connected" && link.status !== "idle")) return [];
+    const email = link.account?.email ?? "";
+    return [
+      wide && email ? h(React.Fragment, { key: "account" }, ui.Value(email)) : null,
+      h(ui.Button, { key: "sign-out", size: "sm", variant: "outline", title: email ? `Sign out of Black 4 (${email})` : "Sign out of Black 4", onClick: () => bridge.signOut() }, "Sign out"),
+    ].filter(Boolean);
+  }
+
   // ---- what the page shows: shared with the sidebar and notifications ----------
   // `goals`: the goal chosen per business ("" for all of them), for the session.
   let view = { filter: null, entry: null, goals: {} };
@@ -5134,7 +5155,7 @@ function reviewsPart(ctx, bridge) {
     const detail = current.entry
       ? h(ReviewItem, { key: "item", entry: current.entry, step, onCommand, bar: bulkBar })
       : link.status === "connected" && queue ? (bulkBar ? h(ui.Subview, { header: null, footer: bulkBar }, h(ui.PanelBody, null, empty)) : empty) : null;
-    return h(ui.Page, { label: "Reviews", fill: true, header: h(ui.PanelHeader, { title: "Reviews", glyph: "decisions", actions: [h(ui.IconButton, { key: "refresh", label: "Refresh", glyph: "refresh", large: true, onClick: () => bridge.queue.refresh() })] }),
+    return h(ui.Page, { label: "Reviews", fill: true, header: h(ui.PanelHeader, { title: "Reviews", glyph: "decisions", actions: [...accountActions(link, true), h(ui.IconButton, { key: "refresh", label: "Refresh", glyph: "refresh", large: true, onClick: () => bridge.queue.refresh() })] }),
       onFocus: focusIn, onBlur: focusOut },
       h(ui.Split, { key: "split", label: "Decisions waiting", list, listHeader, detail }));
   }
@@ -5154,7 +5175,7 @@ function reviewsPart(ctx, bridge) {
     const { link, queue, error, retry } = useQueue();
     const work = useWorked(filter, link.status === "connected");
     let body;
-    if (entry) body = h(ReviewItem, { entry, step, onBack: () => setEntry(null), onCommand });
+    if (entry) body = h(ReviewItem, { entry, step, onBack: () => setEntry(null), onCommand, accountActions: accountActions(link, false) });
     else {
       let list;
       if (link.status !== "connected") list = h(NotConnected, { link });
@@ -5164,7 +5185,7 @@ function reviewsPart(ctx, bridge) {
       // The whole queue's total, else the server's total for what is shown.
       const waiting = work.exact ? work.queue?.total : work.order.length;
       body = h(ui.Subview, { header: h(ui.PanelHeader, { title: waiting ? `${waiting} waiting` : "Reviews",
-        actions: [h(ui.IconButton, { key: "refresh", label: "Refresh", glyph: "refresh", large: true, onClick: () => bridge.queue.refresh() })] }) }, h(ui.PanelBody, null, list));
+        actions: [...accountActions(link, false), h(ui.IconButton, { key: "refresh", label: "Refresh", glyph: "refresh", large: true, onClick: () => bridge.queue.refresh() })] }) }, h(ui.PanelBody, null, list));
     }
     surface = { next: step.next, previous: step.previous };
     React.useEffect(() => () => { surface = null; surfaceFocused = false; }, []);

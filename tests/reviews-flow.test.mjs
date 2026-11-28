@@ -292,3 +292,22 @@ test("the page: its title drawn as Buzz's pages draw theirs, and the Customer an
   assert.deepEqual(menus(pinned), ["Customer", "Goal"]);
   assert.deepEqual(menus(scrolling), [], "and only once");
 });
+
+test("every Reviews header names the account and signs out in one click, as Settings does", async (t) => {
+  const a = await app(t);
+  await settle();
+  let view = a.page();
+  assert.match(a.label(view), /operator@example\.test/, "the page names who is signed in");
+  const signOut = a.button(view, "Sign out");
+  assert.ok(signOut, "Sign out sits in the page header");
+  assert.match(signOut.props.title, /operator@example\.test/);
+  // The side panel's queue has it too (no room for the address there).
+  assert.ok(a.button(a.panel("https://app.black4.ai/reviews"), "Sign out"), "Sign out sits in the side panel's header");
+  // A review opened straight into the side panel keeps it in its own header.
+  assert.ok(a.button(await a.shown(), "Sign out"), "Sign out sits in a side-panel review's header");
+  signOut.props.onClick();
+  await settle(); await settle();
+  view = a.page();
+  assert.equal(a.button(view, "Sign out"), null, "gone once signed out");
+  assert.ok(a.button(view, "Sign in to Black 4"), "Sign in in its place");
+});

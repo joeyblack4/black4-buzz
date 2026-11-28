@@ -89,3 +89,12 @@ test('Gemini signs in with a Google link and the pasted code, which goes to agy 
  assert(!JSON.stringify(ui.toJSON()).includes('good-code'),'the code is not kept on screen');
  await act(async()=>ui.unmount());cleanup();void base;
 });
+test('every subscription manifest declares processes the way Buzz accepts them',async()=>{
+ const {readFileSync}=await import('node:fs');
+ for(const dir of ['claude-subscription','grok-subscription','gemini-subscription']){
+  const m=JSON.parse(readFileSync(new URL(`../../plugins/${dir}/manifest.json`,import.meta.url)));
+  // Buzz's plugin manager (crates/plugin-manager valid_program): a bare program name, at most 16 arguments.
+  for(const p of m.host.processes){assert.match(p.program,/^[A-Za-z0-9._-]{1,80}$/,dir+' '+p.id);assert((p.args||[]).length<=16);}
+  assert(m.description.length<=280);
+ }
+});

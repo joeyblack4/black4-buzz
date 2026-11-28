@@ -14,10 +14,10 @@
       },
       {
         "id": "install",
-        "program": "/bin/sh",
+        "program": "bash",
         "args": [
           "-c",
-          "/usr/bin/curl -fsSL https://antigravity.google/cli/install.sh | /bin/bash"
+          "curl -fsSL https://antigravity.google/cli/install.sh | bash"
         ]
       }
     ],

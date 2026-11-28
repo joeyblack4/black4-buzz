@@ -247,7 +247,8 @@ function reviewScreens(React, store, bridge) {
    * `{ businessId?, assetId, itemKey? }`. `step`: { position, total, next,
    * previous } from the queue; `onBack`: to the queue. `onCommand` receives
    * this item's key commands while it is shown (shortcuts). */
-  function ReviewItem({ entry, step, onBack, onCommand, onSaved, bar = null }) {
+  /** `accountActions`: what the surface adds to the item's header (the side panel: Sign out). */
+  function ReviewItem({ entry, step, onBack, onCommand, onSaved, bar = null, accountActions = [] }) {
     const link = useConnection();
     useStore();
     const [state, setState] = React.useState({ review: null, error: null });
@@ -321,6 +322,7 @@ function reviewScreens(React, store, bridge) {
         step ? h(IconButton, { key: "prev", label: "Previous decision (K)", glyph: "up", large: true, disabled: !step.previous, onClick: () => step.previous?.() }) : null,
         step ? h(IconButton, { key: "next", label: "Next decision (J)", glyph: "down", large: true, disabled: !step.next, onClick: () => step.next?.() }) : null,
         h(IconButton, { key: "refresh", label: "Refresh", glyph: "refresh", large: true, onClick: () => setRevision((n) => n + 1) }),
+        ...accountActions,
       ].filter(Boolean) });
     const wrap = (title, body, bar = null, fit = false) =>
       h(Subview, { header: header(title), footer: bar }, h(PanelBody, { fit }, body));

@@ -61,7 +61,8 @@ function reviewsPart(ctx, bridge) {
   // Signing out lived only in Settings → Black 4 (Joey, 2026-11-28: "extremely hard to sign out of"):
   // every Reviews header names the account and carries Sign out. `wide`: the page, with room for the address.
   function accountActions(link, wide) {
-    if (!bridge.signOut || link.status !== "connected") return [];
+    // Connected, or signed in but asked to approve again (idle): either way there is a sign-in to end.
+    if (!bridge.signOut || (link.status !== "connected" && link.status !== "idle")) return [];
     const email = link.account?.email ?? "";
     return [
       wide && email ? h(React.Fragment, { key: "account" }, ui.Value(email)) : null,
@@ -254,7 +255,7 @@ function reviewsPart(ctx, bridge) {
     const { link, queue, error, retry } = useQueue();
     const work = useWorked(filter, link.status === "connected");
     let body;
-    if (entry) body = h(ReviewItem, { entry, step, onBack: () => setEntry(null), onCommand });
+    if (entry) body = h(ReviewItem, { entry, step, onBack: () => setEntry(null), onCommand, accountActions: accountActions(link, false) });
     else {
       let list;
       if (link.status !== "connected") list = h(NotConnected, { link });

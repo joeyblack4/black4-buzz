@@ -303,6 +303,8 @@ test("every Reviews header names the account and signs out in one click, as Sett
   assert.match(signOut.props.title, /operator@example\.test/);
   // The side panel's queue has it too (no room for the address there).
   assert.ok(a.button(a.panel("https://app.black4.ai/reviews"), "Sign out"), "Sign out sits in the side panel's header");
+  // A review opened straight into the side panel keeps it in its own header.
+  assert.ok(a.button(await a.shown(), "Sign out"), "Sign out sits in a side-panel review's header");
   signOut.props.onClick();
   await settle(); await settle();
   view = a.page();

@@ -4,6 +4,8 @@
 // `--check` refuses one that no longer matches its sources.
 //   node src/build.mjs [--check]
 import { readFileSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 /** Each module: its marker name and its source files, stamped in order. */
 export const MODULES = [
@@ -27,7 +29,7 @@ export function stampModule(text, name, body) {
 }
 export const moduleBody = (module) => module.files.map((file) => read(file).trimEnd()).join("\n\n");
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const check = process.argv.includes("--check");
   let text = read(TARGET);
   const original = text;

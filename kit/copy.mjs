@@ -12,6 +12,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 /** Buzz file → the kit's name for it and the rules taken, by selector. */
 export const TAKEN = {
@@ -63,7 +64,7 @@ export function take(css, selectors) {
   return rules;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const buzz = process.argv[2] && resolve(process.argv[2]);
   if (!buzz) { console.error("Usage: node kit/copy.mjs <block/buzz-app checkout>"); process.exit(2); }
   const label = execFileSync("git", ["-C", buzz, "describe", "--tags", "--always"], { encoding: "utf8" }).trim();

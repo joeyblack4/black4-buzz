@@ -60,7 +60,7 @@ function reviewScreens(React, store, bridge) {
   }
 
   // ---- who made it -----------------------------------------------------------------
-  const ORIGIN_GLYPH = { job: "clock", request: "message", proactive: "sparkles", unknown: null };
+  const ORIGIN_GLYPH = { job: "clock", request: "message", unknown: null };
   /** The maker (a Buzz identity when the review names an agent key) and what
    * set it off. `size`: the avatar's. */
   function Byline({ review, item, size = "small" }) {

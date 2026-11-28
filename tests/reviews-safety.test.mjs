@@ -5,20 +5,21 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { fakeAuthKit, fakeMcp, https, freshPlugin, settle } from "./fakes.mjs";
 
-const { appOnly, decides, agentText, APP_ONLY_TOOLS } = await freshPlugin();
+const { appOnly, decides, agentText, APP_ONLY_TOOLS, AGENT_DIRECT_LIMIT } = await freshPlugin();
 
 const TOKEN = `b4rd_${"t".repeat(43)}`;
 const GRANT = "https://review-content.example.test/v/grant-secret/hero.png";
 const META = { "ai.black4/review-card": { decisionTokens: { hero: { token: TOKEN, version: 1, expiresAt: "2099-01-01T00:00:00Z" } }, previews: { hero: { url: GRANT, contentType: "image/png" } } } };
 const review = { kind: "black4_review", businessId: "business-sample", assetId: "rv_sample", items: [] };
 
-async function harness(t, { tools, answer } = {}) {
+async function harness(t, { tools, answer, kind = "staff" } = {}) {
   const { apply, signInStore } = await freshPlugin();
   const registered = new Map();
   const authkit = fakeAuthKit();
   const mcp = fakeMcp(authkit, {
     answer: (message) => {
       if (message.method === "tools/list") return { result: { tools } };
+      if (message.params?.name === "whoami") return { result: { structuredContent: { data: { kind } } } };
       return answer(message);
     },
   });
@@ -111,6 +112,44 @@ test("a review an agent raises points back to its conversation: start_review def
   assert.equal(args[2].threadId, "chosen", "the agent's own choice stands");
   assert.equal(args[3].arguments.threadId, "root-9", "through call_tool too");
   assert.equal("threadId" in args[4], false, "outside a conversation, nothing is added");
+});
+
+test("customer review publication omits Buzz thread routing and keeps the job and review inputs", async (t) => {
+  const review = {
+    businessId: "business-sample",
+    runId: "run_sample",
+    items: [{ key: "strategy", workType: "document_feedback" }],
+  };
+  const explicitThread = { ...review, threadId: "chosen" };
+  const context = { channel: "chan-1", root: "root-9" };
+  const seen = [];
+  const answer = ({ params }) => {
+    const input = params?.name === "call_tool" ? params.arguments.arguments : params?.arguments;
+    if (params?.name === "start_review" || params?.name === "call_tool") {
+      seen.push(input);
+      if ("threadId" in input) {
+        const error = { code: "customer_publish_limited", message: "threadId is staff only" };
+        return { result: { isError: true, content: [{ type: "text", text: JSON.stringify({ error }) }] } };
+      }
+    }
+    return { result: { content: [{ type: "text", text: "published" }] } };
+  };
+  const direct = await harness(t, {
+    kind: "customer", tools: [listed("start_review"), listed("call_tool")], answer,
+  });
+  const compact = await harness(t, {
+    kind: "customer",
+    tools: [listed("start_review"), ...Array.from({ length: AGENT_DIRECT_LIMIT }, (_, index) => listed(`tool_${index}`))],
+    answer,
+  });
+  const client = { key: "agent" };
+  assert.equal(await direct.registered.get("black4_start_review").call(client, context, review), "published");
+  assert.equal(await direct.registered.get("black4_start_review").call(client, {}, explicitThread), "published");
+  assert.equal(await direct.registered.get("black4_call_tool").call(client, context, { name: "start_review", arguments: explicitThread }), "published");
+  assert.equal(compact.registered.has("black4_start_review"), false);
+  assert.equal(await compact.registered.get("black4_call_tool").call(client, context, { name: "start_review", arguments: explicitThread }), "published");
+  assert.deepEqual(seen, [review, review, review, review]);
+  assert.equal(explicitThread.threadId, "chosen", "the caller's arguments were untouched");
 });
 
 test("the queue's _meta (its capture links) never reaches an agent, directly or through call_tool", async (t) => {

@@ -734,15 +734,21 @@ export function apply(ctx) {
       );
     }
     let input = args ?? {};
-    // A review an agent raises from a conversation points back to it: when the
-    // agent passes no threadId, it defaults to the thread (else the channel)
-    // the call came from. A default for an optional parameter, never an override.
-    const reviewThread = context?.root ?? context?.channel;
-    if (typeof reviewThread === "string" && reviewThread) {
-      if (name === "start_review" && input && typeof input === "object" && input.threadId == null) input = { ...input, threadId: reviewThread };
-      if (name === "call_tool" && String(input?.name ?? "").trim().toLowerCase() === "start_review" && input.arguments && typeof input.arguments === "object" && input.arguments.threadId == null) {
-        input = { ...input, arguments: { ...input.arguments, threadId: reviewThread } };
+    // Only staff reviews can link back to a Buzz conversation. Customers may
+    // still publish in their company, so omit thread routing even when an
+    // agent picked it up from older instructions.
+    const wrappedReview = name === "call_tool" && String(input?.name ?? "").trim().toLowerCase() === "start_review";
+    const review = name === "start_review" ? input : wrappedReview ? input.arguments : undefined;
+    if (review && typeof review === "object") {
+      const reviewThread = context?.root ?? context?.channel;
+      let reviewInput = review;
+      if (state.account?.kind === "customer" && Object.hasOwn(review, "threadId")) {
+        reviewInput = { ...review };
+        delete reviewInput.threadId;
+      } else if (state.account?.kind === "staff" && typeof reviewThread === "string" && reviewThread && review.threadId == null) {
+        reviewInput = { ...review, threadId: reviewThread };
       }
+      input = wrappedReview ? { ...input, arguments: reviewInput } : reviewInput;
     }
     if (name === "resolve_channel_business" && context?.channel) {
       const relay = relayFor(client);
